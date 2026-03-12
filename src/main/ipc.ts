@@ -6,14 +6,11 @@ import * as terminal from './terminal'
 import { resolve } from 'node:path'
 
 export function registerIpcHandlers() {
-  // Agent
-  ipcMain.handle(IPC.AGENT_START, async (_, { cwd, model }: { cwd: string; model?: string }) => {
-    const sessionId = await agent.startSession(cwd, model)
-    return { sessionId }
-  })
-
+  // Agent — single call to send a prompt (auto-starts session)
   ipcMain.handle(IPC.AGENT_SEND, async (_, { message }: { message: string }) => {
-    await agent.sendMessage(message)
+    console.log('[ipc] agent:send', message.slice(0, 60))
+    const sessionId = await agent.sendPrompt(message)
+    return { sessionId }
   })
 
   ipcMain.handle(IPC.AGENT_STOP, async () => {
@@ -21,20 +18,11 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle(IPC.AGENT_PERMISSION_RESPOND, async (_, response) => {
-    agent.resolvePermission(
-      response.requestId,
-      response.behavior,
-      response.updatedPermissions
-    )
+    agent.resolvePermission(response.requestId, response.behavior, response.updatedPermissions)
   })
 
   ipcMain.handle(IPC.AGENT_LIST_SESSIONS, async (_, { cwd }: { cwd?: string }) => {
     return agent.getSessions(cwd)
-  })
-
-  ipcMain.handle(IPC.AGENT_RESUME, async (_, { sessionId }: { sessionId: string }) => {
-    // TODO: implement resume via unstable_v2_resumeSession
-    throw new Error('Resume not yet implemented')
   })
 
   // File system
@@ -67,4 +55,6 @@ export function registerIpcHandlers() {
   ipcMain.handle(IPC.TERM_CLOSE, async (_, { terminalId }: { terminalId: string }) => {
     terminal.closeTerminal(terminalId)
   })
+
+  console.log('[ipc] all handlers registered')
 }

@@ -3,9 +3,7 @@ import { IPC } from '../shared/types'
 import type { PermissionResponse } from '../shared/types'
 
 const api = {
-  // Agent
-  startAgent: (cwd: string, model?: string) =>
-    ipcRenderer.invoke(IPC.AGENT_START, { cwd, model }),
+  // Agent — just send a message, session auto-starts
   sendMessage: (message: string) =>
     ipcRenderer.invoke(IPC.AGENT_SEND, { message }),
   stopAgent: () =>
@@ -14,8 +12,6 @@ const api = {
     ipcRenderer.invoke(IPC.AGENT_PERMISSION_RESPOND, response),
   listSessions: (cwd?: string) =>
     ipcRenderer.invoke(IPC.AGENT_LIST_SESSIONS, { cwd }),
-  resumeSession: (sessionId: string) =>
-    ipcRenderer.invoke(IPC.AGENT_RESUME, { sessionId }),
 
   // File system
   readDir: (path: string) =>
@@ -35,7 +31,7 @@ const api = {
   closeTerminal: (terminalId: string) =>
     ipcRenderer.invoke(IPC.TERM_CLOSE, { terminalId }),
 
-  // Event listeners
+  // Events
   onAgentMessage: (cb: (msg: any) => void) => {
     const handler = (_: any, msg: any) => cb(msg)
     ipcRenderer.on(IPC.AGENT_MESSAGE, handler)

@@ -4,27 +4,24 @@ import type { UIMessage, PermissionRequest } from '../../shared/types'
 
 export function useAgent() {
   const [messages, setMessages] = useState<UIMessage[]>([])
-  const [sessionId, setSessionId] = useState<string | null>(null)
   const [isActive, setIsActive] = useState(false)
   const [permissionRequest, setPermissionRequest] = useState<PermissionRequest | null>(null)
-  const cleanupRef = useRef<(() => void)[]>([])
 
   useEffect(() => {
     const unsubs: (() => void)[] = []
 
     unsubs.push(api.onAgentMessage((msg: UIMessage) => {
       setMessages(prev => {
-        // If this is a streaming assistant message, replace the last streaming one
+        // Replace streaming assistant messages in-place
         if (msg.type === 'assistant' && msg.isStreaming) {
           const last = prev[prev.length - 1]
-          if (last?.type === 'assistant' && last.isStreaming && last.id === msg.id) {
+          if (last?.type === 'assistant' && last.isStreaming) {
             return [...prev.slice(0, -1), msg]
           }
         }
-        // If this is a finalized assistant message matching the last streaming one
         if (msg.type === 'assistant' && !msg.isStreaming) {
           const last = prev[prev.length - 1]
-          if (last?.type === 'assistant' && last.isStreaming && last.id === msg.id) {
+          if (last?.type === 'assistant' && last.isStreaming) {
             return [...prev.slice(0, -1), msg]
           }
         }
@@ -36,26 +33,13 @@ export function useAgent() {
       setPermissionRequest(req)
     }))
 
-    unsubs.push(api.onSessionStarted((info: { sessionId: string }) => {
-      setSessionId(info.sessionId)
-      setIsActive(true)
-    }))
+    unsubs.push(api.onSessionStarted(() => setIsActive(true)))
+    unsubs.push(api.onSessionEnded(() => setIsActive(false)))
 
-    unsubs.push(api.onSessionEnded(() => {
-      setIsActive(false)
-    }))
-
-    cleanupRef.current = unsubs
     return () => unsubs.forEach(fn => fn())
   }, [])
 
-  const startSession = useCallback(async (cwd: string, model?: string) => {
-    setMessages([])
-    const { sessionId } = await api.startAgent(cwd, model)
-    setSessionId(sessionId)
-    setIsActive(true)
-  }, [])
-
+  // Send a message — auto-starts a new session each time
   const sendMessage = useCallback(async (text: string) => {
     await api.sendMessage(text)
   }, [])
@@ -75,14 +59,7 @@ export function useAgent() {
     setPermissionRequest(null)
   }, [permissionRequest])
 
-  return {
-    messages,
-    sessionId,
-    isActive,
-    permissionRequest,
-    startSession,
-    sendMessage,
-    stopSession,
-    respondPermission,
-  }
+  const clearMessages = useCallback(() => setMessages([]), [])
+
+  return { messages, isActive, permissionRequest, sendMessage, stopSession, respondPermission, clearMessages }
 }
