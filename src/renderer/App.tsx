@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect } from 'react'
 import FileExplorer from './components/explorer/FileExplorer'
 import Editor from './components/editor/Editor'
 import ChatPanel from './components/chat/ChatPanel'
@@ -55,10 +55,6 @@ export default function App() {
     window.addEventListener('mouseup', onUp)
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
   }, [resizing])
-
-  const handleStartAgent = useCallback((cwd: string) => {
-    agent.startSession(cwd || CWD)
-  }, [agent])
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#0d1117', overflow: 'hidden' }}>
@@ -177,9 +173,8 @@ export default function App() {
             messages={agent.messages}
             isActive={agent.isActive}
             permissionRequest={agent.permissionRequest}
-            onSendMessage={agent.sendMessage}
+            onSend={agent.sendMessage}
             onStop={agent.stopSession}
-            onStart={handleStartAgent}
             onRespondPermission={agent.respondPermission}
           />
         </div>
@@ -194,7 +189,6 @@ export default function App() {
         <div style={{ display: 'flex', gap: 16 }}>
           <span>⚡ FS Code</span>
           {agent.isActive && <span style={{ color: '#3fb950' }}>● Agent</span>}
-          {agent.sessionId && <span>Session: {agent.sessionId.slice(0, 8)}</span>}
         </div>
         <div style={{ display: 'flex', gap: 16 }}>
           {editor.activeFilePath && <span>{editor.activeFilePath}</span>}
