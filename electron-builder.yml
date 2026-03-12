@@ -1,0 +1,16 @@
+appId: com.fscode.ide
+productName: FS Code
+directories:
+  buildResources: resources
+  output: dist
+files:
+  - out/**/*
+  - "!node_modules/**/*"
+  - node_modules/@anthropic-ai/claude-agent-sdk/**/*
+asar: false
+linux:
+  target: AppImage
+mac:
+  target: dmg
+win:
+  target: nsis
