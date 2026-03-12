@@ -1,65 +1,76 @@
 # FS Code
 
-Electron IDE built on the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk). Full Claude Code capabilities with a visual interface — Monaco editor, file explorer, agent chat panel, and terminal.
+Electron IDE built on the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk). Everything Claude Code does, but with a real visual interface instead of the terminal.
 
-## Prerequisites
+## What you need
 
-- [Bun](https://bun.sh) (v1.0+)
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated (`claude auth login`)
-- Node.js 18+
+1. **Node.js 18+** — [nodejs.org](https://nodejs.org)
+2. **Claude Code CLI** — install and log in:
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   claude auth login
+   ```
+3. **Bun** (recommended) or npm — [bun.sh](https://bun.sh)
 
-## Setup
+## Quick start
 
 ```bash
+# Clone
 git clone https://github.com/vihaanshahh/fs-code.git
 cd fs-code
+
+# Install dependencies
 bun install
-```
+# or: npm install
 
-## Development
-
-```bash
+# Run the app (opens Electron window)
 bun run dev
+# or: npm run dev
 ```
 
-Opens the Electron app with hot reload for the renderer.
+That's it. The app opens as a native desktop window with:
+- **Left sidebar** — file explorer
+- **Center** — Monaco code editor
+- **Right panel** — Claude agent chat (type a prompt, hit Enter)
+- **Bottom** — terminal (toggle with Ctrl+`)
 
-## Production build
+## Auth
 
-```bash
-bun run build
-bun run start
-```
+FS Code uses your existing Claude Code login. If you've already run `claude auth login`, you're good. The Agent SDK picks up your credentials automatically.
 
-## Architecture
+## Commands
+
+| Command | What it does |
+|---|---|
+| `bun run dev` | Run in dev mode with hot reload |
+| `bun run build` | Build for production |
+| `bun run start` | Run the production build |
+
+## How it works
+
+The app imports `@anthropic-ai/claude-agent-sdk` in the Electron main process and calls `query()` with streaming input for multi-turn conversations. All SDK messages (text, tool calls, permissions, results) are forwarded to the React renderer via IPC.
+
+- **Streaming** — tokens appear in real-time as Claude thinks
+- **Tool calls** — Bash, Read, Edit, Grep, etc. shown as expandable cards
+- **Permissions** — when Claude wants to run something, you get an Allow/Deny dialog
+- **Session cost** — tracked and shown per conversation
+
+## Project structure
 
 ```
 src/
-├── main/                    # Electron main process
-│   ├── index.ts             # Window creation, lifecycle
-│   ├── agent.ts             # Claude Agent SDK integration
-│   ├── ipc.ts               # IPC handler registration
-│   ├── file-system.ts       # File read/write for explorer
-│   └── terminal.ts          # Shell process management
+├── main/              # Electron main process
+│   ├── index.ts       # Window, lifecycle
+│   ├── agent.ts       # Agent SDK integration (query, permissions, streaming)
+│   ├── ipc.ts         # IPC handlers
+│   ├── file-system.ts # File ops for explorer
+│   └── terminal.ts    # Shell process
 ├── preload/
-│   └── index.ts             # contextBridge API
-├── renderer/                # React app
-│   ├── App.tsx              # Main layout
-│   ├── components/
-│   │   ├── chat/            # Agent conversation panel
-│   │   ├── editor/          # Monaco editor
-│   │   ├── explorer/        # File tree
-│   │   └── terminal/        # Terminal emulator
-│   └── hooks/               # useAgent, useEditor, useFileTree
+│   └── index.ts       # contextBridge (secure IPC bridge)
+├── renderer/          # React UI
+│   ├── App.tsx        # Layout
+│   ├── components/    # Editor, FileExplorer, ChatPanel, Terminal
+│   └── hooks/         # useAgent, useEditor, useFileTree
 └── shared/
-    └── types.ts             # IPC contract types
+    └── types.ts       # IPC channel types shared across processes
 ```
-
-### How it works
-
-The main process uses the Agent SDK's `query()` function with `AsyncIterable<SDKUserMessage>` input for multi-turn conversations. Messages stream back as `SDKMessage` events and are forwarded to the renderer via IPC.
-
-- **Auth**: Inherits from Claude Code's existing authentication
-- **Permissions**: Tool permission requests are forwarded to the UI as approval dialogs
-- **Streaming**: `includePartialMessages: true` enables real-time token streaming
-- **Tools**: All Claude Code tools (Bash, Read, Edit, Grep, etc.) work through the SDK
