@@ -1,65 +1,148 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useSyncExternalStore } from 'react'
 import { api } from '../lib/api'
 import type { UIMessage, PermissionRequest } from '../../shared/types'
 
-export function useAgent() {
-  const [messages, setMessages] = useState<UIMessage[]>([])
-  const [isActive, setIsActive] = useState(false)
-  const [permissionRequest, setPermissionRequest] = useState<PermissionRequest | null>(null)
+// ── Global message cache ──
+// Messages persist here across component mount/unmount cycles (e.g. pill mode).
+// IPC listeners run once at module load — they never tear down.
 
-  useEffect(() => {
-    const unsubs: (() => void)[] = []
+interface AgentState {
+  messages: UIMessage[]
+  isActive: boolean
+  permissionRequest: PermissionRequest | null
+}
 
-    unsubs.push(api.onAgentMessage((msg: UIMessage) => {
-      setMessages(prev => {
-        // Replace streaming assistant messages in-place
-        if (msg.type === 'assistant' && msg.isStreaming) {
-          const last = prev[prev.length - 1]
-          if (last?.type === 'assistant' && last.isStreaming) {
-            return [...prev.slice(0, -1), msg]
-          }
-        }
-        if (msg.type === 'assistant' && !msg.isStreaming) {
-          const last = prev[prev.length - 1]
-          if (last?.type === 'assistant' && last.isStreaming) {
-            return [...prev.slice(0, -1), msg]
-          }
-        }
-        return [...prev, msg]
-      })
-    }))
+const cache = new Map<string, AgentState>()
+const listeners = new Set<() => void>()
 
-    unsubs.push(api.onPermissionRequest((req: PermissionRequest) => {
-      setPermissionRequest(req)
-    }))
+function getState(agentId: string): AgentState {
+  let s = cache.get(agentId)
+  if (!s) {
+    s = { messages: [], isActive: false, permissionRequest: null }
+    cache.set(agentId, s)
+  }
+  return s
+}
 
-    unsubs.push(api.onSessionStarted(() => setIsActive(true)))
-    unsubs.push(api.onSessionEnded(() => setIsActive(false)))
+function setState(agentId: string, updater: (prev: AgentState) => AgentState) {
+  const prev = getState(agentId)
+  const next = updater(prev)
+  if (next !== prev) {
+    cache.set(agentId, next)
+    listeners.forEach(fn => fn())
+  }
+}
 
-    return () => unsubs.forEach(fn => fn())
-  }, [])
+function subscribe(cb: () => void) {
+  listeners.add(cb)
+  return () => { listeners.delete(cb) }
+}
 
-  // Send a message — auto-starts a new session each time
+// ── Always-on IPC listeners (registered once at module load) ──
+
+api.onAgentMessage((data: any) => {
+  const agentId = data.agentId as string
+  const msg: UIMessage = data
+  setState(agentId, prev => {
+    const msgs = prev.messages
+    if (msg.type === 'assistant' && msg.isStreaming) {
+      const last = msgs[msgs.length - 1]
+      if (last?.type === 'assistant' && last.isStreaming) {
+        return { ...prev, messages: [...msgs.slice(0, -1), msg] }
+      }
+    }
+    if (msg.type === 'assistant' && !msg.isStreaming) {
+      const last = msgs[msgs.length - 1]
+      if (last?.type === 'assistant' && last.isStreaming) {
+        return { ...prev, messages: [...msgs.slice(0, -1), msg] }
+      }
+    }
+    return { ...prev, messages: [...msgs, msg] }
+  })
+})
+
+api.onPermissionRequest((data: any) => {
+  setState(data.agentId, prev => ({ ...prev, permissionRequest: data }))
+})
+
+api.onSessionStarted((data: any) => {
+  setState(data.agentId, prev => ({ ...prev, isActive: true }))
+})
+
+api.onSessionEnded((data: any) => {
+  setState(data.agentId, prev => ({ ...prev, isActive: false }))
+})
+
+// ── Public: clear cache for a destroyed agent ──
+export function clearAgentCache(agentId: string) {
+  cache.delete(agentId)
+  listeners.forEach(fn => fn())
+}
+
+// ── Hook ──
+
+export function useAgent(agentId: string) {
+  // Subscribe to the global cache via useSyncExternalStore
+  const state = useSyncExternalStore(
+    subscribe,
+    () => getState(agentId),
+  )
+
+  const { messages, isActive, permissionRequest } = state
+
   const sendMessage = useCallback(async (text: string) => {
-    await api.sendMessage(text)
-  }, [])
+    await api.sendMessage(agentId, text)
+  }, [agentId])
 
   const stopSession = useCallback(async () => {
-    await api.stopAgent()
-    setIsActive(false)
-  }, [])
+    await api.stopAgent(agentId)
+    setState(agentId, prev => ({ ...prev, isActive: false }))
+  }, [agentId])
 
-  const respondPermission = useCallback(async (behavior: 'allow' | 'deny') => {
-    if (!permissionRequest) return
-    await api.respondPermission({
-      requestId: permissionRequest.requestId,
+  const respondPermission = useCallback(async (behavior: 'allow' | 'deny', updatedInput?: Record<string, unknown>) => {
+    const pr = getState(agentId).permissionRequest
+    if (!pr) return
+    await api.respondPermission(agentId, {
+      requestId: pr.requestId,
       behavior,
-      updatedPermissions: behavior === 'allow' ? permissionRequest.suggestions : undefined,
+      updatedPermissions: behavior === 'allow' ? pr.suggestions : undefined,
+      updatedInput,
     })
-    setPermissionRequest(null)
-  }, [permissionRequest])
+    setState(agentId, prev => ({ ...prev, permissionRequest: null }))
+  }, [agentId])
 
-  const clearMessages = useCallback(() => setMessages([]), [])
+  const clearMessages = useCallback(() => {
+    setState(agentId, prev => ({ ...prev, messages: [] }))
+    api.clearSession(agentId)
+  }, [agentId])
 
-  return { messages, isActive, permissionRequest, sendMessage, stopSession, respondPermission, clearMessages }
+  const resumeSession = useCallback(async (sessionId: string) => {
+    await api.resumeSession(agentId, sessionId)
+  }, [agentId])
+
+  const continueSession = useCallback(async () => {
+    await api.continueSession(agentId)
+  }, [agentId])
+
+  const clearPermission = useCallback(() => {
+    setState(agentId, prev => ({ ...prev, permissionRequest: null }))
+  }, [agentId])
+
+  const addSystemMessage = useCallback((text: string) => {
+    setState(agentId, prev => ({
+      ...prev,
+      messages: [...prev.messages, {
+        id: Math.random().toString(36).slice(2, 10),
+        type: 'system' as const,
+        text,
+        ts: Date.now(),
+      }],
+    }))
+  }, [agentId])
+
+  return {
+    messages, isActive, permissionRequest,
+    sendMessage, stopSession, respondPermission, clearPermission, clearMessages,
+    resumeSession, continueSession, addSystemMessage,
+  }
 }

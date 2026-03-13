@@ -1,5 +1,5 @@
-appId: com.fscode.ide
-productName: FS Code
+appId: com.fluidstate.app
+productName: FluidState
 directories:
   buildResources: resources
   output: dist
@@ -7,10 +7,34 @@ files:
   - out/**/*
   - "!node_modules/**/*"
   - node_modules/@anthropic-ai/claude-agent-sdk/**/*
-asar: false
-linux:
-  target: AppImage
+  - node_modules/shaders/**/*
+asar: true
 mac:
-  target: dmg
+  target:
+    - dmg
+    - zip
+  category: public.app-category.developer-tools
+  icon: resources/icon.icns
+  darkModeSupport: true
 win:
-  target: nsis
+  target:
+    - nsis
+  icon: resources/icon.png
+linux:
+  target:
+    - AppImage
+    - deb
+  icon: resources/icon.png
+  category: Development
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+dmg:
+  iconSize: 100
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications

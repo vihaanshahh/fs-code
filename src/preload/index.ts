@@ -3,23 +3,71 @@ import { IPC } from '../shared/types'
 import type { PermissionResponse } from '../shared/types'
 
 const api = {
-  // Agent — just send a message, session auto-starts
-  sendMessage: (message: string) =>
-    ipcRenderer.invoke(IPC.AGENT_SEND, { message }),
-  stopAgent: () =>
-    ipcRenderer.invoke(IPC.AGENT_STOP),
-  respondPermission: (response: PermissionResponse) =>
-    ipcRenderer.invoke(IPC.AGENT_PERMISSION_RESPOND, response),
+  // Auth
+  authStatus: () => ipcRenderer.invoke(IPC.AUTH_STATUS),
+  authLogin: () => ipcRenderer.invoke(IPC.AUTH_LOGIN),
+  authLogout: () => ipcRenderer.invoke(IPC.AUTH_LOGOUT),
+
+  // Dialog
+  openFolderDialog: (): Promise<string | null> =>
+    ipcRenderer.invoke(IPC.DIALOG_OPEN_FOLDER),
+
+  // Agent lifecycle
+  createAgent: (name: string, cwd: string) =>
+    ipcRenderer.invoke(IPC.AGENT_CREATE, { name, cwd }),
+  closeAgent: (agentId: string) =>
+    ipcRenderer.invoke(IPC.AGENT_CLOSE, { agentId }),
+  listAgents: () =>
+    ipcRenderer.invoke(IPC.AGENT_LIST),
+
+  // Agent messaging — all take agentId
+  sendMessage: (agentId: string, message: string) =>
+    ipcRenderer.invoke(IPC.AGENT_SEND, { agentId, message }),
+  stopAgent: (agentId: string) =>
+    ipcRenderer.invoke(IPC.AGENT_STOP, { agentId }),
+  respondPermission: (agentId: string, response: PermissionResponse) =>
+    ipcRenderer.invoke(IPC.AGENT_PERMISSION_RESPOND, { agentId, requestId: response.requestId, behavior: response.behavior, updatedPermissions: response.updatedPermissions, updatedInput: response.updatedInput }),
   listSessions: (cwd?: string) =>
     ipcRenderer.invoke(IPC.AGENT_LIST_SESSIONS, { cwd }),
+  resumeSession: (agentId: string, sessionId: string) =>
+    ipcRenderer.invoke(IPC.AGENT_RESUME, { agentId, sessionId }),
+  continueSession: (agentId: string) =>
+    ipcRenderer.invoke(IPC.AGENT_CONTINUE, { agentId }),
+  renameSession: (sessionId: string, title: string) =>
+    ipcRenderer.invoke(IPC.AGENT_RENAME, { sessionId, title }),
+  cliRun: (args: string[], cwd?: string): Promise<{ stdout?: string; stderr?: string; error?: string }> =>
+    ipcRenderer.invoke(IPC.CLI_RUN, { args, cwd }),
+  /** Emit a system message that goes through IPC so all useAgent listeners see it */
+  emitSystemMessage: (agentId: string, text: string) =>
+    ipcRenderer.invoke(IPC.AGENT_EMIT_SYSTEM, { agentId, text }),
+  setPermissionMode: (agentId: string, mode: string): Promise<string> =>
+    ipcRenderer.invoke(IPC.AGENT_SET_PERMISSION_MODE, { agentId, mode }),
+  getPermissionMode: (agentId: string): Promise<string> =>
+    ipcRenderer.invoke(IPC.AGENT_GET_PERMISSION_MODE, { agentId }),
+  clearSession: (agentId: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.AGENT_CLEAR_SESSION, { agentId }),
+
+  // Usage
+  fetchUsage: (): Promise<Record<string, unknown>> =>
+    ipcRenderer.invoke(IPC.USAGE_FETCH),
+
+  // Model
+  getModelInfo: (agentId: string): Promise<{ current: string; models: { value: string; displayName: string; description: string }[] }> =>
+    ipcRenderer.invoke(IPC.AGENT_GET_MODEL, { agentId }),
+  setModel: (agentId: string, model: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.AGENT_SET_MODEL, { agentId, model }),
 
   // File system
   readDir: (path: string) =>
     ipcRenderer.invoke(IPC.FS_READ_DIR, { path }),
-  readFile: (path: string) =>
-    ipcRenderer.invoke(IPC.FS_READ_FILE, { path }),
+  readFile: (path: string, cwd?: string) =>
+    ipcRenderer.invoke(IPC.FS_READ_FILE, { path, cwd }),
   writeFile: (path: string, content: string) =>
     ipcRenderer.invoke(IPC.FS_WRITE_FILE, { path, content }),
+  gitDiff: (path: string, cwd?: string) =>
+    ipcRenderer.invoke(IPC.FS_GIT_DIFF, { path, cwd }),
+  gitStatus: (cwd: string): Promise<{ files: { path: string; status: string }[] }> =>
+    ipcRenderer.invoke(IPC.FS_GIT_STATUS, { cwd }),
 
   // Terminal
   createTerminal: (cwd: string) =>
@@ -31,24 +79,30 @@ const api = {
   closeTerminal: (terminalId: string) =>
     ipcRenderer.invoke(IPC.TERM_CLOSE, { terminalId }),
 
-  // Events
-  onAgentMessage: (cb: (msg: any) => void) => {
-    const handler = (_: any, msg: any) => cb(msg)
+  // Window pill mode
+  minimizeToPill: (agentCount: number) =>
+    ipcRenderer.invoke(IPC.WINDOW_MINIMIZE_PILL, { agentCount }),
+  restoreFromPill: () =>
+    ipcRenderer.invoke(IPC.WINDOW_RESTORE_PILL),
+
+  // Events — all agent events now include { agentId, ...payload }
+  onAgentMessage: (cb: (data: any) => void) => {
+    const handler = (_: any, data: any) => cb(data)
     ipcRenderer.on(IPC.AGENT_MESSAGE, handler)
     return () => ipcRenderer.removeListener(IPC.AGENT_MESSAGE, handler)
   },
-  onPermissionRequest: (cb: (req: any) => void) => {
-    const handler = (_: any, req: any) => cb(req)
+  onPermissionRequest: (cb: (data: any) => void) => {
+    const handler = (_: any, data: any) => cb(data)
     ipcRenderer.on(IPC.AGENT_PERMISSION_REQUEST, handler)
     return () => ipcRenderer.removeListener(IPC.AGENT_PERMISSION_REQUEST, handler)
   },
-  onSessionStarted: (cb: (info: any) => void) => {
-    const handler = (_: any, info: any) => cb(info)
+  onSessionStarted: (cb: (data: any) => void) => {
+    const handler = (_: any, data: any) => cb(data)
     ipcRenderer.on(IPC.AGENT_SESSION_STARTED, handler)
     return () => ipcRenderer.removeListener(IPC.AGENT_SESSION_STARTED, handler)
   },
-  onSessionEnded: (cb: (info: any) => void) => {
-    const handler = (_: any, info: any) => cb(info)
+  onSessionEnded: (cb: (data: any) => void) => {
+    const handler = (_: any, data: any) => cb(data)
     ipcRenderer.on(IPC.AGENT_SESSION_ENDED, handler)
     return () => ipcRenderer.removeListener(IPC.AGENT_SESSION_ENDED, handler)
   },

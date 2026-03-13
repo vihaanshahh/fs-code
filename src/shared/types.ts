@@ -17,6 +17,8 @@ export type UIMessage =
   | { id: string; type: 'result'; cost: number; duration: number; numTurns: number; ts: number }
   | { id: string; type: 'error'; message: string; ts: number }
   | { id: string; type: 'system'; text: string; ts: number }
+  | { id: string; type: 'usage'; utilization: number; resetsAt: number | null; limitType: string; status: string; ts: number }
+  | { id: string; type: 'token-usage'; inputTokens: number; outputTokens: number; ts: number }
 
 export interface PermissionRequest {
   requestId: string
@@ -30,6 +32,25 @@ export interface PermissionResponse {
   requestId: string
   behavior: 'allow' | 'deny'
   updatedPermissions?: unknown[]
+  updatedInput?: Record<string, unknown>
+}
+
+// AskUserQuestion tool input shape (from Claude Agent SDK)
+export interface AskUserQuestionOption {
+  label: string
+  description: string
+  markdown?: string
+}
+
+export interface AskUserQuestionItem {
+  question: string
+  header: string
+  options: AskUserQuestionOption[]
+  multiSelect: boolean
+}
+
+export interface AskUserQuestionInput {
+  questions: AskUserQuestionItem[]
 }
 
 export interface SessionInfo {
@@ -39,8 +60,102 @@ export interface SessionInfo {
   cwd?: string
 }
 
+// Multi-agent descriptor
+export interface AgentDescriptor {
+  id: string
+  name: string
+  cwd: string
+  isActive: boolean
+}
+
+// Slash command definition
+export interface SlashCommand {
+  command: string
+  description: string
+  category: 'session' | 'agent' | 'view' | 'config' | 'history' | 'info' | 'misc'
+  aliases?: string[]
+}
+
+// Keyboard shortcut definition
+export interface KeyboardShortcut {
+  keys: string
+  description: string
+  category: 'navigation' | 'agent' | 'view'
+}
+
+// AI journey phases
+export type AgentPhase =
+  | 'idle'
+  | 'thinking'
+  | 'researching'
+  | 'searching'
+  | 'planning'
+  | 'coding'
+  | 'testing'
+  | 'debugging'
+  | 'reviewing'
+  | 'done'
+  | 'stuck'
+  | 'awaiting'
+
+export interface PhaseInfo {
+  phase: AgentPhase
+  label: string
+  detail: string // e.g. "Reading package.json..."
+  color: string
+  startedAt: number
+}
+
+// File activity tracking
+export type FileOperationType = 'read' | 'write' | 'create' | 'execute'
+
+export interface FileOperation {
+  type: FileOperationType
+  toolUseId: string
+  toolName: string
+  timestamp: number
+  agentId?: string
+  agentName?: string
+  // Edit tool: old_string / new_string for diff display
+  editOldString?: string
+  editNewString?: string
+  // Write tool: full content written
+  writeContent?: string
+}
+
+export interface TrackedFile {
+  path: string
+  basename: string
+  operations: FileOperation[]
+  firstSeen: number
+  lastSeen: number
+}
+
+// Auth status from `claude auth status`
+export interface AuthStatus {
+  authenticated: boolean
+  email?: string
+  organization?: string
+  error?: string
+}
+
+// Permission modes (mirrors SDK PermissionMode)
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' | 'dontAsk'
+
+export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
+  default: 'Default',
+  acceptEdits: 'Accept Edits',
+  plan: 'Plan Mode',
+  bypassPermissions: 'Bypass All',
+  dontAsk: "Don't Ask",
+}
+
 // IPC channel names
 export const IPC = {
+  // Auth
+  AUTH_LOGIN: 'auth:login',
+  AUTH_LOGOUT: 'auth:logout',
+  AUTH_STATUS: 'auth:status',
   // Agent
   AGENT_START: 'agent:start',
   AGENT_SEND: 'agent:send',
@@ -48,15 +163,31 @@ export const IPC = {
   AGENT_PERMISSION_RESPOND: 'agent:permission-respond',
   AGENT_LIST_SESSIONS: 'agent:list-sessions',
   AGENT_RESUME: 'agent:resume',
+  AGENT_CONTINUE: 'agent:continue',
+  AGENT_CREATE: 'agent:create',
+  AGENT_CLOSE: 'agent:close',
+  AGENT_LIST: 'agent:list',
+  AGENT_RENAME: 'agent:rename',
+  AGENT_SET_PERMISSION_MODE: 'agent:set-permission-mode',
+  AGENT_GET_PERMISSION_MODE: 'agent:get-permission-mode',
+  AGENT_CLEAR_SESSION: 'agent:clear-session',
+  // CLI passthrough (runs `claude` CLI commands)
+  CLI_RUN: 'cli:run',
+  // Emit a local system message (renderer -> main -> renderer broadcast)
+  AGENT_EMIT_SYSTEM: 'agent:emit-system',
   // Agent events (main -> renderer)
   AGENT_MESSAGE: 'agent:message',
   AGENT_PERMISSION_REQUEST: 'agent:permission-request',
   AGENT_SESSION_STARTED: 'agent:session-started',
   AGENT_SESSION_ENDED: 'agent:session-ended',
+  // Dialog
+  DIALOG_OPEN_FOLDER: 'dialog:open-folder',
   // File system
   FS_READ_DIR: 'fs:read-dir',
   FS_READ_FILE: 'fs:read-file',
   FS_WRITE_FILE: 'fs:write-file',
+  FS_GIT_DIFF: 'fs:git-diff',
+  FS_GIT_STATUS: 'fs:git-status',
   // Terminal
   TERM_CREATE: 'term:create',
   TERM_WRITE: 'term:write',
@@ -64,4 +195,11 @@ export const IPC = {
   TERM_CLOSE: 'term:close',
   TERM_DATA: 'term:data',
   TERM_EXIT: 'term:exit',
+  // Usage & Model
+  USAGE_FETCH: 'usage:fetch',
+  AGENT_GET_MODEL: 'agent:get-model',
+  AGENT_SET_MODEL: 'agent:set-model',
+  // Window pill mode
+  WINDOW_MINIMIZE_PILL: 'window:minimize-pill',
+  WINDOW_RESTORE_PILL: 'window:restore-pill',
 } as const

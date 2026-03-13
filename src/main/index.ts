@@ -1,10 +1,16 @@
-import { app, BrowserWindow, shell, dialog } from 'electron'
+import { app, BrowserWindow, shell, dialog, nativeImage, Menu } from 'electron'
 import { join } from 'node:path'
+
+// Set app name before anything else
+app.name = 'FluidState'
+if (process.platform === 'darwin') {
+  app.setName('FluidState')
+}
 
 // Catch unhandled errors
 process.on('uncaughtException', (err) => {
   console.error('[main] uncaughtException:', err)
-  try { dialog.showErrorBox('FS Code Error', err.message + '\n\n' + err.stack) } catch {}
+  try { dialog.showErrorBox('FluidState Error', err.message + '\n\n' + err.stack) } catch {}
 })
 process.on('unhandledRejection', (err: any) => {
   console.error('[main] unhandledRejection:', err)
@@ -21,6 +27,7 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
     backgroundColor: '#0d1117',
+    icon: join(__dirname, '../../resources/icon.png'),
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 12, y: 12 } } : {}),
     show: true, // Show immediately — no waiting
@@ -66,6 +73,38 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   console.log('[main] app ready, pid:', process.pid)
+
+  // Set dock icon on macOS
+  const iconPath = join(__dirname, '../../resources/icon.png')
+  if (process.platform === 'darwin' && app.dock) {
+    app.dock.setIcon(nativeImage.createFromPath(iconPath))
+  }
+
+  // Set custom menu so Electron's default accelerators don't swallow our shortcuts
+  if (process.platform === 'darwin') {
+    const template: Electron.MenuItemConstructorOptions[] = [
+      { role: 'appMenu' },
+      { role: 'editMenu' },
+      {
+        label: 'View',
+        submenu: [
+          { role: 'reload' },
+          { role: 'forceReload' },
+          { role: 'toggleDevTools' },
+          { type: 'separator' },
+          { role: 'togglefullscreen' },
+        ],
+      },
+      {
+        label: 'Window',
+        submenu: [
+          // Cmd+M minimize removed — we use Cmd+Shift+M in the renderer
+          { role: 'close' },
+        ],
+      },
+    ]
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+  }
 
   // Create window FIRST so user sees something
   createWindow()

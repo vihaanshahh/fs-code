@@ -1,0 +1,717 @@
+import React, { useEffect, useState } from 'react'
+import type { TrackedFile, FileOperation, FileOperationType } from '../../../shared/types'
+import { useTheme } from '../../ThemeContext'
+import type { ThemeColors } from '../../theme'
+import { api } from '../../lib/api'
+
+// ── Diff computation ───────────────────────────────────────────────
+
+interface DiffLine {
+  type: 'add' | 'remove' | 'context'
+  content: string
+  oldNum?: number
+  newNum?: number
+}
+
+interface DiffHunk {
+  oldStart: number
+  oldCount: number
+  newStart: number
+  newCount: number
+  lines: DiffLine[]
+}
+
+/** Simple LCS-based line diff */
+function computeLineDiff(oldStr: string, newStr: string): DiffLine[] {
+  const oldLines = oldStr.split('\n')
+  const newLines = newStr.split('\n')
+  const m = oldLines.length
+  const n = newLines.length
+
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0))
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = oldLines[i - 1] === newLines[j - 1]
+        ? dp[i - 1][j - 1] + 1
+        : Math.max(dp[i - 1][j], dp[i][j - 1])
+    }
+  }
+
+  let i = m, j = n
+  const stack: DiffLine[] = []
+
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+      stack.push({ type: 'context', content: oldLines[i - 1], oldNum: i, newNum: j })
+      i--; j--
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      stack.push({ type: 'add', content: newLines[j - 1], newNum: j })
+      j--
+    } else {
+      stack.push({ type: 'remove', content: oldLines[i - 1], oldNum: i })
+      i--
+    }
+  }
+
+  const result: DiffLine[] = []
+  while (stack.length) result.push(stack.pop()!)
+  return result
+}
+
+/** Split a flat diff into hunks with N lines of context */
+function splitIntoHunks(lines: DiffLine[], contextLines = 3): DiffHunk[] {
+  const changedIndices: number[] = []
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].type !== 'context') changedIndices.push(i)
+  }
+  if (changedIndices.length === 0) return []
+
+  const groups: [number, number][] = []
+  let start = changedIndices[0]
+  let end = changedIndices[0]
+  for (let k = 1; k < changedIndices.length; k++) {
+    if (changedIndices[k] - end <= contextLines * 2 + 1) {
+      end = changedIndices[k]
+    } else {
+      groups.push([start, end])
+      start = changedIndices[k]
+      end = changedIndices[k]
+    }
+  }
+  groups.push([start, end])
+
+  const hunks: DiffHunk[] = []
+  for (const [gs, ge] of groups) {
+    const hunkStart = Math.max(0, gs - contextLines)
+    const hunkEnd = Math.min(lines.length - 1, ge + contextLines)
+    const hunkLines = lines.slice(hunkStart, hunkEnd + 1)
+
+    const oldStart = hunkLines[0]?.oldNum ?? hunkLines.find(l => l.oldNum)?.oldNum ?? 1
+    const newStart = hunkLines[0]?.newNum ?? hunkLines.find(l => l.newNum)?.newNum ?? 1
+    const oldCount = hunkLines.filter(l => l.type !== 'add').length
+    const newCount = hunkLines.filter(l => l.type !== 'remove').length
+
+    hunks.push({ oldStart, oldCount, newStart, newCount, lines: hunkLines })
+  }
+
+  return hunks
+}
+
+function newFileDiffLines(content: string): DiffLine[] {
+  return content.split('\n').map((line, i) => ({
+    type: 'add' as const,
+    content: line,
+    newNum: i + 1,
+  }))
+}
+
+function deletedFileDiffLines(content: string): DiffLine[] {
+  return content.split('\n').map((line, i) => ({
+    type: 'remove' as const,
+    content: line,
+    oldNum: i + 1,
+  }))
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+const opVerb: Record<FileOperationType, string> = {
+  read: 'Read',
+  write: 'Edited',
+  create: 'Created',
+  execute: 'Executed',
+}
+
+function timeAgo(ts: number): string {
+  const d = Date.now() - ts
+  if (d < 60_000) return 'just now'
+  if (d < 3_600_000) return `${Math.floor(d / 60_000)}m ago`
+  return new Date(ts).toLocaleTimeString()
+}
+
+function hasDiffContent(op: FileOperation): boolean {
+  return !!(op.editOldString !== undefined && op.editNewString !== undefined) || !!op.writeContent
+}
+
+function countDiffLines(lines: DiffLine[]): { add: number; remove: number } {
+  let add = 0, remove = 0
+  for (const l of lines) {
+    if (l.type === 'add') add++
+    else if (l.type === 'remove') remove++
+  }
+  return { add, remove }
+}
+
+type GitStatus = 'untracked' | 'modified' | 'added' | 'deleted' | 'unchanged' | 'error'
+
+function getStatusLabels(c: ThemeColors): Record<GitStatus, { text: string; color: string }> {
+  return {
+    modified: { text: 'Modified', color: c.amber },
+    added: { text: 'New file', color: c.green },
+    untracked: { text: 'Untracked', color: c.purple },
+    deleted: { text: 'Deleted', color: c.red },
+    unchanged: { text: 'Unchanged', color: c.textMuted },
+    error: { text: 'Unknown', color: c.textMuted },
+  }
+}
+
+function getOpDotColor(c: ThemeColors): Record<FileOperationType, string> {
+  return {
+    read: c.dotRead,
+    write: c.dotWrite,
+    create: c.dotCreate,
+    execute: c.dotExecute,
+  }
+}
+
+// ── Sub-components ──────────────────────────────────────────────────
+
+function DiffHunkHeader({ text }: { text: string }) {
+  const { colors, fonts } = useTheme()
+  return (
+    <div style={{
+      background: colors.diffHunkBg,
+      color: colors.diffHunkText,
+      padding: '4px 12px',
+      fontSize: 12,
+      fontFamily: fonts.mono,
+      borderTop: `1px solid ${colors.border}`,
+      borderBottom: `1px solid ${colors.border}`,
+      userSelect: 'none',
+    }}>
+      {text}
+    </div>
+  )
+}
+
+function DiffLineRow({ line }: { line: DiffLine }) {
+  const { colors, fonts } = useTheme()
+  const isAdd = line.type === 'add'
+  const isRemove = line.type === 'remove'
+  const bg = isAdd ? colors.diffAddBg : isRemove ? colors.diffRemoveBg : 'transparent'
+  const prefix = isAdd ? '+' : isRemove ? '-' : ' '
+  const textColor = isAdd ? colors.diffAddText : isRemove ? colors.diffRemoveText : colors.text
+
+  return (
+    <div style={{
+      display: 'flex',
+      background: bg,
+      fontFamily: fonts.mono,
+      fontSize: 12,
+      lineHeight: '20px',
+      minHeight: 20,
+    }}>
+      <span style={{
+        width: 48, textAlign: 'right', padding: '0 8px 0 0',
+        color: isRemove ? colors.diffLineNumActive : colors.diffLineNum,
+        userSelect: 'none', flexShrink: 0, borderRight: `1px solid ${colors.border}`,
+      }}>
+        {line.oldNum ?? ''}
+      </span>
+      <span style={{
+        width: 48, textAlign: 'right', padding: '0 8px 0 0',
+        color: isAdd ? colors.diffLineNumActive : colors.diffLineNum,
+        userSelect: 'none', flexShrink: 0, borderRight: `1px solid ${colors.border}`,
+      }}>
+        {line.newNum ?? ''}
+      </span>
+      <span style={{
+        width: 20, textAlign: 'center', color: textColor,
+        userSelect: 'none', flexShrink: 0, fontWeight: 700,
+      }}>
+        {prefix}
+      </span>
+      <span style={{
+        flex: 1, color: textColor, whiteSpace: 'pre', overflow: 'hidden', paddingRight: 12,
+      }}>
+        {line.content}
+      </span>
+    </div>
+  )
+}
+
+function CollapsedContext({ count }: { count: number }) {
+  const { colors, fonts } = useTheme()
+  if (count <= 0) return null
+  return (
+    <div style={{
+      background: colors.bgSurface,
+      borderTop: `1px solid ${colors.border}`,
+      borderBottom: `1px solid ${colors.border}`,
+      padding: '2px 12px',
+      fontSize: 11,
+      color: colors.textMuted,
+      fontFamily: fonts.mono,
+      textAlign: 'center',
+      userSelect: 'none',
+    }}>
+      ··· {count} unchanged lines hidden ···
+    </div>
+  )
+}
+
+function AgentBadge({ op }: { op: FileOperation }) {
+  const { colors } = useTheme()
+  const opDotColor = getOpDotColor(colors)
+  const name = op.agentName || 'Agent'
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px',
+      background: colors.bgSurface, borderBottom: `1px solid ${colors.border}`,
+    }}>
+      <span style={{
+        width: 8, height: 8, borderRadius: '50%',
+        background: opDotColor[op.type], flexShrink: 0,
+      }} />
+      <span style={{ fontSize: 12, fontWeight: 600, color: colors.text }}>{name}</span>
+      <span style={{ fontSize: 11, color: colors.textSecondary }}>
+        {opVerb[op.type]} via {op.toolName}
+      </span>
+      <span style={{ fontSize: 11, color: colors.textMuted, marginLeft: 'auto' }}>
+        {timeAgo(op.timestamp)}
+      </span>
+    </div>
+  )
+}
+
+function DiffBlock({ op }: { op: FileOperation }) {
+  const { colors } = useTheme()
+  const lines: DiffLine[] = (() => {
+    if (op.editOldString !== undefined && op.editNewString !== undefined) {
+      return computeLineDiff(op.editOldString, op.editNewString)
+    }
+    if (op.writeContent) return newFileDiffLines(op.writeContent)
+    return []
+  })()
+
+  const { add, remove } = countDiffLines(lines)
+
+  return (
+    <div style={{
+      border: `1px solid ${colors.border}`, borderRadius: 8,
+      overflow: 'hidden', marginBottom: 2,
+    }}>
+      <AgentBadge op={op} />
+      <DiffHunkHeader
+        text={`@@ ${remove > 0 ? `-${remove} lines` : ''} ${add > 0 ? `+${add} lines` : ''} @@`}
+      />
+      <div style={{ overflow: 'auto', maxHeight: 400 }}>
+        {lines.map((line, i) => <DiffLineRow key={i} line={line} />)}
+      </div>
+    </div>
+  )
+}
+
+function TimelineEntry({ op }: { op: FileOperation }) {
+  const { colors } = useTheme()
+  const opDotColor = getOpDotColor(colors)
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px',
+      borderRadius: 6, background: colors.bgSurface, marginBottom: 2,
+    }}>
+      <span style={{
+        width: 7, height: 7, borderRadius: '50%',
+        background: opDotColor[op.type], flexShrink: 0,
+      }} />
+      <span style={{ fontSize: 12, color: colors.textSecondary }}>{op.agentName || 'Agent'}</span>
+      <span style={{ fontSize: 12, color: colors.textMuted }}>{opVerb[op.type]} via {op.toolName}</span>
+      <span style={{ fontSize: 11, color: colors.textMuted, marginLeft: 'auto' }}>{timeAgo(op.timestamp)}</span>
+    </div>
+  )
+}
+
+// ── Total git diff view ─────────────────────────────────────────────
+
+function TotalDiffView({ filePath, cwd }: { filePath: string; cwd?: string }) {
+  const { colors, fonts } = useTheme()
+  const statusLabels = getStatusLabels(colors)
+
+  const [gitData, setGitData] = useState<{
+    baseContent: string | null
+    currentContent: string
+    status: GitStatus
+  } | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+
+    api.gitDiff(filePath, cwd)
+      .then((data: any) => {
+        if (cancelled) return
+        if (data && typeof data === 'object' && typeof data.status === 'string') {
+          setGitData(data)
+        } else {
+          return api.readFile(filePath, cwd).then(({ content }: { content: string }) => {
+            if (!cancelled) setGitData({ baseContent: null, currentContent: content, status: 'untracked' })
+          })
+        }
+      })
+      .catch(() => {
+        return api.readFile(filePath, cwd)
+          .then(({ content }: { content: string }) => {
+            if (!cancelled) setGitData({ baseContent: null, currentContent: content, status: 'untracked' })
+          })
+          .catch(() => {
+            if (!cancelled) setGitData({ baseContent: null, currentContent: '', status: 'error' })
+          })
+      })
+      .finally(() => { if (!cancelled) setLoading(false) })
+
+    return () => { cancelled = true }
+  }, [filePath, cwd])
+
+  if (loading) {
+    return <div style={{ padding: 20, color: colors.textMuted, fontSize: 13 }}>Loading diff...</div>
+  }
+
+  if (!gitData || (gitData.status === 'error' && !gitData.currentContent)) {
+    return <div style={{ padding: 20, color: colors.textMuted, fontSize: 13 }}>Could not load file</div>
+  }
+
+  // Unchanged files — show the file content as context (no additions/removals)
+  if (gitData.status === 'unchanged') {
+    const lines = gitData.currentContent.split('\n')
+    return (
+      <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 0 }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px',
+          background: colors.bgSurface, borderRadius: '8px 8px 0 0',
+          border: `1px solid ${colors.border}`, borderBottom: 'none',
+        }}>
+          <span style={{
+            fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 10,
+            background: `${colors.green}20`, color: colors.green,
+            border: `1px solid ${colors.green}40`,
+          }}>
+            unchanged
+          </span>
+          <span style={{ fontSize: 12, color: colors.textSecondary }}>matches last commit</span>
+          <span style={{ fontSize: 12, color: colors.textMuted, marginLeft: 'auto', fontFamily: fonts.mono }}>{lines.length} lines</span>
+        </div>
+        <div style={{
+          border: `1px solid ${colors.border}`, borderRadius: '0 0 8px 8px', overflow: 'hidden',
+          maxHeight: 500, overflowY: 'auto',
+        }}>
+          {lines.map((line, i) => (
+            <div key={i} style={{
+              display: 'flex', fontFamily: fonts.mono, fontSize: 12,
+              lineHeight: '20px', minHeight: 20,
+            }}>
+              <span style={{
+                width: 56, textAlign: 'right', padding: '0 12px 0 0',
+                color: colors.diffLineNum, userSelect: 'none', flexShrink: 0,
+                borderRight: `1px solid ${colors.border}`,
+              }}>
+                {i + 1}
+              </span>
+              <span style={{ flex: 1, color: colors.text, whiteSpace: 'pre', paddingLeft: 12 }}>
+                {line}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  const diffLines: DiffLine[] = (() => {
+    if (gitData.status === 'untracked' || gitData.status === 'added') {
+      return newFileDiffLines(gitData.currentContent)
+    }
+    if (gitData.status === 'deleted' && gitData.baseContent) {
+      return deletedFileDiffLines(gitData.baseContent)
+    }
+    if (gitData.baseContent !== null) {
+      return computeLineDiff(gitData.baseContent, gitData.currentContent)
+    }
+    return newFileDiffLines(gitData.currentContent)
+  })()
+
+  const { add, remove } = countDiffLines(diffLines)
+  const hunks = splitIntoHunks(diffLines)
+  const statusInfo = statusLabels[gitData.status] || statusLabels['modified']
+
+  return (
+    <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 0 }}>
+      {/* Status banner */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px',
+        background: colors.bgSurface, borderRadius: '8px 8px 0 0',
+        border: `1px solid ${colors.border}`, borderBottom: 'none',
+      }}>
+        <span style={{
+          fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 10,
+          background: `${statusInfo.color}20`, color: statusInfo.color,
+          border: `1px solid ${statusInfo.color}40`,
+        }}>
+          {statusInfo.text}
+        </span>
+        <span style={{ fontSize: 12, color: colors.textSecondary }}>vs last commit</span>
+        <div style={{ display: 'flex', gap: 8, marginLeft: 'auto', alignItems: 'center' }}>
+          {add > 0 && (
+            <span style={{ fontSize: 12, fontWeight: 600, color: colors.diffAddText, fontFamily: fonts.mono }}>+{add}</span>
+          )}
+          {remove > 0 && (
+            <span style={{ fontSize: 12, fontWeight: 600, color: colors.diffRemoveText, fontFamily: fonts.mono }}>-{remove}</span>
+          )}
+          <div style={{ display: 'flex', gap: 1, height: 8 }}>
+            {Array.from({ length: Math.min(add, 25) }).map((_, i) => (
+              <span key={`a${i}`} style={{ width: 3, height: 8, borderRadius: 1, background: colors.diffAddText }} />
+            ))}
+            {Array.from({ length: Math.min(remove, 25) }).map((_, i) => (
+              <span key={`r${i}`} style={{ width: 3, height: 8, borderRadius: 1, background: colors.diffRemoveText }} />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Hunked diff */}
+      <div style={{
+        border: `1px solid ${colors.border}`, borderRadius: '0 0 8px 8px', overflow: 'hidden',
+      }}>
+        {hunks.length === 0 && diffLines.length > 0 ? (
+          diffLines.map((line, i) => <DiffLineRow key={i} line={line} />)
+        ) : hunks.length === 0 ? (
+          <div style={{ padding: 20, color: colors.textMuted, fontSize: 13, textAlign: 'center' }}>Empty file</div>
+        ) : (
+          hunks.map((hunk, hi) => (
+            <div key={hi}>
+              {hi > 0 && (
+                <CollapsedContext count={
+                  (hunk.lines[0]?.oldNum ?? hunk.oldStart) -
+                  (hunks[hi - 1].lines[hunks[hi - 1].lines.length - 1]?.oldNum ?? 0) - 1
+                } />
+              )}
+              <DiffHunkHeader
+                text={`@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@`}
+              />
+              {hunk.lines.map((line, li) => <DiffLineRow key={li} line={line} />)}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Stat summary (session) ──────────────────────────────────────────
+
+function SessionDiffStats({ operations }: { operations: FileOperation[] }) {
+  const { colors, fonts } = useTheme()
+  const diffs = operations.filter(hasDiffContent)
+  let totalAdd = 0, totalRemove = 0
+
+  for (const op of diffs) {
+    if (op.editOldString !== undefined && op.editNewString !== undefined) {
+      const diff = computeLineDiff(op.editOldString, op.editNewString)
+      const c = countDiffLines(diff)
+      totalAdd += c.add
+      totalRemove += c.remove
+    } else if (op.writeContent) {
+      totalAdd += op.writeContent.split('\n').length
+    }
+  }
+
+  if (totalAdd === 0 && totalRemove === 0) return null
+
+  return (
+    <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+      {totalAdd > 0 && (
+        <span style={{ fontSize: 12, fontWeight: 600, color: colors.diffAddText, fontFamily: fonts.mono }}>+{totalAdd}</span>
+      )}
+      {totalRemove > 0 && (
+        <span style={{ fontSize: 12, fontWeight: 600, color: colors.diffRemoveText, fontFamily: fonts.mono }}>-{totalRemove}</span>
+      )}
+      <div style={{ display: 'flex', gap: 1, height: 8 }}>
+        {Array.from({ length: Math.min(totalAdd, 20) }).map((_, i) => (
+          <span key={`a${i}`} style={{ width: 4, height: 8, borderRadius: 1, background: colors.diffAddText }} />
+        ))}
+        {Array.from({ length: Math.min(totalRemove, 20) }).map((_, i) => (
+          <span key={`r${i}`} style={{ width: 4, height: 8, borderRadius: 1, background: colors.diffRemoveText }} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── Main component ──────────────────────────────────────────────────
+
+type TabId = 'total' | 'session' | 'source'
+
+export default function FileDetailModal({
+  file,
+  cwd,
+  onClose,
+}: {
+  file: TrackedFile
+  cwd?: string
+  onClose: () => void
+}) {
+  const { colors, fonts } = useTheme()
+  const [tab, setTab] = useState<TabId>('total')
+  const [content, setContent] = useState<string | null>(null)
+  const [language, setLanguage] = useState('plaintext')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    setLoading(true)
+    api.readFile(file.path, cwd)
+      .then(({ content, language }: { content: string; language: string }) => {
+        setContent(content)
+        setLanguage(language)
+      })
+      .catch(() => setContent('// Could not read file'))
+      .finally(() => setLoading(false))
+  }, [file.path, cwd])
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  const diffOps = file.operations.filter(hasDiffContent)
+  const nonDiffOps = file.operations.filter(op => !hasDiffContent(op))
+  const hasSessionDiffs = diffOps.length > 0
+
+  return (
+    <div
+      style={{
+        position: 'fixed', inset: 0, zIndex: 1000,
+        background: colors.fileModalOverlay,
+        backdropFilter: 'blur(8px)', display: 'flex',
+        animation: 'modalIn 0.2s ease',
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          flex: 1, margin: 20, background: colors.bg, borderRadius: 12,
+          border: `1px solid ${colors.border}`, display: 'flex',
+          flexDirection: 'column', overflow: 'hidden',
+        }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* ── Header ── */}
+        <div style={{
+          padding: '10px 16px', borderBottom: `1px solid ${colors.border}`,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+              <path d="M3 1.5h6.5L13 5v9.5H3V1.5z" stroke={colors.textMuted} strokeWidth="1.2" fill="none" />
+              <path d="M9.5 1.5V5H13" stroke={colors.textMuted} strokeWidth="1.2" fill="none" />
+            </svg>
+            <span style={{
+              fontSize: 13, fontWeight: 600, color: colors.text, fontFamily: fonts.mono,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {file.path}
+            </span>
+            <span style={{
+              fontSize: 10, padding: '2px 6px',
+              background: `${colors.blue}15`, color: colors.blue,
+              borderRadius: 4, flexShrink: 0,
+            }}>
+              {language}
+            </span>
+            <SessionDiffStats operations={file.operations} />
+          </div>
+
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexShrink: 0 }}>
+            <TabButton label="Total" active={tab === 'total'} onClick={() => setTab('total')} />
+            {hasSessionDiffs && (
+              <TabButton label="Session" active={tab === 'session'} onClick={() => setTab('session')} />
+            )}
+            <TabButton label="Source" active={tab === 'source'} onClick={() => setTab('source')} />
+            <button
+              onClick={onClose}
+              style={{
+                background: 'none', border: `1px solid ${colors.borderMuted}`,
+                color: colors.textSecondary, borderRadius: 6, padding: '4px 10px',
+                fontSize: 12, cursor: 'pointer', marginLeft: 8,
+              }}
+            >
+              Esc
+            </button>
+          </div>
+        </div>
+
+        {/* ── Body ── */}
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          {tab === 'total' && <TotalDiffView filePath={file.path} cwd={cwd} />}
+
+          {tab === 'session' && (
+            <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {diffOps.map((op, i) => <DiffBlock key={op.toolUseId || i} op={op} />)}
+              {nonDiffOps.length > 0 && (
+                <div>
+                  <div style={{
+                    fontSize: 11, fontWeight: 600, color: colors.textMuted,
+                    textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8, padding: '0 2px',
+                  }}>
+                    Other Activity
+                  </div>
+                  {nonDiffOps.map((op, i) => <TimelineEntry key={op.toolUseId || i} op={op} />)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'source' && (
+            loading ? (
+              <div style={{ padding: 20, color: colors.textMuted, fontSize: 13 }}>Loading...</div>
+            ) : (
+              <div style={{ overflow: 'auto' }}>
+                {content?.split('\n').map((line, i) => (
+                  <div key={i} style={{
+                    display: 'flex', fontFamily: fonts.mono, fontSize: 12,
+                    lineHeight: '20px', minHeight: 20,
+                  }}>
+                    <span style={{
+                      width: 56, textAlign: 'right', padding: '0 12px 0 0',
+                      color: colors.diffLineNum, userSelect: 'none', flexShrink: 0,
+                      borderRight: `1px solid ${colors.border}`,
+                    }}>
+                      {i + 1}
+                    </span>
+                    <span style={{
+                      flex: 1, color: colors.text, whiteSpace: 'pre',
+                      paddingLeft: 12, paddingRight: 12,
+                    }}>
+                      {line}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TabButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  const { colors } = useTheme()
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: active ? colors.bgSurface : 'transparent',
+        border: `1px solid ${active ? colors.borderMuted : 'transparent'}`,
+        color: active ? colors.text : colors.textMuted,
+        borderRadius: 6, padding: '4px 10px', fontSize: 12,
+        fontWeight: active ? 600 : 400, cursor: 'pointer',
+        transition: 'all 0.15s ease',
+      }}
+    >
+      {label}
+    </button>
+  )
+}
