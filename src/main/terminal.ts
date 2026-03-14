@@ -83,7 +83,7 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
     if (!flushTimer) {
       flushTimer = setTimeout(() => {
         if (pendingData) {
-          mainWindow?.webContents.send(IPC.TERM_DATA, { terminalId: id, data: pendingData })
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.TERM_DATA, { terminalId: id, data: pendingData })
           pendingData = ''
         }
         flushTimer = null
@@ -94,7 +94,7 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
   proc.onExit(({ exitCode }) => {
     terminals.delete(id)
     // Don't remove agentTerminals mapping — let getOrCreate handle cleanup
-    mainWindow?.webContents.send(IPC.TERM_EXIT, { terminalId: id, code: exitCode })
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.TERM_EXIT, { terminalId: id, code: exitCode })
   })
 
   return { terminalId: id, isNew: true }

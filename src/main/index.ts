@@ -232,8 +232,16 @@ app.whenReady().then(async () => {
     console.warn('[main] CLI auto-install check failed:', err.message)
   }
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  app.on('activate', async () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow()
+      if (mainWindow) {
+        const agentMod = await import('./agent')
+        const termMod = await import('./terminal')
+        agentMod.setMainWindow(mainWindow)
+        termMod.setMainWindow(mainWindow)
+      }
+    }
   })
 })
 

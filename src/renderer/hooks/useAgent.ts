@@ -91,6 +91,16 @@ export function useAgent(agentId: string) {
   const { messages, isActive, permissionRequest } = state
 
   const sendMessage = useCallback(async (text: string) => {
+    // Add user message optimistically — main process no longer emits it back
+    setState(agentId, prev => ({
+      ...prev,
+      messages: [...prev.messages, {
+        id: Math.random().toString(36).slice(2, 10),
+        type: 'user' as const,
+        text,
+        ts: Date.now(),
+      }],
+    }))
     await api.sendMessage(agentId, text)
   }, [agentId])
 

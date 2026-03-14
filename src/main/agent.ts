@@ -49,7 +49,9 @@ export function setMainWindow(win: BrowserWindow) {
 }
 
 function send(channel: string, data: unknown) {
-  mainWindow?.webContents.send(channel, data)
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, data)
+  }
 }
 
 function uid(): string {
@@ -160,13 +162,7 @@ export async function sendPrompt(agentId: string, message: string): Promise<stri
   const sessionId = randomUUID()
   state.activeSessionId = sessionId
 
-  // Emit user message
-  emitMessage(agentId, {
-    id: uid(),
-    type: 'user',
-    text: message,
-    ts: Date.now(),
-  })
+  // User message is added optimistically on the renderer side
 
   // Build query options, applying any pending resume/continue
   const opts: Record<string, unknown> = {
@@ -533,9 +529,7 @@ export async function sendPromptWithOptions(
   const sessionId = randomUUID()
   state.activeSessionId = sessionId
 
-  if (message) {
-    emitMessage(agentId, { id: uid(), type: 'user', text: message, ts: Date.now() })
-  }
+  // User message is added optimistically on the renderer side
 
   // Build query options — must include CLI path/executable/env just like sendPrompt
   const opts: Record<string, unknown> = {
