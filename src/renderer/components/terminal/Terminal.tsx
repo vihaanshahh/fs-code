@@ -1,116 +1,163 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react'
+import React, { useEffect, useRef } from 'react'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
+import '@xterm/xterm/css/xterm.css'
 import { api } from '../../lib/api'
 import { useTheme } from '../../ThemeContext'
 
-export default function TerminalPanel({ cwd }: { cwd: string }) {
-  const { colors, fonts } = useTheme()
-  const shortCwd = cwd === '.' ? '~' : '~/' + cwd.split('/').slice(-2).join('/')
-  const [lines, setLines] = useState<Array<{ text: string; type: 'output' | 'input' | 'dim' }>>([
-    { text: `${shortCwd}`, type: 'dim' },
-  ])
-  const [terminalId, setTerminalId] = useState<string | null>(null)
-  const [input, setInput] = useState('')
-  const [history, setHistory] = useState<string[]>([])
-  const [historyIdx, setHistoryIdx] = useState(-1)
+export default function TerminalPanel({ agentId, cwd }: { agentId: string; cwd: string }) {
+  const { colors } = useTheme()
   const containerRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
 
-  // Create terminal on mount
   useEffect(() => {
-    let id: string | null = null
-    api.createTerminal(cwd).then(({ terminalId }) => {
-      id = terminalId
-      setTerminalId(terminalId)
-    })
+    const container = containerRef.current
+    if (!container) return
 
-    const unsub = api.onTerminalData(({ terminalId: tid, data }) => {
-      if (tid === id) {
-        setLines(prev => [...prev, { text: data, type: 'output' }])
+    let disposed = false
+    let term: Terminal | null = null
+    let fitAddon: FitAddon | null = null
+    let ptyId: string | null = null
+    let unsubData: (() => void) | null = null
+    let unsubExit: (() => void) | null = null
+    let inputDisposable: { dispose: () => void } | null = null
+    let resizeDisposable: { dispose: () => void } | null = null
+    let observer: ResizeObserver | null = null
+
+    // Wait for container to have real dimensions before opening xterm
+    function tryOpen() {
+      if (disposed) return
+      const { offsetWidth, offsetHeight } = container
+      if (offsetWidth === 0 || offsetHeight === 0) {
+        requestAnimationFrame(tryOpen)
+        return
       }
-    })
+      init()
+    }
+
+    function init() {
+      if (disposed) return
+
+      term = new Terminal({
+        fontFamily: "'Geist Mono', ui-monospace, 'SF Mono', 'Fira Code', monospace",
+        fontSize: 13,
+        lineHeight: 1.4,
+        cursorBlink: true,
+        cursorStyle: 'bar',
+        theme: {
+          background: colors.bgOverlay,
+          foreground: colors.text,
+          cursor: colors.blue,
+          selectionBackground: `${colors.blue}40`,
+          black: '#1a1a1a',
+          red: colors.red,
+          green: colors.green,
+          yellow: colors.amber,
+          blue: colors.blue,
+          magenta: colors.purple,
+          cyan: '#56d4dd',
+          white: colors.text,
+          brightBlack: colors.textMuted,
+          brightRed: colors.red,
+          brightGreen: colors.green,
+          brightYellow: colors.amber,
+          brightBlue: colors.blue,
+          brightMagenta: colors.purple,
+          brightCyan: '#56d4dd',
+          brightWhite: '#ffffff',
+        },
+        allowProposedApi: true,
+      })
+
+      fitAddon = new FitAddon()
+      term.loadAddon(fitAddon)
+      term.loadAddon(new WebLinksAddon())
+
+      term.open(container)
+      try { fitAddon.fit() } catch { /* ignore */ }
+
+      // Get or create PTY (idempotent — reuses existing if alive)
+      api.createTerminal(agentId, cwd).then(async ({ terminalId, isNew }) => {
+        if (disposed) return
+        ptyId = terminalId
+
+        // If reattaching to existing PTY, replay buffered output
+        if (!isNew && term) {
+          const { data } = await api.getTerminalBuffer(terminalId)
+          if (data && term && !disposed) {
+            term.write(data)
+          }
+        }
+
+        // Send resize to match current xterm dimensions
+        if (term) {
+          const { cols, rows } = term
+          if (cols && rows) {
+            api.resizeTerminal(terminalId, cols, rows)
+          }
+        }
+      })
+
+      // PTY → xterm
+      unsubData = api.onTerminalData(({ terminalId: tid, data }) => {
+        if (tid === ptyId && term) {
+          term.write(data)
+        }
+      })
+
+      unsubExit = api.onTerminalExit(({ terminalId: tid }) => {
+        if (tid === ptyId && term) {
+          term.write('\r\n\x1b[90m[process exited]\x1b[0m\r\n')
+        }
+      })
+
+      // xterm → PTY
+      inputDisposable = term.onData((data: string) => {
+        if (ptyId) {
+          api.writeTerminal(ptyId, data)
+        }
+      })
+
+      // Resize: xterm → PTY
+      resizeDisposable = term.onResize(({ cols, rows }) => {
+        if (ptyId) {
+          api.resizeTerminal(ptyId, cols, rows)
+        }
+      })
+
+      // Observe container resize → fit xterm
+      observer = new ResizeObserver(() => {
+        requestAnimationFrame(() => {
+          try { fitAddon?.fit() } catch { /* container may be hidden */ }
+        })
+      })
+      observer.observe(container)
+    }
+
+    requestAnimationFrame(tryOpen)
 
     return () => {
-      unsub()
-      if (id) api.closeTerminal(id)
+      disposed = true
+      observer?.disconnect()
+      inputDisposable?.dispose()
+      resizeDisposable?.dispose()
+      unsubData?.()
+      unsubExit?.()
+      term?.dispose()
+      // NOTE: intentionally do NOT close the PTY here.
+      // The PTY persists in the main process until the agent is closed.
     }
-  }, [cwd])
-
-  // Auto-scroll
-  useEffect(() => {
-    if (containerRef.current) {
-      containerRef.current.scrollTop = containerRef.current.scrollHeight
-    }
-  }, [lines.length])
-
-  const handleCommand = useCallback((cmd: string) => {
-    if (!terminalId || !cmd.trim()) return
-    setLines(prev => [...prev, { text: `$ ${cmd}`, type: 'input' }])
-    api.writeTerminal(terminalId, cmd + '\n')
-    setHistory(prev => [...prev, cmd])
-    setHistoryIdx(-1)
-    setInput('')
-  }, [terminalId])
-
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      handleCommand(input)
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault()
-      if (history.length === 0) return
-      const idx = historyIdx === -1 ? history.length - 1 : Math.max(0, historyIdx - 1)
-      setHistoryIdx(idx)
-      setInput(history[idx])
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault()
-      if (historyIdx === -1) return
-      if (historyIdx >= history.length - 1) {
-        setHistoryIdx(-1)
-        setInput('')
-      } else {
-        const idx = historyIdx + 1
-        setHistoryIdx(idx)
-        setInput(history[idx])
-      }
-    } else if (e.key === 'l' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault()
-      setLines([{ text: shortCwd, type: 'dim' }])
-    }
-  }, [input, handleCommand, history, historyIdx, shortCwd])
+  }, [agentId, cwd]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div
+      ref={containerRef}
       style={{
-        height: '100%', display: 'flex', flexDirection: 'column', background: colors.bgOverlay,
-        fontFamily: fonts.mono, fontSize: 13,
+        width: '100%',
+        height: '100%',
+        background: colors.bgOverlay,
+        overflow: 'hidden',
       }}
-      onClick={() => inputRef.current?.focus()}
-    >
-      <div ref={containerRef} style={{ flex: 1, overflow: 'auto', padding: 8 }}>
-        {lines.map((line, i) => (
-          <div key={i} style={{
-            lineHeight: 1.5, whiteSpace: 'pre-wrap',
-            color: line.type === 'input' ? colors.green : line.type === 'dim' ? colors.textMuted : colors.text,
-            fontSize: line.type === 'dim' ? 11 : undefined,
-          }}>
-            {line.text}
-          </div>
-        ))}
-        <div style={{ display: 'flex', alignItems: 'center' }}>
-          <span style={{ color: colors.blue, fontSize: 11, marginRight: 6 }}>{shortCwd}</span>
-          <span style={{ color: colors.green }}>$ </span>
-          <input
-            ref={inputRef}
-            style={{
-              background: 'transparent', border: 'none', color: colors.text, outline: 'none',
-              fontFamily: 'inherit', fontSize: 'inherit', width: '100%', caretColor: colors.blue,
-            }}
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            spellCheck={false}
-          />
-        </div>
-      </div>
-    </div>
+    />
   )
 }

@@ -7,13 +7,13 @@
       <feGaussianBlur stdDeviation="50"/>
     </filter>
     <clipPath id="clip">
-      <rect width="1024" height="1024" rx="228"/>
+      <rect x="120" y="120" width="784" height="784" rx="175"/>
     </clipPath>
   </defs>
 
   <g clip-path="url(#clip)">
     <!-- Light background -->
-    <rect width="1024" height="1024" fill="#eaeaea"/>
+    <rect x="120" y="120" width="784" height="784" fill="#eaeaea"/>
 
     <!-- Organic fluid blobs — soft, overlapping, varied angles -->
     <ellipse cx="240" cy="660" rx="320" ry="210" fill="#3b82f6" opacity="0.5" filter="url(#soft)" transform="rotate(-18, 240, 660)"/>
@@ -23,6 +23,6 @@
     <ellipse cx="150" cy="260" rx="190" ry="130" fill="#60a5fa" opacity="0.2" filter="url(#soft)" transform="rotate(25, 150, 260)"/>
 
     <!-- Heavy grain texture -->
-    <rect width="1024" height="1024" filter="url(#grain)" opacity="0.28"/>
+    <rect x="120" y="120" width="784" height="784" filter="url(#grain)" opacity="0.28"/>
   </g>
 </svg>

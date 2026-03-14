@@ -132,6 +132,8 @@ export function useAgentManager() {
     const name = newName.trim().slice(0, 8)
     if (!name) return
     setAgents(prev => prev.map(a => a.id === agentId ? { ...a, name } : a))
+    // Sync rename to main process so it persists there too
+    api.renameAgent(agentId, name)
   }, [])
 
   const reorderAgents = useCallback((fromIndex: number, toIndex: number) => {
@@ -145,6 +147,19 @@ export function useAgentManager() {
       return next
     })
   }, [])
+
+  // Auto-save session whenever agents or focus changes (debounced)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (!agents.length) return
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(() => {
+      saveSession(agents, focusedId)
+    }, 500)
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    }
+  }, [agents, focusedId])
 
   const focusedAgent = agents.find(a => a.id === focusedId) || agents[0] || null
 

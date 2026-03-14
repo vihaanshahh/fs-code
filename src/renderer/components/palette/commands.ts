@@ -72,6 +72,7 @@ export const slashCommands: SlashCommand[] = [
   { command: '/stickers', description: 'Order Claude Code stickers', category: 'misc' },
   { command: '/passes', description: 'Share a free week of Claude Code', category: 'misc' },
   { command: '/fast', description: 'Toggle fast mode', category: 'session' },
+  { command: '/scm', description: 'Toggle source control panel', category: 'view' },
   { command: '/vim', description: 'Toggle vim editing mode', category: 'view' },
   { command: '/statusline', description: 'Configure status line display', category: 'view' },
   { command: '/sandbox', description: 'Toggle sandbox mode', category: 'config' },
@@ -86,7 +87,7 @@ export const slashCommands: SlashCommand[] = [
 ]
 
 // Build alias lookup map: alias -> canonical command
-export const aliasMap: Record<string, string> = {}
+const aliasMap: Record<string, string> = {}
 for (const cmd of slashCommands) {
   if (cmd.aliases) {
     for (const alias of cmd.aliases) {
@@ -115,12 +116,13 @@ export const keyboardShortcuts: KeyboardShortcut[] = [
   { keys: 'Cmd+W', description: 'Close focused agent', category: 'agent' },
   { keys: 'Cmd+`', description: 'Toggle terminal', category: 'view' },
   { keys: 'Cmd+B', description: 'Toggle file sidebar', category: 'view' },
+  { keys: 'Cmd+Shift+G', description: 'Toggle source control', category: 'view' },
   { keys: 'Cmd+Shift+M', description: 'Toggle minimized agents pill', category: 'view' },
   { keys: 'Cmd+Enter', description: 'Send message', category: 'navigation' },
   { keys: 'Escape', description: 'Close overlay / stop agent', category: 'navigation' },
 ]
 
-export interface PaletteCommand {
+interface PaletteCommand {
   id: string
   label: string
   description: string
@@ -153,4 +155,6 @@ export const paletteCommands: PaletteCommand[] = [
   { id: 'mode-default', label: 'Default Mode', description: 'Prompt for dangerous operations' },
   { id: 'mode-yolo', label: 'Bypass Permissions', description: 'Auto-approve everything (use with caution)' },
   { id: 'minimize', label: 'Minimize Agents', description: 'Collapse to floating pill', shortcut: 'Cmd+Shift+M' },
+  { id: 'toggle-scm', label: 'Source Control', description: 'Toggle SCM panel', shortcut: 'Cmd+Shift+G' },
+  { id: 'install-cli', label: "Install 'fluidstate' command in PATH", description: 'Run fluidstate from any terminal' },
 ]

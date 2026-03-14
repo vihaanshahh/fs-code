@@ -8,7 +8,7 @@ import type { AuthStatus } from '../shared/types'
 
 const execFileAsync = promisify(execFile)
 
-/** Resolve the claude CLI binary — tries PATH, then common install locations */
+/** Resolve the claude CLI binary — checks all candidates in parallel */
 async function findClaudeBin(): Promise<string | null> {
   const candidates = [
     'claude',
@@ -17,13 +17,17 @@ async function findClaudeBin(): Promise<string | null> {
     `${process.env.HOME}/.npm-global/bin/claude`,
     `${process.env.HOME}/.local/bin/claude`,
   ]
-  for (const bin of candidates) {
-    try {
-      await execFileAsync(bin, ['--version'], { timeout: 5000 })
-      return bin
-    } catch { /* try next */ }
+  // Race all candidates in parallel — first success wins
+  try {
+    return await Promise.any(
+      candidates.map(async bin => {
+        await execFileAsync(bin, ['--version'], { timeout: 3000 })
+        return bin
+      })
+    )
+  } catch {
+    return null
   }
-  return null
 }
 
 let cachedBin: string | null | undefined

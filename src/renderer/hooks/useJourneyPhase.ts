@@ -39,7 +39,8 @@ function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPha
   // Session ended without result
   if (!isActive && messages.length > 0) return { phase: 'done', detail: '' }
 
-  // --- Walk messages to build activity profile ---
+  // --- Walk recent messages to build activity profile (last 30 is sufficient) ---
+  const window = messages.length > 30 ? messages.slice(-30) : messages
   let hasSearches = false
   let hasReads = false
   let hasWrites = false
@@ -54,7 +55,7 @@ function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPha
   let hasLongAssistantAfterReads = false
   let recentErrorCount = 0
 
-  for (const msg of messages) {
+  for (const msg of window) {
     if (msg.type === 'tool-use') {
       const name = msg.toolName
       const input = getToolInput(msg)

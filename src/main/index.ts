@@ -1,5 +1,6 @@
 import { app, BrowserWindow, shell, dialog, nativeImage, Menu } from 'electron'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { IPC } from '../shared/types'
 
 // Set app name before anything else
 app.name = 'FluidState'
@@ -18,7 +19,32 @@ process.on('unhandledRejection', (err: any) => {
 
 let mainWindow: BrowserWindow | null = null
 
-function createWindow() {
+// ── Single-instance lock ──────────────────────────────────────────────
+// If a second instance is launched (e.g. `fluidstate ~/foo` while the app
+// is already running), focus the existing window and open the new directory.
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  app.quit()
+} else {
+  app.on('second-instance', (_event, argv) => {
+    // Extract --open-dir from the second instance's argv
+    const openDirArg = argv.find((a) => a.startsWith('--open-dir='))
+    const dir = openDirArg ? openDirArg.split('=')[1] : null
+
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+
+      if (dir) {
+        const resolved = resolve(dir)
+        console.log('[main] second-instance open-dir:', resolved)
+        mainWindow.webContents.send(IPC.APP_INITIAL_CWD, resolved)
+      }
+    }
+  })
+}
+
+function createWindow(initialCwd: string | null = null) {
   console.log('[main] creating window...')
 
   mainWindow = new BrowserWindow({
@@ -60,6 +86,13 @@ function createWindow() {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (initialCwd && mainWindow) {
+      console.log('[main] sending initial cwd:', initialCwd)
+      mainWindow.webContents.send(IPC.APP_INITIAL_CWD, initialCwd)
+    }
+  })
+
   mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
     console.error('[main] renderer failed to load:', code, desc)
   })
@@ -80,10 +113,51 @@ app.whenReady().then(async () => {
     app.dock.setIcon(nativeImage.createFromPath(iconPath))
   }
 
+  // Read --open-dir flag from CLI launcher
+  const initialCwd = app.commandLine.getSwitchValue('open-dir') || null
+
   // Set custom menu so Electron's default accelerators don't swallow our shortcuts
+  const installCLIMenuItem: Electron.MenuItemConstructorOptions = {
+    label: "Install 'fluidstate' command in PATH...",
+    click: async () => {
+      const { installCLI } = await import('./cli-install')
+      const result = await installCLI()
+      if (result.success) {
+        dialog.showMessageBox({
+          type: 'info',
+          title: 'CLI Installed',
+          message: `'fluidstate' command installed successfully`,
+          detail: `You can now run 'fluidstate .' from any terminal to open FluidState.\n\nInstalled to: ${result.path}`,
+        })
+      } else {
+        dialog.showMessageBox({
+          type: 'error',
+          title: 'CLI Installation Failed',
+          message: 'Could not install the CLI command',
+          detail: result.error || 'Unknown error',
+        })
+      }
+    },
+  }
+
   if (process.platform === 'darwin') {
     const template: Electron.MenuItemConstructorOptions[] = [
-      { role: 'appMenu' },
+      {
+        role: 'appMenu',
+        submenu: [
+          { role: 'about' },
+          { type: 'separator' },
+          installCLIMenuItem,
+          { type: 'separator' },
+          { role: 'services' },
+          { type: 'separator' },
+          { role: 'hide' },
+          { role: 'hideOthers' },
+          { role: 'unhide' },
+          { type: 'separator' },
+          { role: 'quit' },
+        ],
+      },
       { role: 'editMenu' },
       {
         label: 'View',
@@ -104,10 +178,30 @@ app.whenReady().then(async () => {
       },
     ]
     Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+  } else {
+    // Windows/Linux: add CLI install to a Help menu
+    const template: Electron.MenuItemConstructorOptions[] = [
+      { role: 'editMenu' },
+      {
+        label: 'View',
+        submenu: [
+          { role: 'reload' },
+          { role: 'forceReload' },
+          { role: 'toggleDevTools' },
+          { type: 'separator' },
+          { role: 'togglefullscreen' },
+        ],
+      },
+      {
+        label: 'Help',
+        submenu: [installCLIMenuItem],
+      },
+    ]
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template))
   }
 
   // Create window FIRST so user sees something
-  createWindow()
+  createWindow(initialCwd)
 
   // Then set up IPC and SDK (can fail without killing the window)
   try {
@@ -128,6 +222,14 @@ app.whenReady().then(async () => {
     console.log('[main] agent + terminal ready')
   } catch (err: any) {
     console.error('[main] Failed to load agent SDK:', err)
+  }
+
+  // Auto-install CLI on first launch (prompts user once, then remembers)
+  try {
+    const { autoInstallCLI } = await import('./cli-install')
+    await autoInstallCLI()
+  } catch (err: any) {
+    console.warn('[main] CLI auto-install check failed:', err.message)
   }
 
   app.on('activate', () => {

@@ -110,58 +110,89 @@ function ToolPermissionBanner({
   onAllow: () => void
   onDeny: () => void
 }) {
-  const { colors } = useTheme()
+  const { colors, fonts } = useTheme()
 
-  let detail = ''
-  try {
-    if (input.command) detail = `: ${String(input.command).slice(0, 60)}`
-    else if (input.file_path) detail = `: ${String(input.file_path).split('/').pop()}`
-    else if (input.path) detail = `: ${String(input.path).split('/').pop()}`
-  } catch {}
+  const accentMap: Record<string, string> = {
+    Bash: colors.amber, Read: colors.blue, Edit: colors.amber,
+    Write: colors.green, Grep: colors.purple, Glob: colors.blue,
+  }
+  const accent = accentMap[toolName] || colors.textSecondary
+
+  // Extract the meaningful content to display
+  const renderDetail = () => {
+    if (toolName === 'Bash') {
+      const cmd = input.command as string
+      if (!cmd) return null
+      return (
+        <div style={{
+          fontFamily: fonts.mono, fontSize: 11, color: colors.text,
+          whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: '16px',
+          display: 'flex', gap: 6, alignItems: 'flex-start',
+        }}>
+          <span style={{ color: colors.amber, flexShrink: 0 }}>$</span>
+          <span>{cmd}</span>
+        </div>
+      )
+    }
+    if (input.file_path) {
+      const p = String(input.file_path)
+      const parts = p.split('/')
+      const name = parts.pop() || p
+      const dir = parts.length > 2 ? '.../' + parts.slice(-2).join('/') + '/' : parts.join('/') + '/'
+      return (
+        <div style={{ fontFamily: fonts.mono, fontSize: 11, lineHeight: '16px' }}>
+          <span style={{ color: colors.textMuted }}>{dir}</span>
+          <span style={{ color: colors.text, fontWeight: 500 }}>{name}</span>
+        </div>
+      )
+    }
+    if (input.pattern) {
+      return (
+        <div style={{ fontFamily: fonts.mono, fontSize: 11, color: colors.text, lineHeight: '16px' }}>
+          {String(input.pattern)}
+        </div>
+      )
+    }
+    return null
+  }
 
   return (
     <div
       style={{
-        background: `${colors.amber}12`,
-        borderBottom: `1px solid ${colors.amber}40`,
+        background: `${accent}08`,
+        borderBottom: `1px solid ${accent}30`,
         padding: '8px 12px',
         display: 'flex',
-        alignItems: 'center',
-        gap: 10,
+        flexDirection: 'column',
+        gap: 6,
         flexShrink: 0,
         animation: 'fadeSlideIn 0.2s ease',
       }}
     >
-      <span style={{
-        width: 8, height: 8, borderRadius: '50%',
-        background: colors.amber, flexShrink: 0,
-        animation: 'pulse 1s infinite',
-      }} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: colors.amber }}>Needs approval</div>
-        <div style={{
-          fontSize: 11, color: colors.textMuted,
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>
-          {toolName}{detail}
-        </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{
+          fontSize: 10, fontWeight: 600, color: accent,
+          textTransform: 'uppercase', letterSpacing: '0.3px',
+        }}>{toolName}</span>
+        <span style={{ flex: 1 }} />
+        <button
+          onClick={(e) => { e.stopPropagation(); onDeny() }}
+          style={{
+            background: 'none', border: `1px solid ${colors.borderMuted}`,
+            color: colors.textSecondary, borderRadius: 6,
+            padding: '3px 10px', fontSize: 11, cursor: 'pointer', flexShrink: 0,
+          }}
+        >Deny</button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onAllow() }}
+          style={{
+            background: colors.green, border: 'none', color: '#fff',
+            borderRadius: 6, padding: '3px 10px', fontSize: 11,
+            fontWeight: 600, cursor: 'pointer', flexShrink: 0,
+          }}
+        >Allow</button>
       </div>
-      <button
-        onClick={(e) => { e.stopPropagation(); onDeny() }}
-        style={{
-          background: 'none', border: `1px solid ${colors.borderMuted}`,
-          color: colors.textSecondary, borderRadius: 6,
-          padding: '4px 12px', fontSize: 11, cursor: 'pointer', flexShrink: 0,
-        }}
-      >Deny</button>
-      <button
-        onClick={(e) => { e.stopPropagation(); onAllow() }}
-        style={{
-          background: colors.green, border: 'none', color: '#fff',
-          borderRadius: 6, padding: '4px 12px', fontSize: 11,
-          fontWeight: 600, cursor: 'pointer', flexShrink: 0,
-        }}
-      >Allow</button>
+      {renderDetail()}
     </div>
   )
 }

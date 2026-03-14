@@ -36,13 +36,13 @@ export interface PermissionResponse {
 }
 
 // AskUserQuestion tool input shape (from Claude Agent SDK)
-export interface AskUserQuestionOption {
+interface AskUserQuestionOption {
   label: string
   description: string
   markdown?: string
 }
 
-export interface AskUserQuestionItem {
+interface AskUserQuestionItem {
   question: string
   header: string
   options: AskUserQuestionOption[]
@@ -150,6 +150,15 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
   dontAsk: "Don't Ask",
 }
 
+// Git file status (detailed — separates staged/unstaged/untracked)
+export interface GitFileStatus {
+  path: string
+  basename: string
+  indexStatus: string    // X column from porcelain: ' '|'M'|'A'|'D'|'R'|'?'
+  workTreeStatus: string // Y column: ' '|'M'|'D'|'?'
+  category: 'staged' | 'unstaged' | 'untracked'
+}
+
 // IPC channel names
 export const IPC = {
   // Auth
@@ -177,6 +186,7 @@ export const IPC = {
   AGENT_EMIT_SYSTEM: 'agent:emit-system',
   // Agent events (main -> renderer)
   AGENT_MESSAGE: 'agent:message',
+  AGENT_MESSAGE_BATCH: 'agent:message-batch',
   AGENT_PERMISSION_REQUEST: 'agent:permission-request',
   AGENT_SESSION_STARTED: 'agent:session-started',
   AGENT_SESSION_ENDED: 'agent:session-ended',
@@ -188,8 +198,20 @@ export const IPC = {
   FS_WRITE_FILE: 'fs:write-file',
   FS_GIT_DIFF: 'fs:git-diff',
   FS_GIT_STATUS: 'fs:git-status',
+  FS_GIT_STATUS_DETAILED: 'fs:git-status-detailed',
+  FS_GIT_STAGE: 'fs:git-stage',
+  FS_GIT_UNSTAGE: 'fs:git-unstage',
+  FS_GIT_DISCARD: 'fs:git-discard',
+  FS_GIT_COMMIT: 'fs:git-commit',
+  // CLI install
+  CLI_INSTALL: 'cli:install',
+  CLI_UNINSTALL: 'cli:uninstall',
+  CLI_IS_INSTALLED: 'cli:is-installed',
+  // App
+  APP_INITIAL_CWD: 'app:initial-cwd',
   // Terminal
   TERM_CREATE: 'term:create',
+  TERM_BUFFER: 'term:buffer',
   TERM_WRITE: 'term:write',
   TERM_RESIZE: 'term:resize',
   TERM_CLOSE: 'term:close',

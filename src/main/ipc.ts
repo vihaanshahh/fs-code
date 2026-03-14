@@ -4,7 +4,7 @@ import * as agent from './agent'
 import * as auth from './auth'
 import * as fs from './file-system'
 import * as terminal from './terminal'
-import { resolve } from 'node:path'
+import { resolve, isAbsolute } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
@@ -44,6 +44,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle(IPC.AGENT_CLOSE, async (_, { agentId }: { agentId: string }) => {
+    terminal.closeAgentTerminal(agentId)
     return agent.closeAgent(agentId)
   })
 
@@ -81,8 +82,15 @@ export function registerIpcHandlers() {
     await agent.continueSession(agentId)
   })
 
-  ipcMain.handle(IPC.AGENT_RENAME, async (_, { sessionId, title }: { sessionId: string; title: string }) => {
-    await agent.doRenameSession(sessionId, title)
+  ipcMain.handle(IPC.AGENT_RENAME, async (_, { agentId, name, sessionId, title }: { agentId?: string; name?: string; sessionId?: string; title?: string }) => {
+    // Update in-memory agent name
+    if (agentId && name) {
+      agent.renameAgentName(agentId, name)
+    }
+    // Also rename the SDK session if provided
+    if (sessionId && title) {
+      await agent.doRenameSession(sessionId, title)
+    }
   })
 
   ipcMain.handle(IPC.AGENT_SET_PERMISSION_MODE, async (_, { agentId, mode }: { agentId: string; mode: string }) => {
@@ -144,7 +152,7 @@ export function registerIpcHandlers() {
 
   ipcMain.handle(IPC.FS_READ_FILE, async (_, { path, cwd }: { path: string; cwd?: string }) => {
     const base = cwd || process.cwd()
-    const absPath = require('path').isAbsolute(path) ? path : require('path').resolve(base, path)
+    const absPath = isAbsolute(path) ? path : resolve(base, path)
     return fs.readFileContent(absPath)
   })
 
@@ -158,14 +166,54 @@ export function registerIpcHandlers() {
 
   ipcMain.handle(IPC.FS_GIT_DIFF, async (_, { path, cwd }: { path: string; cwd?: string }) => {
     const base = cwd || process.cwd()
-    const absPath = require('path').isAbsolute(path) ? path : require('path').resolve(base, path)
+    const absPath = isAbsolute(path) ? path : resolve(base, path)
     return fs.getGitDiff(absPath)
   })
 
+  // SCM operations
+  ipcMain.handle(IPC.FS_GIT_STATUS_DETAILED, async (_, { cwd }: { cwd: string }) => {
+    return fs.getGitStatusDetailed(cwd)
+  })
+
+  ipcMain.handle(IPC.FS_GIT_STAGE, async (_, { path, cwd }: { path: string; cwd: string }) => {
+    return fs.gitStage(path, cwd)
+  })
+
+  ipcMain.handle(IPC.FS_GIT_UNSTAGE, async (_, { path, cwd }: { path: string; cwd: string }) => {
+    return fs.gitUnstage(path, cwd)
+  })
+
+  ipcMain.handle(IPC.FS_GIT_DISCARD, async (_, { path, cwd }: { path: string; cwd: string }) => {
+    return fs.gitDiscard(path, cwd)
+  })
+
+  ipcMain.handle(IPC.FS_GIT_COMMIT, async (_, { message, cwd }: { message: string; cwd: string }) => {
+    return fs.gitCommit(message, cwd)
+  })
+
+  // CLI install
+  ipcMain.handle(IPC.CLI_INSTALL, async () => {
+    const { installCLI } = await import('./cli-install')
+    return installCLI()
+  })
+
+  ipcMain.handle(IPC.CLI_UNINSTALL, async () => {
+    const { uninstallCLI } = await import('./cli-install')
+    return uninstallCLI()
+  })
+
+  ipcMain.handle(IPC.CLI_IS_INSTALLED, async () => {
+    const { isCLIInstalled } = await import('./cli-install')
+    return isCLIInstalled()
+  })
+
   // Terminal
-  ipcMain.handle(IPC.TERM_CREATE, async (_, { cwd }: { cwd: string }) => {
-    const terminalId = terminal.createTerminal(cwd)
-    return { terminalId }
+  ipcMain.handle(IPC.TERM_CREATE, async (_, { agentId, cwd }: { agentId: string; cwd: string }) => {
+    return terminal.getOrCreateTerminal(agentId, cwd)
+  })
+
+  ipcMain.handle(IPC.TERM_BUFFER, async (_, { terminalId }: { terminalId: string }) => {
+    return { data: terminal.getBuffer(terminalId) }
   })
 
   ipcMain.handle(IPC.TERM_WRITE, async (_, { terminalId, data }: { terminalId: string; data: string }) => {

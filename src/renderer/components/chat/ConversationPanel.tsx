@@ -4,19 +4,38 @@ import { useTheme } from '../../ThemeContext'
 import { slashCommands } from '../palette/commands'
 import MarkdownRenderer from './MarkdownRenderer'
 
-// --- Braille Spinner ---
+// --- Braille Spinner (CSS-only, zero re-renders) ---
 
-const BRAILLE_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+const brailleStyleId = 'braille-spinner-style'
+function ensureBrailleStyle() {
+  if (document.getElementById(brailleStyleId)) return
+  const style = document.createElement('style')
+  style.id = brailleStyleId
+  style.textContent = `
+@keyframes braille-spin {
+  0%   { content: "⠋"; }
+  10%  { content: "⠙"; }
+  20%  { content: "⠹"; }
+  30%  { content: "⠸"; }
+  40%  { content: "⠼"; }
+  50%  { content: "⠴"; }
+  60%  { content: "⠦"; }
+  70%  { content: "⠧"; }
+  80%  { content: "⠇"; }
+  90%  { content: "⠏"; }
+}
+.braille-spinner::after {
+  content: "⠋";
+  animation: braille-spin 0.8s steps(1) infinite;
+}`
+  document.head.appendChild(style)
+}
 
 function BrailleSpinner({ color }: { color: string }) {
-  const [frame, setFrame] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => setFrame(f => (f + 1) % BRAILLE_FRAMES.length), 80)
-    return () => clearInterval(id)
-  }, [])
+  useEffect(() => { ensureBrailleStyle() }, [])
   return (
     <div style={{ padding: '10px 16px', fontSize: 16, color, opacity: 0.7 }}>
-      {BRAILLE_FRAMES[frame]}
+      <span className="braille-spinner" />
     </div>
   )
 }
@@ -69,84 +88,136 @@ function AssistantMessage({ msg, phaseColor }: { msg: Extract<UIMessage, { type:
 
 function ToolCard({ msg }: { msg: Extract<UIMessage, { type: 'tool-use' }> }) {
   const { colors, fonts } = useTheme()
-  const [expanded, setExpanded] = useState(false)
-  const inputStr = typeof msg.input === 'string' ? msg.input : JSON.stringify(msg.input, null, 2)
+  const input = (typeof msg.input === 'object' && msg.input ? msg.input : {}) as Record<string, unknown>
+  const isEmpty = Object.keys(input).length === 0
 
-  const iconMap: Record<string, string> = {
-    Read: 'eye', Edit: 'pencil', Write: 'doc', Bash: '$_', Grep: 'search',
-    Glob: 'folder', Ls: 'list',
+  // Skip rendering empty-input duplicates from stream events
+  if (isEmpty) return null
+
+  const shortenPath = (p: string) => {
+    const parts = p.split('/')
+    if (parts.length <= 3) return p
+    return '.../' + parts.slice(-3).join('/')
   }
 
-  const getSummary = () => {
-    try {
-      const parsed = typeof msg.input === 'object' ? msg.input as Record<string, unknown> : JSON.parse(String(msg.input))
-      if (parsed.file_path) return String(parsed.file_path).split('/').pop()
-      if (parsed.command) return String(parsed.command).slice(0, 50)
-      if (parsed.pattern) return String(parsed.pattern)
-      if (parsed.path) return String(parsed.path).split('/').pop()
-    } catch { /* ignore */ }
-    return inputStr.split('\n')[0].slice(0, 50)
-  }
-
-  return (
-    <div
-      style={{
-        margin: '4px 0',
-        background: `${colors.bgSurface}`,
-        border: `1px solid ${colors.border}`,
-        borderRadius: 8,
-        overflow: 'hidden',
-        cursor: 'pointer',
-        transition: 'border-color 0.15s ease',
-      }}
-      onClick={() => setExpanded(!expanded)}
-    >
+  // ── Bash: mini terminal ──
+  if (msg.toolName === 'Bash') {
+    const cmd = (input.command as string) || ''
+    if (!cmd) return null
+    return (
       <div style={{
-        padding: '6px 12px',
+        margin: '4px 0',
+        background: colors.bgOverlay,
+        borderRadius: 6,
+        border: `1px solid ${colors.border}`,
+        padding: '6px 10px',
         display: 'flex',
-        alignItems: 'center',
         gap: 8,
-        fontSize: 12,
+        alignItems: 'flex-start',
       }}>
         <span style={{
           fontFamily: fonts.mono,
-          fontSize: 10,
-          padding: '2px 6px',
-          background: `${colors.blue}15`,
-          color: colors.blue,
-          borderRadius: 4,
-          fontWeight: 600,
-        }}>
-          {iconMap[msg.toolName] || msg.toolName}
-        </span>
-        <span style={{ color: colors.textSecondary, fontWeight: 500 }}>{msg.toolName}</span>
-        <span style={{
-          color: colors.textMuted,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-          flex: 1,
-        }}>
-          {getSummary()}
-        </span>
-        <span style={{ color: colors.textMuted, fontSize: 10 }}>{expanded ? '\u25B4' : '\u25BE'}</span>
-      </div>
-      {expanded && (
-        <pre style={{
-          padding: '8px 12px',
-          margin: 0,
-          fontSize: 11,
+          fontSize: 12,
+          color: colors.amber,
+          userSelect: 'none',
+          flexShrink: 0,
+          lineHeight: '18px',
+        }}>$</span>
+        <code style={{
           fontFamily: fonts.mono,
-          color: colors.textMuted,
+          fontSize: 12,
+          color: colors.text,
           whiteSpace: 'pre-wrap',
-          maxHeight: 200,
-          overflow: 'auto',
-          borderTop: `1px solid ${colors.border}`,
-          background: colors.bgOverlay,
-        }}>
-          {inputStr}
-        </pre>
-      )}
+          wordBreak: 'break-all',
+          lineHeight: '18px',
+        }}>{cmd}</code>
+      </div>
+    )
+  }
+
+  // ── Read / Edit / Write: file path ──
+  if (msg.toolName === 'Read' || msg.toolName === 'Edit' || msg.toolName === 'Write') {
+    const filePath = (input.file_path as string) || ''
+    if (!filePath) return null
+    const fileName = filePath.split('/').pop() || filePath
+    const dir = shortenPath(filePath.slice(0, filePath.length - fileName.length))
+    const accentColor = msg.toolName === 'Read' ? colors.blue : msg.toolName === 'Edit' ? colors.amber : colors.green
+    const label = msg.toolName === 'Read' ? 'Read' : msg.toolName === 'Edit' ? 'Edit' : 'Write'
+    return (
+      <div style={{
+        margin: '4px 0',
+        padding: '5px 10px',
+        display: 'flex',
+        gap: 6,
+        alignItems: 'center',
+        fontSize: 12,
+        fontFamily: fonts.mono,
+      }}>
+        <span style={{
+          fontSize: 10,
+          fontWeight: 600,
+          color: accentColor,
+          textTransform: 'uppercase',
+          letterSpacing: '0.3px',
+          flexShrink: 0,
+        }}>{label}</span>
+        <span style={{ color: colors.textMuted }}>{dir}</span>
+        <span style={{ color: colors.text, fontWeight: 500 }}>{fileName}</span>
+      </div>
+    )
+  }
+
+  // ── Grep / Glob: search pattern ──
+  if (msg.toolName === 'Grep' || msg.toolName === 'Glob') {
+    const pattern = (input.pattern as string) || ''
+    if (!pattern) return null
+    const scope = (input.path as string) || (input.glob as string) || ''
+    const accentColor = msg.toolName === 'Grep' ? colors.purple : colors.blue
+    return (
+      <div style={{
+        margin: '4px 0',
+        padding: '5px 10px',
+        display: 'flex',
+        gap: 6,
+        alignItems: 'center',
+        fontSize: 12,
+        fontFamily: fonts.mono,
+      }}>
+        <span style={{
+          fontSize: 10,
+          fontWeight: 600,
+          color: accentColor,
+          textTransform: 'uppercase',
+          letterSpacing: '0.3px',
+          flexShrink: 0,
+        }}>{msg.toolName}</span>
+        <span style={{ color: colors.text }}>{pattern}</span>
+        {scope && <span style={{ color: colors.textMuted }}>{shortenPath(scope)}</span>}
+      </div>
+    )
+  }
+
+  // ── Fallback: generic tool ──
+  const summary = (input.file_path || input.command || input.pattern || input.path || '') as string
+  return (
+    <div style={{
+      margin: '4px 0',
+      padding: '5px 10px',
+      display: 'flex',
+      gap: 6,
+      alignItems: 'center',
+      fontSize: 12,
+      fontFamily: fonts.mono,
+    }}>
+      <span style={{
+        fontSize: 10,
+        fontWeight: 600,
+        color: colors.textSecondary,
+        textTransform: 'uppercase',
+        letterSpacing: '0.3px',
+        flexShrink: 0,
+      }}>{msg.toolName}</span>
+      {summary && <span style={{ color: colors.textMuted }}>{String(summary).slice(0, 80)}</span>}
     </div>
   )
 }
@@ -439,7 +510,7 @@ function SystemMessage({ msg, onSlashCommand }: { msg: Extract<UIMessage, { type
   )
 }
 
-function MessageRenderer({ msg, phaseColor, onSlashCommand }: { msg: UIMessage; phaseColor: string; onSlashCommand?: (cmd: string) => void }) {
+const MessageRenderer = React.memo(function MessageRenderer({ msg, phaseColor, onSlashCommand }: { msg: UIMessage; phaseColor: string; onSlashCommand?: (cmd: string) => void }) {
   switch (msg.type) {
     case 'user': return <UserMessage msg={msg} />
     case 'assistant': return <AssistantMessage msg={msg} phaseColor={phaseColor} />
@@ -454,7 +525,7 @@ function MessageRenderer({ msg, phaseColor, onSlashCommand }: { msg: UIMessage; 
       return null
     default: return null
   }
-}
+})
 
 // --- Permission Banner ---
 
@@ -463,66 +534,106 @@ function PermissionBanner({ request, onRespond }: {
   onRespond: (behavior: 'allow' | 'deny') => void
 }) {
   const { colors, fonts } = useTheme()
-  const inputStr = JSON.stringify(request.input, null, 2)
+  const input = request.input || {}
+
+  const accentMap: Record<string, string> = {
+    Bash: colors.amber, Read: colors.blue, Edit: colors.amber,
+    Write: colors.green, Grep: colors.purple, Glob: colors.blue,
+  }
+  const accent = accentMap[request.toolName] || colors.textSecondary
+
+  const shortenPath = (p: string) => {
+    const parts = p.split('/')
+    if (parts.length <= 3) return p
+    return '.../' + parts.slice(-3).join('/')
+  }
+
+  const renderDetail = () => {
+    if (request.toolName === 'Bash') {
+      const cmd = input.command as string
+      if (!cmd) return null
+      return (
+        <div style={{
+          margin: '8px 0 0',
+          background: colors.bgOverlay,
+          borderRadius: 6,
+          border: `1px solid ${colors.border}`,
+          padding: '6px 10px',
+          display: 'flex', gap: 8, alignItems: 'flex-start',
+        }}>
+          <span style={{ fontFamily: fonts.mono, fontSize: 12, color: colors.amber, flexShrink: 0, lineHeight: '18px' }}>$</span>
+          <code style={{ fontFamily: fonts.mono, fontSize: 12, color: colors.text, whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: '18px' }}>{cmd}</code>
+        </div>
+      )
+    }
+    if (request.toolName === 'Read' || request.toolName === 'Edit' || request.toolName === 'Write') {
+      const filePath = input.file_path as string
+      if (!filePath) return null
+      const fileName = filePath.split('/').pop() || filePath
+      const dir = shortenPath(filePath.slice(0, filePath.length - fileName.length))
+      return (
+        <div style={{ margin: '6px 0 0', fontFamily: fonts.mono, fontSize: 12, display: 'flex', gap: 4, alignItems: 'center' }}>
+          <span style={{ color: colors.textMuted }}>{dir}</span>
+          <span style={{ color: colors.text, fontWeight: 500 }}>{fileName}</span>
+        </div>
+      )
+    }
+    if (request.toolName === 'Grep' || request.toolName === 'Glob') {
+      const pattern = input.pattern as string
+      if (!pattern) return null
+      const scope = (input.path || input.glob || '') as string
+      return (
+        <div style={{ margin: '6px 0 0', fontFamily: fonts.mono, fontSize: 12, display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ color: colors.text }}>{pattern}</span>
+          {scope && <span style={{ color: colors.textMuted }}>{shortenPath(scope)}</span>}
+        </div>
+      )
+    }
+    // Fallback for unknown tools
+    const summary = (input.file_path || input.command || input.pattern || input.path || '') as string
+    if (summary) {
+      return (
+        <div style={{ margin: '6px 0 0', fontFamily: fonts.mono, fontSize: 12, color: colors.textMuted }}>
+          {String(summary).slice(0, 100)}
+        </div>
+      )
+    }
+    return null
+  }
 
   return (
     <div style={{
       margin: '8px 0',
-      padding: 14,
-      background: colors.bgSurface,
-      border: `1px solid ${colors.amber}40`,
+      padding: '10px 14px',
+      background: `${accent}08`,
+      border: `1px solid ${accent}30`,
       borderRadius: 10,
       animation: 'fadeSlideIn 0.2s ease',
     }}>
-      <div style={{ fontSize: 13, color: colors.amber, fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ fontSize: 15 }}>!</span>
-        Allow {request.toolName}?
-      </div>
-      <pre style={{
-        fontSize: 11,
-        fontFamily: fonts.mono,
-        color: colors.textMuted,
-        background: colors.bgOverlay,
-        borderRadius: 6,
-        padding: 8,
-        maxHeight: 100,
-        overflow: 'auto',
-        margin: '0 0 10px',
-        whiteSpace: 'pre-wrap',
-      }}>
-        {inputStr}
-      </pre>
-      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{
+          fontSize: 10, fontWeight: 600, color: accent,
+          textTransform: 'uppercase', letterSpacing: '0.3px',
+        }}>{request.toolName}</span>
+        <span style={{ flex: 1 }} />
         <button
           onClick={() => onRespond('deny')}
           style={{
-            background: 'none',
-            border: `1px solid ${colors.borderMuted}`,
-            color: colors.textSecondary,
-            borderRadius: 6,
-            padding: '5px 14px',
-            fontSize: 12,
-            cursor: 'pointer',
+            background: 'none', border: `1px solid ${colors.borderMuted}`,
+            color: colors.textSecondary, borderRadius: 6,
+            padding: '4px 12px', fontSize: 11, cursor: 'pointer',
           }}
-        >
-          Deny
-        </button>
+        >Deny</button>
         <button
           onClick={() => onRespond('allow')}
           style={{
-            background: colors.green,
-            border: 'none',
-            color: '#fff',
-            borderRadius: 6,
-            padding: '5px 14px',
-            fontSize: 12,
-            fontWeight: 600,
-            cursor: 'pointer',
+            background: colors.green, border: 'none', color: '#fff',
+            borderRadius: 6, padding: '4px 12px', fontSize: 11,
+            fontWeight: 600, cursor: 'pointer',
           }}
-        >
-          Allow
-        </button>
+        >Allow</button>
       </div>
+      {renderDetail()}
     </div>
   )
 }
@@ -692,6 +803,18 @@ export default function ConversationPanel({
   // Auto-focus
   useEffect(() => { inputRef.current?.focus() }, [])
 
+  // Reset textarea height when input is cleared
+  useEffect(() => {
+    if (inputRef.current) {
+      if (!input) {
+        inputRef.current.style.height = '21px';
+      } else {
+        inputRef.current.style.height = 'auto';
+        inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 84) + 'px';
+      }
+    }
+  }, [input])
+
   const selectSlashCommand = (cmd: string) => {
     // If command takes args (like /btw, /model, /rename), insert with trailing space
     const needsArg = ['/btw', '/model', '/rename', '/resume', '/compact', '/permissions', '/pr-comments', '/add-dir'].includes(cmd)
@@ -845,7 +968,12 @@ export default function ConversationPanel({
             <textarea
               ref={inputRef}
               value={input}
-              onChange={e => setInput(e.target.value)}
+              onChange={e => {
+                setInput(e.target.value);
+                const ta = e.target;
+                ta.style.height = 'auto';
+                ta.style.height = Math.min(ta.scrollHeight, 84) + 'px';
+              }}
               placeholder={compact ? 'Message...' : 'Message Claude...'}
               onKeyDown={handleKeyDown}
               style={{
@@ -859,8 +987,9 @@ export default function ConversationPanel({
                 resize: 'none',
                 outline: 'none',
                 minHeight: 21,
-                maxHeight: compact ? 80 : 120,
+                maxHeight: 84,
                 lineHeight: '21px',
+                overflowY: 'auto',
               }}
               rows={1}
             />

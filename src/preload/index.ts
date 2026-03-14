@@ -33,6 +33,8 @@ const api = {
     ipcRenderer.invoke(IPC.AGENT_RESUME, { agentId, sessionId }),
   continueSession: (agentId: string) =>
     ipcRenderer.invoke(IPC.AGENT_CONTINUE, { agentId }),
+  renameAgent: (agentId: string, name: string) =>
+    ipcRenderer.invoke(IPC.AGENT_RENAME, { agentId, name }),
   renameSession: (sessionId: string, title: string) =>
     ipcRenderer.invoke(IPC.AGENT_RENAME, { sessionId, title }),
   cliRun: (args: string[], cwd?: string): Promise<{ stdout?: string; stderr?: string; error?: string }> =>
@@ -68,10 +70,26 @@ const api = {
     ipcRenderer.invoke(IPC.FS_GIT_DIFF, { path, cwd }),
   gitStatus: (cwd: string): Promise<{ files: { path: string; status: string }[] }> =>
     ipcRenderer.invoke(IPC.FS_GIT_STATUS, { cwd }),
+  gitStatusDetailed: (cwd: string) =>
+    ipcRenderer.invoke(IPC.FS_GIT_STATUS_DETAILED, { cwd }),
+  gitStage: (path: string, cwd: string) =>
+    ipcRenderer.invoke(IPC.FS_GIT_STAGE, { path, cwd }),
+  gitUnstage: (path: string, cwd: string) =>
+    ipcRenderer.invoke(IPC.FS_GIT_UNSTAGE, { path, cwd }),
+  gitDiscard: (path: string, cwd: string) =>
+    ipcRenderer.invoke(IPC.FS_GIT_DISCARD, { path, cwd }),
+  gitCommit: (message: string, cwd: string) =>
+    ipcRenderer.invoke(IPC.FS_GIT_COMMIT, { message, cwd }),
+  // CLI install
+  installCLI: () => ipcRenderer.invoke(IPC.CLI_INSTALL),
+  uninstallCLI: () => ipcRenderer.invoke(IPC.CLI_UNINSTALL),
+  isCLIInstalled: () => ipcRenderer.invoke(IPC.CLI_IS_INSTALLED),
 
   // Terminal
-  createTerminal: (cwd: string) =>
-    ipcRenderer.invoke(IPC.TERM_CREATE, { cwd }),
+  createTerminal: (agentId: string, cwd: string): Promise<{ terminalId: string; isNew: boolean }> =>
+    ipcRenderer.invoke(IPC.TERM_CREATE, { agentId, cwd }),
+  getTerminalBuffer: (terminalId: string): Promise<{ data: string }> =>
+    ipcRenderer.invoke(IPC.TERM_BUFFER, { terminalId }),
   writeTerminal: (terminalId: string, data: string) =>
     ipcRenderer.invoke(IPC.TERM_WRITE, { terminalId, data }),
   resizeTerminal: (terminalId: string, cols: number, rows: number) =>
@@ -89,7 +107,15 @@ const api = {
   onAgentMessage: (cb: (data: any) => void) => {
     const handler = (_: any, data: any) => cb(data)
     ipcRenderer.on(IPC.AGENT_MESSAGE, handler)
-    return () => ipcRenderer.removeListener(IPC.AGENT_MESSAGE, handler)
+    // Handle batched messages (session history) — fan out to same callback
+    const batchHandler = (_: any, data: { agentId: string; messages: any[] }) => {
+      for (const msg of data.messages) cb({ agentId: data.agentId, ...msg })
+    }
+    ipcRenderer.on(IPC.AGENT_MESSAGE_BATCH, batchHandler)
+    return () => {
+      ipcRenderer.removeListener(IPC.AGENT_MESSAGE, handler)
+      ipcRenderer.removeListener(IPC.AGENT_MESSAGE_BATCH, batchHandler)
+    }
   },
   onPermissionRequest: (cb: (data: any) => void) => {
     const handler = (_: any, data: any) => cb(data)
@@ -115,6 +141,11 @@ const api = {
     const handler = (_: any, data: any) => cb(data)
     ipcRenderer.on(IPC.TERM_EXIT, handler)
     return () => ipcRenderer.removeListener(IPC.TERM_EXIT, handler)
+  },
+  onInitialCwd: (cb: (cwd: string) => void) => {
+    const handler = (_: any, cwd: string) => cb(cwd)
+    ipcRenderer.on(IPC.APP_INITIAL_CWD, handler)
+    return () => ipcRenderer.removeListener(IPC.APP_INITIAL_CWD, handler)
   },
 }
 

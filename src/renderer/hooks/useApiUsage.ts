@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { api } from '../lib/api'
 
 interface UsageLimitData {
@@ -13,7 +13,7 @@ interface ExtraUsageData {
   utilization: number | null
 }
 
-export interface UsageAPIData {
+interface UsageAPIData {
   five_hour?: UsageLimitData
   seven_day?: UsageLimitData
   seven_day_sonnet?: UsageLimitData
@@ -40,8 +40,9 @@ const POLL_INTERVAL = 2 * 60 * 1000 // 2 minutes
 export function useApiUsage() {
   const [data, setData] = useState<UsageAPIData | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const fetchRef = useRef<() => Promise<void>>()
 
-  const fetch_ = useCallback(async () => {
+  fetchRef.current = async () => {
     try {
       const result: any = await api.fetchUsage()
       if (result.error) {
@@ -53,13 +54,13 @@ export function useApiUsage() {
     } catch {
       setError('Failed to fetch')
     }
-  }, [])
+  }
 
   useEffect(() => {
-    fetch_()
-    const id = setInterval(fetch_, POLL_INTERVAL)
+    fetchRef.current?.()
+    const id = setInterval(() => fetchRef.current?.(), POLL_INTERVAL)
     return () => clearInterval(id)
-  }, [fetch_])
+  }, [])
 
   // Derived summary for the status bar
   const fiveHour = data?.five_hour
@@ -72,5 +73,5 @@ export function useApiUsage() {
   const extraSpent = extra?.used_credits != null ? (extra.used_credits / 100) : null
   const extraLimit = extra?.monthly_limit != null ? (extra.monthly_limit / 100) : null
 
-  return { data, error, sessionPct, sessionReset, weekPct, extraSpent, extraLimit, refetch: fetch_ }
+  return { data, error, sessionPct, sessionReset, weekPct, extraSpent, extraLimit, refetch: () => fetchRef.current?.() }
 }

@@ -3,115 +3,11 @@ import type { TrackedFile, FileOperation, FileOperationType } from '../../../sha
 import { useTheme } from '../../ThemeContext'
 import type { ThemeColors } from '../../theme'
 import { api } from '../../lib/api'
-
-// ── Diff computation ───────────────────────────────────────────────
-
-interface DiffLine {
-  type: 'add' | 'remove' | 'context'
-  content: string
-  oldNum?: number
-  newNum?: number
-}
-
-interface DiffHunk {
-  oldStart: number
-  oldCount: number
-  newStart: number
-  newCount: number
-  lines: DiffLine[]
-}
-
-/** Simple LCS-based line diff */
-function computeLineDiff(oldStr: string, newStr: string): DiffLine[] {
-  const oldLines = oldStr.split('\n')
-  const newLines = newStr.split('\n')
-  const m = oldLines.length
-  const n = newLines.length
-
-  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0))
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      dp[i][j] = oldLines[i - 1] === newLines[j - 1]
-        ? dp[i - 1][j - 1] + 1
-        : Math.max(dp[i - 1][j], dp[i][j - 1])
-    }
-  }
-
-  let i = m, j = n
-  const stack: DiffLine[] = []
-
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
-      stack.push({ type: 'context', content: oldLines[i - 1], oldNum: i, newNum: j })
-      i--; j--
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      stack.push({ type: 'add', content: newLines[j - 1], newNum: j })
-      j--
-    } else {
-      stack.push({ type: 'remove', content: oldLines[i - 1], oldNum: i })
-      i--
-    }
-  }
-
-  const result: DiffLine[] = []
-  while (stack.length) result.push(stack.pop()!)
-  return result
-}
-
-/** Split a flat diff into hunks with N lines of context */
-function splitIntoHunks(lines: DiffLine[], contextLines = 3): DiffHunk[] {
-  const changedIndices: number[] = []
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].type !== 'context') changedIndices.push(i)
-  }
-  if (changedIndices.length === 0) return []
-
-  const groups: [number, number][] = []
-  let start = changedIndices[0]
-  let end = changedIndices[0]
-  for (let k = 1; k < changedIndices.length; k++) {
-    if (changedIndices[k] - end <= contextLines * 2 + 1) {
-      end = changedIndices[k]
-    } else {
-      groups.push([start, end])
-      start = changedIndices[k]
-      end = changedIndices[k]
-    }
-  }
-  groups.push([start, end])
-
-  const hunks: DiffHunk[] = []
-  for (const [gs, ge] of groups) {
-    const hunkStart = Math.max(0, gs - contextLines)
-    const hunkEnd = Math.min(lines.length - 1, ge + contextLines)
-    const hunkLines = lines.slice(hunkStart, hunkEnd + 1)
-
-    const oldStart = hunkLines[0]?.oldNum ?? hunkLines.find(l => l.oldNum)?.oldNum ?? 1
-    const newStart = hunkLines[0]?.newNum ?? hunkLines.find(l => l.newNum)?.newNum ?? 1
-    const oldCount = hunkLines.filter(l => l.type !== 'add').length
-    const newCount = hunkLines.filter(l => l.type !== 'remove').length
-
-    hunks.push({ oldStart, oldCount, newStart, newCount, lines: hunkLines })
-  }
-
-  return hunks
-}
-
-function newFileDiffLines(content: string): DiffLine[] {
-  return content.split('\n').map((line, i) => ({
-    type: 'add' as const,
-    content: line,
-    newNum: i + 1,
-  }))
-}
-
-function deletedFileDiffLines(content: string): DiffLine[] {
-  return content.split('\n').map((line, i) => ({
-    type: 'remove' as const,
-    content: line,
-    oldNum: i + 1,
-  }))
-}
+import {
+  computeLineDiff, splitIntoHunks, newFileDiffLines, deletedFileDiffLines, countDiffLines,
+  type DiffLine,
+} from '../shared/diff-utils'
+import { DiffHunkHeader, DiffLineRow, CollapsedContext } from '../shared/DiffDisplay'
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -131,15 +27,6 @@ function timeAgo(ts: number): string {
 
 function hasDiffContent(op: FileOperation): boolean {
   return !!(op.editOldString !== undefined && op.editNewString !== undefined) || !!op.writeContent
-}
-
-function countDiffLines(lines: DiffLine[]): { add: number; remove: number } {
-  let add = 0, remove = 0
-  for (const l of lines) {
-    if (l.type === 'add') add++
-    else if (l.type === 'remove') remove++
-  }
-  return { add, remove }
 }
 
 type GitStatus = 'untracked' | 'modified' | 'added' | 'deleted' | 'unchanged' | 'error'
@@ -165,90 +52,6 @@ function getOpDotColor(c: ThemeColors): Record<FileOperationType, string> {
 }
 
 // ── Sub-components ──────────────────────────────────────────────────
-
-function DiffHunkHeader({ text }: { text: string }) {
-  const { colors, fonts } = useTheme()
-  return (
-    <div style={{
-      background: colors.diffHunkBg,
-      color: colors.diffHunkText,
-      padding: '4px 12px',
-      fontSize: 12,
-      fontFamily: fonts.mono,
-      borderTop: `1px solid ${colors.border}`,
-      borderBottom: `1px solid ${colors.border}`,
-      userSelect: 'none',
-    }}>
-      {text}
-    </div>
-  )
-}
-
-function DiffLineRow({ line }: { line: DiffLine }) {
-  const { colors, fonts } = useTheme()
-  const isAdd = line.type === 'add'
-  const isRemove = line.type === 'remove'
-  const bg = isAdd ? colors.diffAddBg : isRemove ? colors.diffRemoveBg : 'transparent'
-  const prefix = isAdd ? '+' : isRemove ? '-' : ' '
-  const textColor = isAdd ? colors.diffAddText : isRemove ? colors.diffRemoveText : colors.text
-
-  return (
-    <div style={{
-      display: 'flex',
-      background: bg,
-      fontFamily: fonts.mono,
-      fontSize: 12,
-      lineHeight: '20px',
-      minHeight: 20,
-    }}>
-      <span style={{
-        width: 48, textAlign: 'right', padding: '0 8px 0 0',
-        color: isRemove ? colors.diffLineNumActive : colors.diffLineNum,
-        userSelect: 'none', flexShrink: 0, borderRight: `1px solid ${colors.border}`,
-      }}>
-        {line.oldNum ?? ''}
-      </span>
-      <span style={{
-        width: 48, textAlign: 'right', padding: '0 8px 0 0',
-        color: isAdd ? colors.diffLineNumActive : colors.diffLineNum,
-        userSelect: 'none', flexShrink: 0, borderRight: `1px solid ${colors.border}`,
-      }}>
-        {line.newNum ?? ''}
-      </span>
-      <span style={{
-        width: 20, textAlign: 'center', color: textColor,
-        userSelect: 'none', flexShrink: 0, fontWeight: 700,
-      }}>
-        {prefix}
-      </span>
-      <span style={{
-        flex: 1, color: textColor, whiteSpace: 'pre', overflow: 'hidden', paddingRight: 12,
-      }}>
-        {line.content}
-      </span>
-    </div>
-  )
-}
-
-function CollapsedContext({ count }: { count: number }) {
-  const { colors, fonts } = useTheme()
-  if (count <= 0) return null
-  return (
-    <div style={{
-      background: colors.bgSurface,
-      borderTop: `1px solid ${colors.border}`,
-      borderBottom: `1px solid ${colors.border}`,
-      padding: '2px 12px',
-      fontSize: 11,
-      color: colors.textMuted,
-      fontFamily: fonts.mono,
-      textAlign: 'center',
-      userSelect: 'none',
-    }}>
-      ··· {count} unchanged lines hidden ···
-    </div>
-  )
-}
 
 function AgentBadge({ op }: { op: FileOperation }) {
   const { colors } = useTheme()

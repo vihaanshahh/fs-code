@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { api } from '../lib/api'
 
-export interface ContextUsage {
+interface ContextUsage {
   /** Usage percentage (0–100) — real from API if available, else estimated from tokens */
   percent: number
   /** When the limit resets (epoch ms), or null */
@@ -61,31 +61,37 @@ export function useContextUsage(): ContextUsage {
       }
       // Track real usage from rate_limit_event → usage messages
       if (data.type === 'usage' && typeof data.utilization === 'number') {
-        setUsage(prev => ({
-          ...prev,
-          percent: Math.round(data.utilization * 100),
-          resetsAt: data.resetsAt,
-          resetsLabel: formatResetTime(data.resetsAt),
-          limitType: data.limitType || prev.limitType,
-          status: data.status || prev.status,
-          hasRealData: true,
-        }))
+        const newPercent = Math.round(data.utilization * 100)
+        setUsage(prev => {
+          if (prev.percent === newPercent && prev.resetsAt === data.resetsAt &&
+              prev.status === (data.status || prev.status)) return prev
+          return {
+            ...prev,
+            percent: newPercent,
+            resetsAt: data.resetsAt,
+            resetsLabel: formatResetTime(data.resetsAt),
+            limitType: data.limitType || prev.limitType,
+            status: data.status || prev.status,
+            hasRealData: true,
+          }
+        })
       }
       // Track token usage
       if (data.type === 'token-usage') {
         const tokens = (data.inputTokens || 0) + (data.outputTokens || 0)
+        if (tokens === 0) return
         totalTokens.current += tokens
         setUsage(prev => {
-          const updated = { ...prev, totalTokens: totalTokens.current }
-          // Only use token estimation if we haven't received real data
-          if (!prev.hasRealData) {
-            updated.percent = Math.min(99, Math.round((totalTokens.current / ESTIMATED_TOKEN_BUDGET) * 100))
-          }
-          return updated
+          const newPercent = prev.hasRealData
+            ? prev.percent
+            : Math.min(99, Math.round((totalTokens.current / ESTIMATED_TOKEN_BUDGET) * 100))
+          if (prev.totalTokens === totalTokens.current && prev.percent === newPercent) return prev
+          return { ...prev, totalTokens: totalTokens.current, percent: newPercent }
         })
       }
       // Track total cost from result messages
       if (data.type === 'result' && typeof data.cost === 'number') {
+        if (data.cost === 0) return
         setUsage(prev => ({
           ...prev,
           totalCost: prev.totalCost + data.cost,

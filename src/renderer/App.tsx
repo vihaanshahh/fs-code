@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import JourneyBar from './components/journey/JourneyBar'
 import AgentGrid from './components/grid/AgentGrid'
 import MinimizedAgentsPill from './components/grid/MinimizedAgentsPill'
 import FileActivitySidebar from './components/activity/FileActivitySidebar'
 import FileDetailModal from './components/activity/FileDetailModal'
+import SourceControlSidebar from './components/scm/SourceControlSidebar'
 import TerminalDrawer from './components/terminal/TerminalDrawer'
 import CommandPalette from './components/palette/CommandPalette'
 import ShortcutOverlay from './components/palette/ShortcutOverlay'
@@ -75,6 +76,7 @@ export default function App() {
   const [editingTabId, setEditingTabId] = useState<string | null>(null)
   const [editingTabValue, setEditingTabValue] = useState('')
   const [minimizedView, setMinimizedView] = useState(false)
+  const [activePanel, setActivePanel] = useState<'files' | 'scm'>('files')
 
   const manager = useAgentManager()
   const auth = useAuth()
@@ -84,6 +86,17 @@ export default function App() {
   useEffect(() => {
     setRecentFolders(getRecentFolders())
   }, [manager.agents.length])
+
+  // Handle --open-dir from CLI launcher
+  useEffect(() => {
+    const cleanup = api.onInitialCwd((cwd: string) => {
+      if (cwd) {
+        console.log('[App] received initial cwd from CLI:', cwd)
+        manager.createAgent(cwd)
+      }
+    })
+    return cleanup
+  }, [])
 
   // Save session snapshot on window close
   useEffect(() => {
@@ -118,8 +131,19 @@ export default function App() {
     if (focusAgentId) manager.focusAgent(focusAgentId)
   }, [minimizedView, manager])
 
+  // Stable refs for volatile values so handleSlashCommand doesn't recreate
+  const managerRef = useRef(manager)
+  const focusedAgentRef = useRef(focusedAgent)
+  const authRef = useRef(auth)
+  useEffect(() => { managerRef.current = manager }, [manager])
+  useEffect(() => { focusedAgentRef.current = focusedAgent }, [focusedAgent])
+  useEffect(() => { authRef.current = auth }, [auth])
+
   // Handle slash commands from any agent cell
   const handleSlashCommand = useCallback((rawCmd: string) => {
+    const manager = managerRef.current
+    const focusedAgent = focusedAgentRef.current
+    const auth = authRef.current
     const resolved = resolveAlias(rawCmd.trim())
     const parts = resolved.split(' ')
     const command = parts[0].toLowerCase()
@@ -162,6 +186,10 @@ export default function App() {
         break
       case '/files':
         setSidebarCollapsed(v => !v)
+        break
+      case '/scm':
+        setActivePanel(p => p === 'scm' ? 'files' : 'scm')
+        setSidebarCollapsed(false)
         break
       case '/theme':
         toggleTheme()
@@ -294,11 +322,6 @@ export default function App() {
         }).catch(() => sysMsg('Failed to fetch usage'))
         break
       }
-      case '/cost':
-      case '/context':
-      case '/doctor':
-      case '/status':
-      case '/compact':
       case '/model': {
         if (!agentId) { sysMsg('No active agent'); break }
         if (arg) {
@@ -314,6 +337,11 @@ export default function App() {
         }
         break
       }
+      case '/cost':
+      case '/context':
+      case '/doctor':
+      case '/status':
+      case '/compact':
       case '/memory':
       case '/init':
       case '/config':
@@ -359,10 +387,13 @@ export default function App() {
         sendToSDK()
         break
     }
-  }, [manager, focusedAgent, toggleTheme, auth, contextUsage])
+  }, [toggleTheme])
 
   // Handle command palette actions
   const handlePaletteAction = useCallback((action: string) => {
+    const manager = managerRef.current
+    const focusedAgent = focusedAgentRef.current
+    const auth = authRef.current
     setShowCommandPalette(false)
     switch (action) {
       case 'new-agent': manager.createAgent(); break
@@ -390,8 +421,21 @@ export default function App() {
       case 'mode-default': handleSlashCommand('/default-mode'); break
       case 'mode-yolo': handleSlashCommand('/yolo'); break
       case 'minimize': enterPillMode(); break
+      case 'toggle-scm': setActivePanel(p => p === 'scm' ? 'files' : 'scm'); setSidebarCollapsed(false); break
+      case 'install-cli': {
+        const agentId = manager.focusedId
+        const sysMsg = (text: string) => { if (agentId) api.emitSystemMessage(agentId, text) }
+        api.installCLI().then((result: any) => {
+          if (result.success) {
+            sysMsg(`CLI installed! You can now run 'fluidstate .' from any terminal.\nInstalled to: ${result.path}`)
+          } else {
+            sysMsg(`CLI install failed: ${result.error}`)
+          }
+        })
+        break
+      }
     }
-  }, [manager, focusedAgent, toggleTheme, auth, handleSlashCommand])
+  }, [handleSlashCommand, toggleTheme])
 
   // Handle session resume from picker
   const handleSessionSelect = useCallback((sessionId: string) => {
@@ -419,6 +463,7 @@ export default function App() {
       if (meta && e.key === 'n') { e.preventDefault(); manager.createAgent(); return }
       if (meta && e.key === 'w') { e.preventDefault(); if (manager.focusedId) manager.closeAgent(manager.focusedId); return }
       if (meta && e.key === 'b') { e.preventDefault(); setSidebarCollapsed(v => !v); return }
+      if (meta && e.shiftKey && e.code === 'KeyG') { e.preventDefault(); setActivePanel(p => p === 'scm' ? 'files' : 'scm'); setSidebarCollapsed(false); return }
       if (meta && e.key >= '1' && e.key <= '4') { e.preventDefault(); manager.focusByIndex(parseInt(e.key) - 1); return }
       if (e.key === 'Escape') {
         if (showSessionPicker) { setShowSessionPicker(false); return }
@@ -694,20 +739,92 @@ export default function App() {
           />
         </div>
 
-        <FileActivitySidebar
-          files={files}
-          collapsed={sidebarCollapsed}
-          loading={filesLoading}
-          onToggle={() => setSidebarCollapsed(v => !v)}
-          onFileClick={(file) => setSelectedFile(file)}
-          agentName={manager.agents.length > 1 ? manager.focusedAgent?.name : undefined}
-        />
+        {/* Sidebar with panel switcher */}
+        {sidebarCollapsed ? (
+          <div
+            onClick={() => setSidebarCollapsed(false)}
+            style={{
+              width: 36,
+              borderLeft: `1px solid ${colors.border}`,
+              background: colors.bgOverlay,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              writingMode: 'vertical-rl',
+              fontSize: 11,
+              color: colors.textMuted,
+              letterSpacing: 1,
+              userSelect: 'none',
+            }}
+          >
+            {activePanel === 'scm' ? 'Source Control' : `Files (${files.length})`}
+          </div>
+        ) : (
+          <div style={{
+            width: 280,
+            borderLeft: `1px solid ${colors.border}`,
+            background: colors.bgOverlay,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            flexShrink: 0,
+          }}>
+            {/* Panel switcher tabs */}
+            <div style={{
+              display: 'flex',
+              borderBottom: `1px solid ${colors.border}`,
+              userSelect: 'none',
+              flexShrink: 0,
+            }}>
+              <PanelTab
+                label="Files"
+                active={activePanel === 'files'}
+                onClick={() => setActivePanel('files')}
+              />
+              <PanelTab
+                label="SCM"
+                active={activePanel === 'scm'}
+                onClick={() => setActivePanel('scm')}
+                badge={undefined}
+              />
+              <div style={{ flex: 1 }} />
+              <span
+                onClick={() => setSidebarCollapsed(true)}
+                style={{ cursor: 'pointer', fontSize: 14, color: colors.textMuted, padding: '6px 10px' }}
+                title="Collapse sidebar"
+              >
+                {'\u00BB'}
+              </span>
+            </div>
+            {/* Active panel content */}
+            <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              {activePanel === 'scm' ? (
+                <SourceControlSidebar
+                  cwd={manager.focusedAgent?.cwd}
+                  collapsed={false}
+                  onToggle={() => setSidebarCollapsed(true)}
+                />
+              ) : (
+                <FileActivitySidebar
+                  files={files}
+                  collapsed={false}
+                  loading={filesLoading}
+                  onToggle={() => setSidebarCollapsed(true)}
+                  onFileClick={(file) => setSelectedFile(file)}
+                  agentName={manager.agents.length > 1 ? manager.focusedAgent?.name : undefined}
+                />
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Terminal drawer */}
       <TerminalDrawer
+        agentId={manager.focusedAgent?.id || ''}
         cwd={terminalCwd}
-        visible={showTerminal}
+        visible={showTerminal && !!manager.focusedAgent}
         onToggle={() => setShowTerminal(false)}
       />
 
@@ -795,6 +912,42 @@ export default function App() {
       )}
       {showHelp && (
         <HelpOverlay onClose={() => setShowHelp(false)} />
+      )}
+    </div>
+  )
+}
+
+function PanelTab({ label, active, onClick, badge }: { label: string; active: boolean; onClick: () => void; badge?: number }) {
+  const { colors } = useTheme()
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        padding: '6px 14px',
+        fontSize: 11,
+        fontWeight: active ? 600 : 400,
+        color: active ? colors.text : colors.textMuted,
+        cursor: 'pointer',
+        borderBottom: active ? `2px solid ${colors.blue}` : '2px solid transparent',
+        transition: 'all 0.15s ease',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        userSelect: 'none',
+      }}
+    >
+      {label}
+      {badge !== undefined && badge > 0 && (
+        <span style={{
+          fontSize: 9,
+          background: colors.blue,
+          color: '#fff',
+          borderRadius: 8,
+          padding: '1px 5px',
+          fontWeight: 600,
+        }}>
+          {badge}
+        </span>
       )}
     </div>
   )

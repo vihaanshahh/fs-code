@@ -1,7 +1,21 @@
 import { query, listSessions, renameSession, getSessionMessages } from '@anthropic-ai/claude-agent-sdk'
 import type { Query, SDKMessage, PermissionResult, ModelInfo } from '@anthropic-ai/claude-agent-sdk'
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
+import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
+
+// Resolve the path to the SDK's cli.js executable.
+// In production, electron-builder unpacks it from the ASAR to app.asar.unpacked/.
+function getCliPath(): string {
+  const sdkCliRel = join('node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js')
+  if (app.isPackaged) {
+    // electron-builder places asarUnpack files at app.asar.unpacked/
+    return join(process.resourcesPath, 'app.asar.unpacked', sdkCliRel)
+  }
+  return join(app.getAppPath(), sdkCliRel)
+}
+
 import { IPC } from '../shared/types'
 import type { UIMessage, PermissionRequest, AgentDescriptor, PermissionMode } from '../shared/types'
 
@@ -13,7 +27,7 @@ interface AgentState {
   activeSessionId: string | null
   streamingText: string
   streamingId: string
-  pendingPermissions: Map<string, (result: PermissionResult) => void>
+  pendingPermissions: Map<string, { resolve: (result: PermissionResult) => void; originalInput: Record<string, unknown>; timeoutId: ReturnType<typeof setTimeout> }>
   permissionMode: PermissionMode
   /** When set, the next sendPrompt will resume this session */
   pendingResumeId: string | null
@@ -71,10 +85,12 @@ export function closeAgent(agentId: string): boolean {
   if (state.activeQuery) {
     state.activeQuery.close()
   }
-  // Deny all pending permissions
-  for (const [, resolve] of state.pendingPermissions) {
+  // Deny all pending permissions and clear their timeouts
+  for (const [, { resolve, timeoutId }] of state.pendingPermissions) {
+    clearTimeout(timeoutId)
     resolve({ behavior: 'deny', message: 'Agent closed' })
   }
+  state.pendingPermissions.clear()
   agents.delete(agentId)
   return true
 }
@@ -95,6 +111,13 @@ function makePermissionHandler(agentId: string) {
     const state = agents.get(agentId)
     if (!state) return { behavior: 'deny', message: 'Agent not found' }
 
+    // Auto-approve SDK internal tools that should not require user interaction
+    const autoApproveTools = ['ExitPlanMode', 'EnterPlanMode', 'ExitWorktree', 'EnterWorktree']
+    if (autoApproveTools.includes(toolName)) {
+      console.log(`[agent:${agentId}] canUseTool: auto-approving internal tool ${toolName}`)
+      return { behavior: 'allow', updatedInput: input }
+    }
+
     const requestId = uid()
     console.log(`[agent:${agentId}] canUseTool: ${toolName} req=${requestId} inputKeys=${Object.keys(input).join(',')}`)
     const req: PermissionRequest = {
@@ -107,13 +130,13 @@ function makePermissionHandler(agentId: string) {
     send(IPC.AGENT_PERMISSION_REQUEST, { agentId, ...req })
 
     return new Promise<PermissionResult>((resolve) => {
-      state.pendingPermissions.set(requestId, resolve)
-      setTimeout(() => {
+      const timeoutId = setTimeout(() => {
         if (state.pendingPermissions.has(requestId)) {
           state.pendingPermissions.delete(requestId)
           resolve({ behavior: 'deny', message: 'Permission request timed out' })
         }
       }, 300_000)
+      state.pendingPermissions.set(requestId, { resolve, originalInput: input, timeoutId })
     })
   }
 }
@@ -147,6 +170,9 @@ export async function sendPrompt(agentId: string, message: string): Promise<stri
 
   // Build query options, applying any pending resume/continue
   const opts: Record<string, unknown> = {
+    pathToClaudeCodeExecutable: getCliPath(),
+    executable: process.execPath,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     cwd: state.cwd || process.cwd(),
     includePartialMessages: true,
     canUseTool: makePermissionHandler(agentId),
@@ -226,7 +252,8 @@ export function stopSession(agentId: string) {
     state.activeQuery = null
   }
   state.activeSessionId = null
-  for (const [, resolve] of state.pendingPermissions) {
+  for (const [, { resolve, timeoutId }] of state.pendingPermissions) {
+    clearTimeout(timeoutId)
     resolve({ behavior: 'deny', message: 'Session stopped' })
   }
   state.pendingPermissions.clear()
@@ -265,16 +292,18 @@ export function resolvePermission(agentId: string, requestId: string, behavior: 
     console.error(`[agent:${agentId}] resolvePermission: agent not found`)
     return
   }
-  const resolver = state.pendingPermissions.get(requestId)
-  if (!resolver) {
+  const pending = state.pendingPermissions.get(requestId)
+  if (!pending) {
     console.error(`[agent:${agentId}] resolvePermission: no pending request ${requestId}`)
     return
   }
   state.pendingPermissions.delete(requestId)
+  clearTimeout(pending.timeoutId)
+  const { resolve: resolver, originalInput } = pending
 
   if (behavior === 'allow') {
-    const result: PermissionResult = { behavior: 'allow' }
-    if (updatedInput) result.updatedInput = updatedInput
+    // Pass the user's modified input if provided, otherwise preserve the original tool input
+    const result: PermissionResult = { behavior: 'allow', updatedInput: updatedInput && Object.keys(updatedInput).length > 0 ? updatedInput : originalInput }
     if (updatedPermissions) result.updatedPermissions = updatedPermissions as any
     console.log(`[agent:${agentId}] resolvePermission ALLOW req=${requestId} hasUpdatedInput=${!!updatedInput} keys=${updatedInput ? Object.keys(updatedInput).join(',') : 'none'}`)
     resolver(result)
@@ -323,34 +352,24 @@ export async function resumeSession(agentId: string, resumeSessionId: string): P
     const history = await getSessionMessages(resumeSessionId, {
       dir: state.cwd || undefined,
     })
-    emitMessage(agentId, {
+    // Batch all history messages into a single IPC send
+    const batch: UIMessage[] = [{
       id: uid(),
       type: 'system',
       text: `Resumed session ${resumeSessionId.slice(0, 8)} — ${history.length} messages loaded. Type your next message to continue.`,
       ts: Date.now(),
-    })
-    // Emit the history so the user can see the conversation
+    }]
     for (const msg of history) {
       if (msg.type === 'user') {
-        const content = msg.message as any
-        const text = extractText(content)
-        if (text) {
-          emitMessage(agentId, { id: uid(), type: 'user', text, ts: Date.now() })
-        }
+        const text = extractText(msg.message)
+        if (text) batch.push({ id: uid(), type: 'user', text, ts: Date.now() })
       } else if (msg.type === 'assistant') {
-        const content = msg.message as any
-        const text = extractText(content)
-        if (text) {
-          emitMessage(agentId, { id: uid(), type: 'assistant', text, isStreaming: false, ts: Date.now() })
-        }
+        const text = extractText(msg.message)
+        if (text) batch.push({ id: uid(), type: 'assistant', text, isStreaming: false, ts: Date.now() })
       }
     }
-    emitMessage(agentId, {
-      id: uid(),
-      type: 'system',
-      text: '— end of history — type to continue',
-      ts: Date.now(),
-    })
+    batch.push({ id: uid(), type: 'system', text: '— end of history — type to continue', ts: Date.now() })
+    send(IPC.AGENT_MESSAGE_BATCH, { agentId, messages: batch })
   } catch (err: any) {
     console.error(`[agent:${agentId}] getSessionMessages error:`, err)
     emitMessage(agentId, {
@@ -383,27 +402,24 @@ export async function continueSession(agentId: string): Promise<void> {
       const history = await getSessionMessages(latest.sessionId, {
         dir: state.cwd || undefined,
       })
-      emitMessage(agentId, {
+      // Batch all history messages into a single IPC send
+      const batch: UIMessage[] = [{
         id: uid(),
         type: 'system',
         text: `Continuing session "${latest.summary || latest.sessionId.slice(0, 8)}" — ${history.length} messages. Type your next message.`,
         ts: Date.now(),
-      })
+      }]
       for (const msg of history) {
         if (msg.type === 'user') {
           const text = extractText(msg.message)
-          if (text) emitMessage(agentId, { id: uid(), type: 'user', text, ts: Date.now() })
+          if (text) batch.push({ id: uid(), type: 'user', text, ts: Date.now() })
         } else if (msg.type === 'assistant') {
           const text = extractText(msg.message)
-          if (text) emitMessage(agentId, { id: uid(), type: 'assistant', text, isStreaming: false, ts: Date.now() })
+          if (text) batch.push({ id: uid(), type: 'assistant', text, isStreaming: false, ts: Date.now() })
         }
       }
-      emitMessage(agentId, {
-        id: uid(),
-        type: 'system',
-        text: '— end of history — type to continue',
-        ts: Date.now(),
-      })
+      batch.push({ id: uid(), type: 'system', text: '— end of history — type to continue', ts: Date.now() })
+      send(IPC.AGENT_MESSAGE_BATCH, { agentId, messages: batch })
     } else {
       emitMessage(agentId, {
         id: uid(),
@@ -482,6 +498,15 @@ export async function switchModel(agentId: string, model: string): Promise<void>
   console.log(`[agent:${agentId}] model → ${model}`)
 }
 
+// --- Rename agent (update in-memory name) ---
+
+export function renameAgentName(agentId: string, name: string): boolean {
+  const state = agents.get(agentId)
+  if (!state) return false
+  state.name = name
+  return true
+}
+
 // --- Rename session ---
 
 export async function doRenameSession(sessionId: string, title: string): Promise<void> {
@@ -512,15 +537,37 @@ export async function sendPromptWithOptions(
     emitMessage(agentId, { id: uid(), type: 'user', text: message, ts: Date.now() })
   }
 
+  // Build query options — must include CLI path/executable/env just like sendPrompt
+  const opts: Record<string, unknown> = {
+    pathToClaudeCodeExecutable: getCliPath(),
+    executable: process.execPath,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    cwd: state.cwd || process.cwd(),
+    includePartialMessages: true,
+    canUseTool: makePermissionHandler(agentId),
+    permissionMode: state.permissionMode,
+  }
+
+  // Apply session resume logic (same as sendPrompt)
+  if (state.pendingResumeId) {
+    opts.resume = state.pendingResumeId
+    state.pendingResumeId = null
+    console.log(`[agent:${agentId}] sendPromptWithOptions applying pending resume: ${opts.resume}`)
+  } else if (state.pendingContinue) {
+    opts.continue = true
+    state.pendingContinue = false
+    console.log(`[agent:${agentId}] sendPromptWithOptions applying pending continue`)
+  } else if (state.sdkSessionId) {
+    opts.resume = state.sdkSessionId
+    console.log(`[agent:${agentId}] sendPromptWithOptions auto-resuming SDK session: ${state.sdkSessionId}`)
+  }
+
   const q = query({
     prompt: message,
     options: {
-      cwd: state.cwd || process.cwd(),
-      includePartialMessages: true,
-      canUseTool: makePermissionHandler(agentId),
-      permissionMode: state.permissionMode,
+      ...opts,
       ...extraOptions,
-    },
+    } as any,
   })
 
   state.activeQuery = q

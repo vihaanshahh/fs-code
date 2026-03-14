@@ -7,8 +7,17 @@ files:
   - out/**/*
   - "!node_modules/**/*"
   - node_modules/@anthropic-ai/claude-agent-sdk/**/*
-  - node_modules/shaders/**/*
+  - node_modules/node-pty/lib/**/*
+  - node_modules/node-pty/build/**/*
+  - node_modules/node-pty/package.json
+extraResources:
+  - from: resources/bin
+    to: bin
+    filter:
+      - "**/*"
 asar: true
+asarUnpack:
+  - node_modules/@anthropic-ai/claude-agent-sdk/cli.js
 mac:
   target:
     - dmg
@@ -16,6 +25,7 @@ mac:
   category: public.app-category.developer-tools
   icon: resources/icon.icns
   darkModeSupport: true
+  identity: null
 win:
   target:
     - nsis

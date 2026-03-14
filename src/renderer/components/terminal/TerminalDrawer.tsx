@@ -3,10 +3,12 @@ import TerminalPanel from './Terminal'
 import { useTheme } from '../../ThemeContext'
 
 export default function TerminalDrawer({
+  agentId,
   cwd,
   visible,
   onToggle,
 }: {
+  agentId: string
   cwd: string
   visible: boolean
   onToggle: () => void
@@ -91,9 +93,9 @@ export default function TerminalDrawer({
         </span>
       </div>
 
-      {/* Terminal content — key on cwd so it re-creates when agent folder changes */}
+      {/* Terminal content */}
       <div style={{ flex: 1, overflow: 'hidden' }}>
-        <TerminalPanel key={cwd} cwd={cwd} />
+        <TerminalPanel agentId={agentId} cwd={cwd} />
       </div>
     </div>
   )

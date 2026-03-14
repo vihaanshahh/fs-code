@@ -1,7 +1,7 @@
 const STORAGE_KEY = 'fs-code-recent-folders'
 const MAX_RECENT = 5
 
-export type RecentFolder = { path: string; name: string; lastUsed: number }
+type RecentFolder = { path: string; name: string; lastUsed: number }
 
 function basename(p: string): string {
   return p.replace(/\/$/, '').split('/').pop() || p
