@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { existsSync, accessSync } from 'node:fs'
 import { platform } from 'node:os'
+import { execFileSync } from 'node:child_process'
 import { app } from 'electron'
 import { getAuthStatus } from '../auth'
 import { buildCleanEnv as _buildCleanEnv, getCliAccessFlag, getCliAccessError } from '../agent-env'
@@ -21,12 +22,62 @@ function uid(): string {
   return randomUUID().slice(0, 8)
 }
 
+/** Cache the resolved CLI path so we only do the lookup once */
+let cachedCliPath: string | null = null
+
+/**
+ * Resolve the Claude Code CLI path.
+ * 1. Bundled SDK cli.js (inside packaged app)
+ * 2. User-installed `claude` on PATH (fallback — covers Windows where ASAR unpack can fail)
+ */
 function getCliPath(): string {
+  if (cachedCliPath) return cachedCliPath
+
+  // 1. Try bundled SDK cli.js
   const sdkCliRel = join('node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js')
   if (app.isPackaged) {
-    return join(process.resourcesPath, 'app.asar.unpacked', sdkCliRel)
+    const bundled = join(process.resourcesPath, 'app.asar.unpacked', sdkCliRel)
+    if (existsSync(bundled)) {
+      cachedCliPath = bundled
+      return bundled
+    }
+  } else {
+    const devPath = join(app.getAppPath(), sdkCliRel)
+    if (existsSync(devPath)) {
+      cachedCliPath = devPath
+      return devPath
+    }
   }
-  return join(app.getAppPath(), sdkCliRel)
+
+  // 2. Fallback: find `claude` on PATH (user's own install)
+  const systemCli = findClaudeOnPath()
+  if (systemCli) {
+    console.log(`[claude-provider] using system CLI: ${systemCli}`)
+    cachedCliPath = systemCli
+    return systemCli
+  }
+
+  // 3. Return the expected bundled path so error messages are useful
+  const expected = app.isPackaged
+    ? join(process.resourcesPath, 'app.asar.unpacked', sdkCliRel)
+    : join(app.getAppPath(), sdkCliRel)
+  return expected
+}
+
+/** Try to find `claude` on the user's PATH */
+function findClaudeOnPath(): string | null {
+  try {
+    const cmd = isWindows ? 'where' : 'which'
+    const result = execFileSync(cmd, ['claude'], {
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim()
+    // `where` on Windows can return multiple lines — take the first
+    const first = result.split(/\r?\n/)[0]?.trim()
+    if (first && existsSync(first)) return first
+  } catch { /* not on PATH */ }
+  return null
 }
 
 function buildCleanEnv(): Record<string, string> {
@@ -49,7 +100,7 @@ export class ClaudeProvider implements ProviderDriver {
   async checkAvailability(): Promise<string | null> {
     const cliPath = getCliPath()
     if (!existsSync(cliPath)) {
-      return `Claude Code CLI not found at ${cliPath}`
+      return `Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code`
     }
     try {
       accessSync(cliPath, getCliAccessFlag(isWindows))
@@ -64,7 +115,12 @@ export class ClaudeProvider implements ProviderDriver {
 
     const cliPath = getCliPath()
     if (!existsSync(cliPath)) {
-      errors.push(`Claude Code CLI not found at ${cliPath}. Reinstall the app or run npm install.`)
+      errors.push(
+        'Claude Code CLI not found. '
+        + (isWindows
+          ? 'Make sure `claude` is installed and on your PATH (run `where claude` to check).'
+          : 'Reinstall the app or run `npm install -g @anthropic-ai/claude-code`.')
+      )
       return errors
     }
 
