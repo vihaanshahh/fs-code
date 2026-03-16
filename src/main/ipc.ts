@@ -72,8 +72,8 @@ export function registerIpcHandlers() {
     agent.resolvePermission(response.agentId, response.requestId, response.behavior, response.updatedPermissions, response.updatedInput)
   })
 
-  ipcMain.handle(IPC.AGENT_LIST_SESSIONS, async (_, { cwd }: { cwd?: string }) => {
-    return agent.getSessions(cwd)
+  ipcMain.handle(IPC.AGENT_LIST_SESSIONS, async (_, { agentId, cwd }: { agentId: string; cwd?: string }) => {
+    return agent.getSessions(agentId, cwd)
   })
 
   ipcMain.handle(IPC.AGENT_RESUME, async (_, { agentId, sessionId }: { agentId: string; sessionId: string }) => {
@@ -111,6 +111,7 @@ export function registerIpcHandlers() {
 
   // Emit a system message back to renderer (so AgentCell's useAgent picks it up)
   ipcMain.handle(IPC.AGENT_EMIT_SYSTEM, async (event, { agentId, text }: { agentId: string; text: string }) => {
+    if (event.sender.isDestroyed()) return
     event.sender.send(IPC.AGENT_MESSAGE, {
       agentId,
       id: Math.random().toString(36).slice(2, 10),
@@ -128,6 +129,7 @@ export function registerIpcHandlers() {
       const { stdout, stderr } = await execFileAsync(claudePath, args, {
         cwd: cwd || process.cwd(),
         timeout: 30_000,
+        shell: process.platform === 'win32',
       })
       return { stdout, stderr }
     } catch (err: any) {

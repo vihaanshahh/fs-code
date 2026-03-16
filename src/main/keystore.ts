@@ -33,7 +33,7 @@ function saveStore(store: KeyStore): void {
   const path = getStorePath()
   const dir = app.getPath('userData')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  writeFileSync(path, JSON.stringify(store, null, 2), 'utf-8')
+  writeFileSync(path, JSON.stringify(store, null, 2), { encoding: 'utf-8', mode: 0o600 })
 }
 
 /** Store an API key (encrypted) for a provider */

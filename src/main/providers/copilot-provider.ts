@@ -1,6 +1,6 @@
 /**
- * GitHub Copilot provider — uses the `github-copilot` CLI.
- * Falls back to CLI-based JSONL approach if SDK is not installed.
+ * GitHub Copilot provider — uses the `copilot` CLI.
+ * npm: @github/copilot, binary: copilot
  */
 
 import { randomUUID } from 'node:crypto'
@@ -15,12 +15,11 @@ export function createCopilotProvider(): JsonlProvider {
   return new JsonlProvider({
     id: 'copilot',
     displayName: 'GitHub Copilot',
-    binary: 'github-copilot-cli',
-    buildArgs(prompt) {
-      return ['chat', '--json', prompt]
+    binary: 'copilot',
+    buildArgs(prompt, _options, _model) {
+      return ['-p', prompt, '--output', 'json']
     },
     buildEnv() {
-      // Copilot uses GitHub OAuth — no API key needed, relies on `gh auth`
       return {}
     },
     parseEvent(event: Record<string, unknown>): UIMessage[] {

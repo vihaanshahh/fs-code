@@ -1,7 +1,7 @@
 /**
  * Generic JSONL CLI provider — spawns a CLI binary, reads JSONL from stdout,
  * and maps events to UIMessage[] via a configurable parser.
- * Used as the base for OpenAI Codex and Gemini providers.
+ * Used as the base for OpenAI Codex, Gemini, and Copilot providers.
  */
 
 import { spawn } from 'node:child_process'
@@ -9,6 +9,7 @@ import type { ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { platform } from 'node:os'
+import { buildCleanEnv } from '../agent-env'
 import type { ProviderDriver, ProviderHandle, ModelInfo, PermissionHandler, SendPromptOptions } from './provider'
 import type { UIMessage, PermissionMode } from '../../shared/types'
 
@@ -24,8 +25,8 @@ export interface JsonlProviderConfig {
   displayName: string
   /** CLI binary name (resolved via PATH) */
   binary: string
-  /** Build args array from the prompt and options */
-  buildArgs(prompt: string, options: SendPromptOptions): string[]
+  /** Build args array from the prompt, options, and current model */
+  buildArgs(prompt: string, options: SendPromptOptions, model: string): string[]
   /** Extra env vars to inject (e.g. API keys) */
   buildEnv(): Record<string, string>
   /** Parse a JSON event object into UIMessages */
@@ -55,10 +56,13 @@ export class JsonlProvider implements ProviderDriver {
   }
 
   async checkAvailability(): Promise<string | null> {
-    // Check if the binary exists on PATH
     const which = isWindows ? 'where' : 'which'
     return new Promise((resolve) => {
-      const proc = spawn(which, [this.config.binary], { stdio: 'pipe' })
+      const proc = spawn(which, [this.config.binary], {
+        stdio: 'pipe',
+        timeout: 5000,
+        shell: isWindows,
+      })
       let found = false
       proc.stdout?.on('data', () => { found = true })
       proc.on('close', (code) => {
@@ -96,14 +100,18 @@ export class JsonlProvider implements ProviderDriver {
   ): Promise<ProviderHandle> {
     this.stop()
 
-    const args = this.config.buildArgs(prompt, options)
+    // Reset streaming state from any previous invocation
+    this.streamingText = ''
+    this.streamingId = ''
+
+    const args = this.config.buildArgs(prompt, options, this.currentModel)
+
+    // Use sanitized env to avoid leaking NODE_OPTIONS, ELECTRON_* etc.
+    const cleanEnv = buildCleanEnv()
     const env = {
-      ...process.env,
+      ...cleanEnv,
       ...this.config.buildEnv(),
     }
-
-    onStart()
-    onMessage({ id: uid(), type: 'system', text: `Connected \u00b7 ${this.displayName}`, ts: Date.now() })
 
     const child = spawn(this.config.binary, args, {
       cwd,
@@ -113,6 +121,22 @@ export class JsonlProvider implements ProviderDriver {
     })
     this.child = child
 
+    // Close stdin — we don't write to it, and some CLIs hang waiting for input
+    child.stdin?.end()
+
+    // Only fire onStart after successful spawn
+    let endCalled = false
+    const safeOnEnd = () => {
+      if (endCalled) return
+      endCalled = true
+      onEnd()
+    }
+
+    child.on('spawn', () => {
+      onStart()
+      onMessage({ id: uid(), type: 'system', text: `Connected \u00b7 ${this.displayName}`, ts: Date.now() })
+    })
+
     let buffer = ''
 
     child.stdout?.on('data', (chunk: Buffer) => {
@@ -121,7 +145,7 @@ export class JsonlProvider implements ProviderDriver {
       buffer = lines.pop() || ''
 
       for (const line of lines) {
-        const trimmed = line.trim()
+        const trimmed = line.replace(/\r$/, '').trim()
         if (!trimmed) continue
         try {
           const event = JSON.parse(trimmed)
@@ -130,7 +154,6 @@ export class JsonlProvider implements ProviderDriver {
         } catch {
           // Not JSON — treat as plain text output
           if (trimmed) {
-            // Accumulate as streaming text
             this.streamingText += (this.streamingText ? '\n' : '') + trimmed
             if (!this.streamingId) this.streamingId = uid()
             onMessage({ id: this.streamingId, type: 'assistant', text: this.streamingText, isStreaming: true, ts: Date.now() })
@@ -143,16 +166,33 @@ export class JsonlProvider implements ProviderDriver {
       const text = chunk.toString().trim()
       if (text) {
         console.error(`[${this.id}] stderr:`, text)
+        // Surface stderr to user so they see auth errors, rate limits, etc.
+        onMessage({ id: uid(), type: 'error', message: text, ts: Date.now() })
       }
     })
 
     child.on('close', (code) => {
+      // Flush remaining buffer (last line without trailing newline)
+      if (buffer.trim()) {
+        const trimmed = buffer.replace(/\r$/, '').trim()
+        try {
+          const event = JSON.parse(trimmed)
+          const msgs = this.config.parseEvent(event)
+          for (const m of msgs) onMessage(m)
+        } catch {
+          if (trimmed) {
+            this.streamingText += (this.streamingText ? '\n' : '') + trimmed
+          }
+        }
+        buffer = ''
+      }
+
       // Flush any remaining streaming text
       if (this.streamingText && this.streamingId) {
         onMessage({ id: this.streamingId, type: 'assistant', text: this.streamingText, isStreaming: false, ts: Date.now() })
-        this.streamingText = ''
-        this.streamingId = ''
       }
+      this.streamingText = ''
+      this.streamingId = ''
 
       if (code !== 0 && code !== null) {
         onMessage({ id: uid(), type: 'error', message: `${this.config.binary} exited with code ${code}`, ts: Date.now() })
@@ -160,13 +200,15 @@ export class JsonlProvider implements ProviderDriver {
 
       onMessage({ id: uid(), type: 'result', cost: 0, duration: 0, numTurns: 1, ts: Date.now() })
       this.child = null
-      onEnd()
+      safeOnEnd()
     })
 
     child.on('error', (err) => {
       onMessage({ id: uid(), type: 'error', message: `Failed to start ${this.config.binary}: ${err.message}`, ts: Date.now() })
+      this.streamingText = ''
+      this.streamingId = ''
       this.child = null
-      onEnd()
+      safeOnEnd()
     })
 
     return {

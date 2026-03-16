@@ -1294,7 +1294,7 @@ export default function ConversationPanel({
                 // Detect @ mentions
                 updateAtMention(value, ta.selectionStart);
               }}
-              placeholder={compact ? 'Message...' : 'Message Claude...'}
+              placeholder={compact ? 'Message...' : `Message ${settings.defaultProvider === 'claude' ? 'Claude' : settings.defaultProvider === 'copilot' ? 'Copilot' : settings.defaultProvider === 'openai' ? 'Codex' : 'Gemini'}...`}
               onKeyDown={handleKeyDown}
               style={{
                 flex: 1,

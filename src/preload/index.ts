@@ -27,8 +27,8 @@ const api = {
     ipcRenderer.invoke(IPC.AGENT_STOP, { agentId }),
   respondPermission: (agentId: string, response: PermissionResponse) =>
     ipcRenderer.invoke(IPC.AGENT_PERMISSION_RESPOND, { agentId, requestId: response.requestId, behavior: response.behavior, updatedPermissions: response.updatedPermissions, updatedInput: response.updatedInput }),
-  listSessions: (cwd?: string) =>
-    ipcRenderer.invoke(IPC.AGENT_LIST_SESSIONS, { cwd }),
+  listSessions: (agentId: string, cwd?: string) =>
+    ipcRenderer.invoke(IPC.AGENT_LIST_SESSIONS, { agentId, cwd }),
   resumeSession: (agentId: string, sessionId: string) =>
     ipcRenderer.invoke(IPC.AGENT_RESUME, { agentId, sessionId }),
   continueSession: (agentId: string) =>

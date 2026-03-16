@@ -196,6 +196,12 @@ export async function sendPrompt(agentId: string, message: string): Promise<stri
   ).catch((err) => {
     console.error(`[agent:${agentId}] sendPrompt error:`, err)
     emitMessage(agentId, { id: uid(), type: 'error', message: err?.message || String(err), ts: Date.now() })
+    // Clear activeSessionId so agent doesn't appear permanently stuck
+    const current = agents.get(agentId)
+    if (current && current.activeSessionId === sessionId) {
+      current.activeSessionId = null
+    }
+    send(IPC.AGENT_SESSION_ENDED, { agentId, sessionId })
   })
 
   return sessionId
@@ -277,7 +283,10 @@ export function clearSession(agentId: string) {
   console.log(`[agent:${agentId}] session cleared — next message starts fresh`)
 }
 
-export async function getSessions(cwd?: string) {
+export async function getSessions(agentId: string, cwd?: string) {
+  const state = agents.get(agentId)
+  // Session listing is only supported for Claude provider
+  if (!state || state.providerId !== 'claude') return []
   const sessions = await listSessions(cwd ? { dir: cwd } : undefined)
   return sessions.map((s) => ({
     sessionId: s.sessionId,
@@ -292,6 +301,7 @@ export async function getSessions(cwd?: string) {
 export async function resumeSession(agentId: string, resumeSessionId: string): Promise<void> {
   const state = agents.get(agentId)
   if (!state) throw new Error(`Agent ${agentId} not found`)
+  if (state.providerId !== 'claude') throw new Error('Session resume is only supported for Claude provider')
 
   console.log(`[agent:${agentId}] resumeSession: storing ${resumeSessionId}`)
 
@@ -335,6 +345,7 @@ export async function resumeSession(agentId: string, resumeSessionId: string): P
 export async function continueSession(agentId: string): Promise<void> {
   const state = agents.get(agentId)
   if (!state) throw new Error(`Agent ${agentId} not found`)
+  if (state.providerId !== 'claude') throw new Error('Session continue is only supported for Claude provider')
 
   console.log(`[agent:${agentId}] continueSession: storing flag`)
 

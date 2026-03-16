@@ -22,6 +22,7 @@ import { getRecentFolders } from './hooks/useRecentFolders'
 import { resolveAlias } from './components/palette/commands'
 import { api } from './lib/api'
 import SettingsPanel from './components/settings/SettingsPanel'
+import { useSettings } from './hooks/useSettings'
 import type { TrackedFile, UIMessage } from '../shared/types'
 
 /** Copy text to clipboard (works in Electron renderer) */
@@ -82,6 +83,7 @@ export default function App() {
 
   const manager = useAgentManager()
   const auth = useAuth()
+  const [settings] = useSettings()
   const [recentFolders, setRecentFolders] = useState(getRecentFolders)
 
   // Refresh recent folders whenever agent list changes (new agent = new recent entry)
@@ -94,7 +96,7 @@ export default function App() {
     const cleanup = api.onInitialCwd((cwd: string) => {
       if (cwd) {
         console.log('[App] received initial cwd from CLI:', cwd)
-        manager.createAgent(cwd)
+        manager.createAgent(cwd, settings.defaultProvider)
       }
     })
     return cleanup
@@ -175,7 +177,7 @@ export default function App() {
         focusedAgent.clearMessages()
         break
       case '/new':
-        manager.createAgent()
+        manager.createAgent(undefined, settings.defaultProvider)
         break
       case '/close':
         if (agentId) manager.closeAgent(agentId)
@@ -398,7 +400,7 @@ export default function App() {
     const auth = authRef.current
     setShowCommandPalette(false)
     switch (action) {
-      case 'new-agent': manager.createAgent(); break
+      case 'new-agent': manager.createAgent(undefined, settings.defaultProvider); break
       case 'close-agent': if (manager.focusedId) manager.closeAgent(manager.focusedId); break
       case 'toggle-terminal': setShowTerminal(v => !v); break
       case 'toggle-sidebar': setSidebarCollapsed(v => !v); break
@@ -462,7 +464,7 @@ export default function App() {
       if (meta && e.key === '`') { e.preventDefault(); setShowTerminal(v => !v); return }
       if (meta && e.key === 'k') { e.preventDefault(); setShowCommandPalette(v => !v); return }
       if (meta && e.key === '?') { e.preventDefault(); setShowShortcutOverlay(v => !v); return }
-      if (meta && e.key === 'n') { e.preventDefault(); manager.createAgent(); return }
+      if (meta && e.key === 'n') { e.preventDefault(); manager.createAgent(undefined, settings.defaultProvider); return }
       if (meta && e.key === 'w') { e.preventDefault(); if (manager.focusedId) manager.closeAgent(manager.focusedId); return }
       if (meta && e.key === 'b') { e.preventDefault(); setSidebarCollapsed(v => !v); return }
       if (meta && e.shiftKey && e.code === 'KeyG') { e.preventDefault(); setActivePanel(p => p === 'scm' ? 'files' : 'scm'); setSidebarCollapsed(false); return }
@@ -481,8 +483,9 @@ export default function App() {
 
   const terminalCwd = manager.focusedAgent?.cwd || '.'
 
-  // Show login gate if not authenticated and done checking
-  const needsLogin = !auth.loading && !auth.status.authenticated
+  // Show login gate only for Claude provider — other providers handle auth differently
+  const isClaudeDefault = settings.defaultProvider === 'claude'
+  const needsLogin = isClaudeDefault && !auth.loading && !auth.status.authenticated
   const cliMissing = auth.status.error?.includes('not found')
 
   // ── Pill mode: the entire window IS the pill ──
@@ -529,18 +532,37 @@ export default function App() {
             </div>
 
             {cliMissing ? (
-              <div style={{
-                background: colors.bgSurface,
-                border: `1px solid ${colors.border}`,
-                borderRadius: 8,
-                padding: '10px 16px',
-                fontFamily: fonts.mono,
-                fontSize: 12,
-                color: colors.textLink,
-                userSelect: 'all',
-                marginBottom: 16,
-              }}>
-                npm install -g @anthropic-ai/claude-code
+              <div>
+                <div style={{
+                  background: colors.bgSurface,
+                  border: `1px solid ${colors.border}`,
+                  borderRadius: 8,
+                  padding: '10px 16px',
+                  fontFamily: fonts.mono,
+                  fontSize: 12,
+                  color: colors.textLink,
+                  userSelect: 'all',
+                  marginBottom: 12,
+                }}>
+                  npm install -g @anthropic-ai/claude-code
+                </div>
+                <button
+                  onClick={auth.refresh}
+                  disabled={auth.loading}
+                  style={{
+                    background: 'transparent',
+                    border: `1px solid ${colors.border}`,
+                    color: colors.text,
+                    borderRadius: 8,
+                    padding: '8px 20px',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: auth.loading ? 'wait' : 'pointer',
+                    marginBottom: 16,
+                  }}
+                >
+                  {auth.loading ? 'Checking...' : 'Retry'}
+                </button>
               </div>
             ) : (
               <button
@@ -698,7 +720,7 @@ export default function App() {
           {manager.canAddAgent && (
             <span
               style={{ cursor: 'pointer', fontSize: 16, color: colors.textMuted, lineHeight: 1 }}
-              onClick={() => manager.createAgent()}
+              onClick={() => manager.createAgent(undefined, settings.defaultProvider)}
               title="New Agent (Cmd+N)"
             >
               +
@@ -745,12 +767,12 @@ export default function App() {
             canAddAgent={manager.canAddAgent}
             onFocus={manager.focusAgent}
             onClose={manager.closeAgent}
-            onAddAgent={() => manager.createAgent()}
+            onAddAgent={() => manager.createAgent(undefined, settings.defaultProvider)}
             onSlashCommand={handleSlashCommand}
             onReorder={manager.reorderAgents}
             onRename={manager.renameAgent}
             recentFolders={recentFolders}
-            onOpenRecent={(path) => manager.createAgent(path)}
+            onOpenRecent={(path) => manager.createAgent(path, settings.defaultProvider)}
           />
         </div>
 
@@ -920,6 +942,7 @@ export default function App() {
       )}
       {showSessionPicker && (
         <SessionPicker
+          agentId={manager.focusedId || ''}
           cwd={manager.focusedAgent?.cwd}
           onSelect={handleSessionSelect}
           onClose={() => setShowSessionPicker(false)}

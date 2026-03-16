@@ -12,10 +12,12 @@ function formatTimeAgo(ts: number): string {
 }
 
 export default function SessionPicker({
+  agentId,
   cwd,
   onSelect,
   onClose,
 }: {
+  agentId: string
   cwd?: string
   onSelect: (sessionId: string) => void
   onClose: () => void
@@ -29,7 +31,7 @@ export default function SessionPicker({
 
   useEffect(() => {
     setLoading(true)
-    api.listSessions(cwd).then((s: SessionInfo[]) => {
+    api.listSessions(agentId, cwd).then((s: SessionInfo[]) => {
       setSessions(s.sort((a, b) => b.lastModified - a.lastModified))
       setLoading(false)
     }).catch(() => setLoading(false))

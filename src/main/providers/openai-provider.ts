@@ -1,11 +1,11 @@
 /**
  * OpenAI Codex provider — uses the `codex` CLI in JSONL mode.
+ * npm: @openai/codex, binary: codex
  */
 
 import { randomUUID } from 'node:crypto'
 import { JsonlProvider } from './jsonl-provider'
 import type { UIMessage } from '../../shared/types'
-import type { ModelInfo } from './provider'
 
 function uid(): string {
   return randomUUID().slice(0, 8)
@@ -16,8 +16,11 @@ export function createOpenAIProvider(getApiKey: () => string | null): JsonlProvi
     id: 'openai',
     displayName: 'OpenAI Codex',
     binary: 'codex',
-    buildArgs(prompt) {
-      return ['exec', '--json', prompt]
+    buildArgs(prompt, _options, model) {
+      const args = ['exec', '--json']
+      if (model && model !== 'codex-mini') args.push('--model', model)
+      args.push(prompt)
+      return args
     },
     buildEnv() {
       const env: Record<string, string> = {}

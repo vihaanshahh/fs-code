@@ -62,14 +62,22 @@ async function findClaudeBin(): Promise<string | null> {
   }
 }
 
-let cachedBin: string | null | undefined
+let cachedBin: string | null = null
+let pendingLookup: Promise<string | null> | null = null
 
 async function claudeBin(): Promise<string | null> {
-  // Only cache successful results — a null means "not found yet" and should retry
   if (cachedBin) return cachedBin
-  const found = await findClaudeBin()
-  if (found) cachedBin = found
-  return found
+  // Deduplicate concurrent calls — share a single in-flight lookup
+  if (pendingLookup) return pendingLookup
+  pendingLookup = findClaudeBin().then(found => {
+    if (found) cachedBin = found
+    pendingLookup = null
+    return found
+  }).catch(() => {
+    pendingLookup = null
+    return null
+  })
+  return pendingLookup
 }
 
 /** Synchronous accessor — returns cached path (or null if not yet resolved / not found) */

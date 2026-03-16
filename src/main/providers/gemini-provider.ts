@@ -1,5 +1,6 @@
 /**
  * Google Gemini CLI provider — uses the `gemini` CLI in streaming JSON mode.
+ * npm: @google/gemini-cli, binary: gemini
  */
 
 import { randomUUID } from 'node:crypto'
@@ -15,8 +16,10 @@ export function createGeminiProvider(getApiKey: () => string | null): JsonlProvi
     id: 'gemini',
     displayName: 'Google Gemini',
     binary: 'gemini',
-    buildArgs(prompt) {
-      return ['-p', prompt, '--output-format', 'streaming-json']
+    buildArgs(prompt, _options, model) {
+      const args = ['-p', prompt, '--output-format', 'stream-json']
+      if (model && model !== 'gemini-2.5-pro') args.push('--model', model)
+      return args
     },
     buildEnv() {
       const env: Record<string, string> = {}

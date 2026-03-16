@@ -7,8 +7,7 @@ export function useAuth() {
   const [loading, setLoading] = useState(true)
   const autoLoginAttempted = useRef(false)
 
-  // Check auth on mount — auto-login if not authenticated
-  // Retries up to 3 times if CLI not found (Windows cold-start can be slow)
+  // Check auth on mount — retries up to 3 times if CLI not found (Windows cold-start)
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -20,9 +19,7 @@ export function useAuth() {
           s = { authenticated: false, error: 'Could not check auth' }
         }
         if (cancelled) return
-        // If CLI found (no "not found" error), stop retrying
         if (!s.error?.includes('not found')) break
-        // Wait before retrying (2s, 4s)
         if (attempt < 2) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)))
       }
       if (cancelled) return
@@ -31,10 +28,14 @@ export function useAuth() {
       // Auto-trigger login if not authenticated and CLI exists
       if (!s.authenticated && !s.error?.includes('not found') && !autoLoginAttempted.current) {
         autoLoginAttempted.current = true
-        const loginResult: AuthStatus = await api.authLogin()
-        if (!cancelled) setStatus(loginResult)
+        try {
+          const loginResult: AuthStatus = await api.authLogin()
+          if (!cancelled) setStatus(loginResult)
+        } catch {
+          if (!cancelled) setStatus({ authenticated: false, error: 'Login failed' })
+        }
       }
-      setLoading(false)
+      if (!cancelled) setLoading(false)
     })()
     return () => { cancelled = true }
   }, [])
@@ -64,8 +65,15 @@ export function useAuth() {
   }, [])
 
   const refresh = useCallback(async () => {
-    const s: AuthStatus = await api.authStatus()
-    setStatus(s)
+    setLoading(true)
+    try {
+      const s: AuthStatus = await api.authStatus()
+      setStatus(s)
+    } catch {
+      setStatus({ authenticated: false, error: 'Could not check auth' })
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   return { status, loading, login, logout, refresh }
