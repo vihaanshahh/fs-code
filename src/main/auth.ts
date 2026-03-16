@@ -1,30 +1,62 @@
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { shell } from 'electron'
 import type { AuthStatus } from '../shared/types'
 
 const execFileAsync = promisify(execFile)
+const isWindows = process.platform === 'win32'
+
+/** Try running a claude binary candidate — returns the candidate string on success */
+async function tryBin(bin: string): Promise<string> {
+  await execFileAsync(bin, ['--version'], {
+    timeout: 3000,
+    // shell: true lets Windows run .ps1 / .cmd files
+    shell: isWindows,
+  })
+  return bin
+}
 
 /** Resolve the claude CLI binary — checks all candidates in parallel */
 async function findClaudeBin(): Promise<string | null> {
-  const candidates = [
-    'claude',
-    '/usr/local/bin/claude',
-    '/opt/homebrew/bin/claude',
-    `${process.env.HOME}/.npm-global/bin/claude`,
-    `${process.env.HOME}/.local/bin/claude`,
-  ]
-  // Race all candidates in parallel — first success wins
-  try {
-    return await Promise.any(
-      candidates.map(async bin => {
-        await execFileAsync(bin, ['--version'], { timeout: 3000 })
-        return bin
-      })
+  // 0. User override via FLUIDSTATE_CLAUDE_PATH env var
+  const envOverride = process.env.FLUIDSTATE_CLAUDE_PATH
+  if (envOverride && existsSync(envOverride)) {
+    try {
+      await tryBin(envOverride)
+      return envOverride
+    } catch { /* fall through */ }
+  }
+
+  const home = homedir()
+  const candidates: string[] = []
+
+  if (isWindows) {
+    const appData = process.env.APPDATA || join(home, 'AppData', 'Roaming')
+    const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local')
+    candidates.push(
+      'claude',                                        // on PATH
+      join(appData, 'npm', 'claude.ps1'),
+      join(appData, 'npm', 'claude.cmd'),
+      join(appData, 'npm', 'claude'),
+      join(localAppData, 'Programs', 'claude', 'claude.exe'),
+      join(home, '.claude', 'local', 'claude.exe'),
     )
+  } else {
+    candidates.push(
+      'claude',
+      '/usr/local/bin/claude',
+      '/opt/homebrew/bin/claude',
+      `${home}/.npm-global/bin/claude`,
+      `${home}/.local/bin/claude`,
+    )
+  }
+
+  try {
+    return await Promise.any(candidates.map(bin => tryBin(bin)))
   } catch {
     return null
   }
@@ -62,6 +94,7 @@ export async function getAuthStatus(): Promise<AuthStatus> {
     const { stdout, stderr } = await execFileAsync(bin, ['auth', 'status'], {
       timeout: 10_000,
       env: { ...process.env, NO_COLOR: '1' },
+      shell: isWindows,
     })
     const text = (stdout + '\n' + stderr).trim().toLowerCase()
 
@@ -103,6 +136,7 @@ export async function login(): Promise<AuthStatus> {
     const child = spawn(bin, ['auth', 'login'], {
       env: { ...process.env, NO_COLOR: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
+      shell: isWindows,
     })
 
     let stdout = ''
@@ -147,6 +181,7 @@ export async function logout(): Promise<AuthStatus> {
     await execFileAsync(bin, ['auth', 'logout'], {
       timeout: 10_000,
       env: { ...process.env, NO_COLOR: '1' },
+      shell: isWindows,
     })
     return { authenticated: false }
   } catch (err: any) {
