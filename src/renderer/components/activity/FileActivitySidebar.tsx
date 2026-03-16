@@ -238,7 +238,8 @@ export default function FileActivitySidebar({
       display: 'flex',
       flexDirection: 'column',
       overflow: 'hidden',
-      flexShrink: 0,
+      flex: 1,
+      minHeight: 0,
     }}>
       {/* Header */}
       <div style={{

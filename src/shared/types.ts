@@ -66,6 +66,7 @@ export interface AgentDescriptor {
   name: string
   cwd: string
   isActive: boolean
+  provider: ProviderId
 }
 
 // Slash command definition
@@ -137,6 +138,64 @@ export interface AuthStatus {
   email?: string
   organization?: string
   error?: string
+}
+
+// Provider identifiers
+export type ProviderId = 'claude' | 'copilot' | 'openai' | 'gemini'
+
+// Provider config — describes capabilities and display info
+export interface ProviderConfig {
+  id: ProviderId
+  displayName: string
+  shortLabel: string
+  color: string
+  authType: 'cli-login' | 'api-key' | 'oauth'
+  supportsResume: boolean
+  supportsPermissions: boolean
+  supportsModelSwitch: boolean
+}
+
+export const PROVIDER_CONFIGS: Record<ProviderId, ProviderConfig> = {
+  claude: {
+    id: 'claude',
+    displayName: 'Claude',
+    shortLabel: 'CLAUDE',
+    color: '#D97706',
+    authType: 'cli-login',
+    supportsResume: true,
+    supportsPermissions: true,
+    supportsModelSwitch: true,
+  },
+  copilot: {
+    id: 'copilot',
+    displayName: 'GitHub Copilot',
+    shortLabel: 'COPILOT',
+    color: '#2EA043',
+    authType: 'oauth',
+    supportsResume: false,
+    supportsPermissions: false,
+    supportsModelSwitch: false,
+  },
+  openai: {
+    id: 'openai',
+    displayName: 'OpenAI Codex',
+    shortLabel: 'OPENAI',
+    color: '#10A37F',
+    authType: 'api-key',
+    supportsResume: false,
+    supportsPermissions: false,
+    supportsModelSwitch: true,
+  },
+  gemini: {
+    id: 'gemini',
+    displayName: 'Google Gemini',
+    shortLabel: 'GEMINI',
+    color: '#4285F4',
+    authType: 'api-key',
+    supportsResume: false,
+    supportsPermissions: false,
+    supportsModelSwitch: true,
+  },
 }
 
 // Permission modes (mirrors SDK PermissionMode)
@@ -221,6 +280,13 @@ export const IPC = {
   USAGE_FETCH: 'usage:fetch',
   AGENT_GET_MODEL: 'agent:get-model',
   AGENT_SET_MODEL: 'agent:set-model',
+  // File search (for @ mentions)
+  FS_SEARCH_FILES: 'fs:search-files',
+  // Providers
+  PROVIDER_LIST: 'provider:list',
+  PROVIDER_DETECT: 'provider:detect',
+  PROVIDER_SET_API_KEY: 'provider:set-api-key',
+  PROVIDER_GET_API_KEY: 'provider:get-api-key',
   // Window pill mode
   WINDOW_MINIMIZE_PILL: 'window:minimize-pill',
   WINDOW_RESTORE_PILL: 'window:restore-pill',

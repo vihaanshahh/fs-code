@@ -1,9 +1,13 @@
 import { ipcMain, dialog, clipboard, shell, app, BrowserWindow } from 'electron'
 import { IPC } from '../shared/types'
+import type { ProviderId } from '../shared/types'
 import * as agent from './agent'
 import * as auth from './auth'
 import * as fs from './file-system'
 import * as terminal from './terminal'
+import { detectProviders } from './providers'
+import { PROVIDER_CONFIGS } from '../shared/types'
+import * as keystore from './keystore'
 import { resolve, isAbsolute } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -39,8 +43,8 @@ export function registerIpcHandlers() {
   })
 
   // Agent lifecycle
-  ipcMain.handle(IPC.AGENT_CREATE, async (_, { name, cwd }: { name: string; cwd: string }) => {
-    return agent.createAgent(name, cwd)
+  ipcMain.handle(IPC.AGENT_CREATE, async (_, { name, cwd, provider }: { name: string; cwd: string; provider?: ProviderId }) => {
+    return agent.createAgent(name, cwd, provider || 'claude')
   })
 
   ipcMain.handle(IPC.AGENT_CLOSE, async (_, { agentId }: { agentId: string }) => {
@@ -191,6 +195,11 @@ export function registerIpcHandlers() {
     return fs.gitCommit(message, cwd)
   })
 
+  // File search (for @ mentions)
+  ipcMain.handle(IPC.FS_SEARCH_FILES, async (_, { cwd, query, limit }: { cwd: string; query: string; limit?: number }) => {
+    return fs.searchFiles(cwd, query, limit)
+  })
+
   // CLI install
   ipcMain.handle(IPC.CLI_INSTALL, async () => {
     const { installCLI } = await import('./cli-install')
@@ -226,6 +235,23 @@ export function registerIpcHandlers() {
 
   ipcMain.handle(IPC.TERM_CLOSE, async (_, { terminalId }: { terminalId: string }) => {
     terminal.closeTerminal(terminalId)
+  })
+
+  // Providers
+  ipcMain.handle(IPC.PROVIDER_LIST, async () => {
+    return PROVIDER_CONFIGS
+  })
+
+  ipcMain.handle(IPC.PROVIDER_DETECT, async () => {
+    return detectProviders()
+  })
+
+  ipcMain.handle(IPC.PROVIDER_SET_API_KEY, async (_, { provider, key }: { provider: ProviderId; key: string }) => {
+    keystore.setApiKey(provider, key)
+  })
+
+  ipcMain.handle(IPC.PROVIDER_GET_API_KEY, async (_, { provider }: { provider: ProviderId }) => {
+    return keystore.hasApiKey(provider)
   })
 
   // Window pill mode — shrink window to floating pill

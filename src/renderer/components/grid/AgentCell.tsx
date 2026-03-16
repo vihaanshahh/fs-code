@@ -5,7 +5,7 @@ import { useJourneyPhase } from '../../hooks/useJourneyPhase'
 import { useTheme } from '../../ThemeContext'
 import { api } from '../../lib/api'
 import type { AgentDescriptor, PermissionMode, AskUserQuestionInput } from '../../../shared/types'
-import { PERMISSION_MODE_LABELS } from '../../../shared/types'
+import { PERMISSION_MODE_LABELS, PROVIDER_CONFIGS } from '../../../shared/types'
 
 const MODES: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'bypassPermissions']
 
@@ -484,6 +484,7 @@ export default function AgentCell({
   const nameInputRef = useRef<HTMLInputElement>(null)
 
   const accentColor = agentColors[index % agentColors.length]
+  const providerConfig = PROVIDER_CONFIGS[descriptor.provider || 'claude']
 
   // Fetch permission mode on mount / when agent changes
   useEffect(() => {
@@ -575,11 +576,12 @@ export default function AgentCell({
             }}
             onKeyDown={e => {
               if (e.key === 'Enter') {
+                e.stopPropagation()
                 const v = editValue.trim()
                 if (v && onRename) onRename(descriptor.id, v)
                 setEditing(false)
               }
-              if (e.key === 'Escape') setEditing(false)
+              if (e.key === 'Escape') { e.stopPropagation(); setEditing(false) }
             }}
             onBlur={() => {
               const v = editValue.trim()
@@ -625,6 +627,22 @@ export default function AgentCell({
           </span>
         )}
 
+        {/* Provider badge */}
+        {descriptor.provider && descriptor.provider !== 'claude' && (
+          <span style={{
+            fontSize: 8,
+            fontWeight: 700,
+            padding: '1px 4px',
+            borderRadius: 3,
+            background: `${providerConfig.color}18`,
+            color: providerConfig.color,
+            letterSpacing: '0.3px',
+            flexShrink: 0,
+          }}>
+            {providerConfig.shortLabel}
+          </span>
+        )}
+
         {/* CWD */}
         <span
           style={{
@@ -643,36 +661,40 @@ export default function AgentCell({
             : '~/' + descriptor.cwd.split('/').slice(-2).join('/')}
         </span>
 
-        {/* Permission mode pill — clickable dropdown */}
-        <span
-          onClick={(e) => { e.stopPropagation(); setShowModeDropdown(v => !v) }}
-          style={{
-            fontSize: 9,
-            padding: '1px 6px',
-            borderRadius: 4,
-            background: permissionMode !== 'default' ? `${modeColor}15` : 'transparent',
-            color: modeColor,
-            fontWeight: 600,
-            whiteSpace: 'nowrap',
-            cursor: 'pointer',
-            border: `1px solid ${permissionMode !== 'default' ? `${modeColor}30` : colors.borderMuted}`,
-            transition: 'all 0.15s ease',
-          }}
-          title={`Mode: ${PERMISSION_MODE_LABELS[permissionMode]} — click to change`}
-        >
-          {MODE_SHORT_LABELS[permissionMode]}
-        </span>
+        {/* Permission mode pill — only for providers that support it */}
+        {providerConfig.supportsPermissions && (
+          <>
+            <span
+              onClick={(e) => { e.stopPropagation(); setShowModeDropdown(v => !v) }}
+              style={{
+                fontSize: 9,
+                padding: '1px 6px',
+                borderRadius: 4,
+                background: permissionMode !== 'default' ? `${modeColor}15` : 'transparent',
+                color: modeColor,
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+                cursor: 'pointer',
+                border: `1px solid ${permissionMode !== 'default' ? `${modeColor}30` : colors.borderMuted}`,
+                transition: 'all 0.15s ease',
+              }}
+              title={`Mode: ${PERMISSION_MODE_LABELS[permissionMode]} — click to change`}
+            >
+              {MODE_SHORT_LABELS[permissionMode]}
+            </span>
 
-        {/* Mode dropdown */}
-        {showModeDropdown && (
-          <ModeDropdown
-            currentMode={permissionMode}
-            onSelect={handleModeSelect}
-            onClose={() => setShowModeDropdown(false)}
-          />
+            {/* Mode dropdown */}
+            {showModeDropdown && (
+              <ModeDropdown
+                currentMode={permissionMode}
+                onSelect={handleModeSelect}
+                onClose={() => setShowModeDropdown(false)}
+              />
+            )}
+          </>
         )}
 
-        {/* New Session + Resume — always visible */}
+        {/* New Session + Resume — New always visible, Resume only for providers that support it */}
         <span
           onClick={(e) => { e.stopPropagation(); agent.clearMessages() }}
           style={{
@@ -691,24 +713,26 @@ export default function AgentCell({
         >
           New
         </span>
-        <span
-          onClick={(e) => { e.stopPropagation(); onSlashCommand?.('/resume') }}
-          style={{
-            fontSize: 9,
-            color: colors.textMuted,
-            cursor: 'pointer',
-            fontWeight: 500,
-            padding: '1px 5px',
-            borderRadius: 3,
-            border: `1px solid ${colors.borderMuted}`,
-            transition: 'all 0.15s ease',
-          }}
-          title="Resume a previous session"
-          onMouseEnter={e => { e.currentTarget.style.color = colors.text; e.currentTarget.style.borderColor = colors.border }}
-          onMouseLeave={e => { e.currentTarget.style.color = colors.textMuted; e.currentTarget.style.borderColor = colors.borderMuted }}
-        >
-          Resume
-        </span>
+        {providerConfig.supportsResume && (
+          <span
+            onClick={(e) => { e.stopPropagation(); onSlashCommand?.('/resume') }}
+            style={{
+              fontSize: 9,
+              color: colors.textMuted,
+              cursor: 'pointer',
+              fontWeight: 500,
+              padding: '1px 5px',
+              borderRadius: 3,
+              border: `1px solid ${colors.borderMuted}`,
+              transition: 'all 0.15s ease',
+            }}
+            title="Resume a previous session"
+            onMouseEnter={e => { e.currentTarget.style.color = colors.text; e.currentTarget.style.borderColor = colors.border }}
+            onMouseLeave={e => { e.currentTarget.style.color = colors.textMuted; e.currentTarget.style.borderColor = colors.borderMuted }}
+          >
+            Resume
+          </span>
+        )}
 
         {/* Mini phase pill */}
         <span style={{
@@ -770,6 +794,7 @@ export default function AgentCell({
           onRespondPermission={agent.respondPermission}
           compact={compact}
           onSlashCommand={onSlashCommand}
+          cwd={descriptor.cwd}
         />
       </div>
     </div>

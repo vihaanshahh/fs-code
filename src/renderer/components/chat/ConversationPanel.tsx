@@ -1,7 +1,9 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react'
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import type { UIMessage, PermissionRequest, PhaseInfo } from '../../../shared/types'
 import { useTheme } from '../../ThemeContext'
 import { slashCommands } from '../palette/commands'
+import { api } from '../../lib/api'
+import { useSettings } from '../../hooks/useSettings'
 import MarkdownRenderer from './MarkdownRenderer'
 
 // --- Braille Spinner (CSS-only, zero re-renders) ---
@@ -748,6 +750,134 @@ function SlashAutocomplete({ filter, selectedIndex, onSelect, compact }: {
   )
 }
 
+// --- File @ Mention Autocomplete ---
+
+function FileAutocomplete({ files, selectedIndex, onSelect, compact }: {
+  files: string[]
+  selectedIndex: number
+  onSelect: (filePath: string) => void
+  compact: boolean
+}) {
+  const { colors, fonts } = useTheme()
+  const listRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const el = listRef.current?.children[selectedIndex] as HTMLElement | undefined
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [selectedIndex])
+
+  if (files.length === 0) return null
+
+  // File extension -> color mapping
+  const extColor = (path: string): string => {
+    const ext = path.split('.').pop()?.toLowerCase() || ''
+    const map: Record<string, string> = {
+      ts: colors.blue, tsx: colors.blue, js: colors.amber, jsx: colors.amber,
+      py: colors.green, rs: colors.red, go: colors.blue, css: colors.purple,
+      html: colors.red, json: colors.amber, md: colors.textSecondary,
+      yaml: colors.green, yml: colors.green, toml: colors.amber,
+    }
+    return map[ext] || colors.textMuted
+  }
+
+  return (
+    <div style={{
+      position: 'absolute',
+      bottom: '100%',
+      left: compact ? 8 : 24,
+      right: compact ? 8 : 24,
+      maxHeight: compact ? 200 : 320,
+      overflowY: 'auto',
+      background: colors.bgSurface,
+      border: `1px solid ${colors.border}`,
+      borderRadius: 10,
+      marginBottom: 4,
+      boxShadow: '0 -4px 20px rgba(0,0,0,0.15)',
+      zIndex: 20,
+    }} ref={listRef}>
+      <div style={{
+        padding: '6px 12px 4px',
+        fontSize: 10,
+        fontWeight: 600,
+        color: colors.textMuted,
+        textTransform: 'uppercase',
+        letterSpacing: '0.5px',
+      }}>
+        Files
+      </div>
+      {files.map((filePath, i) => {
+        const parts = filePath.split('/')
+        const fileName = parts.pop() || filePath
+        const dir = parts.length > 0 ? parts.join('/') + '/' : ''
+        return (
+          <div
+            key={filePath}
+            onMouseDown={e => { e.preventDefault(); onSelect(filePath) }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '6px 12px',
+              cursor: 'pointer',
+              background: i === selectedIndex ? `${colors.blue}12` : 'transparent',
+              borderLeft: i === selectedIndex ? `2px solid ${colors.blue}` : '2px solid transparent',
+              transition: 'background 0.08s ease',
+            }}
+            onMouseEnter={e => {
+              if (i !== selectedIndex) e.currentTarget.style.background = `${colors.textMuted}08`
+            }}
+            onMouseLeave={e => {
+              if (i !== selectedIndex) e.currentTarget.style.background = 'transparent'
+            }}
+          >
+            <span style={{
+              fontSize: 9,
+              color: extColor(filePath),
+              flexShrink: 0,
+              fontFamily: fonts.mono,
+              fontWeight: 700,
+              background: `${extColor(filePath)}15`,
+              padding: '1px 4px',
+              borderRadius: 3,
+              lineHeight: '14px',
+              minWidth: 28,
+              textAlign: 'center',
+            }}>
+              {fileName.includes('.') ? fileName.split('.').pop() : '—'}
+            </span>
+            <span style={{
+              fontFamily: fonts.mono,
+              fontSize: 12,
+              fontWeight: 600,
+              color: colors.text,
+              flexShrink: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}>
+              {fileName}
+            </span>
+            {dir && (
+              <span style={{
+                fontSize: 11,
+                color: colors.textMuted,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                flex: 1,
+                direction: 'rtl',
+                textAlign: 'left',
+              }}>
+                {dir}
+              </span>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // --- Main Component ---
 
 export default function ConversationPanel({
@@ -760,6 +890,7 @@ export default function ConversationPanel({
   onRespondPermission,
   compact = false,
   onSlashCommand,
+  cwd,
 }: {
   messages: UIMessage[]
   isActive: boolean
@@ -770,15 +901,25 @@ export default function ConversationPanel({
   onRespondPermission: (behavior: 'allow' | 'deny') => void
   compact?: boolean
   onSlashCommand?: (cmd: string) => void
+  cwd?: string
 }) {
   const { colors, spacing } = useTheme()
+  const [settings] = useSettings()
   const [input, setInput] = useState('')
   const [slashIndex, setSlashIndex] = useState(0)
+  const [contextFiles, setContextFiles] = useState<string[]>([])
   const endRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
+  // --- @ mention state ---
+  const [atMentionActive, setAtMentionActive] = useState(false)
+  const [atMentionQuery, setAtMentionQuery] = useState('')
+  const [atMentionStart, setAtMentionStart] = useState(-1) // cursor position of the @
+  const [atMentionIndex, setAtMentionIndex] = useState(0)
+  const [atMentionFiles, setAtMentionFiles] = useState<string[]>([])
+
   // Determine if we should show autocomplete
-  const showAutocomplete = input.startsWith('/') && !input.includes(' ')
+  const showAutocomplete = input.startsWith('/') && !input.includes(' ') && !atMentionActive
   const slashFilter = showAutocomplete ? input : ''
 
   // Get filtered matches for keyboard nav
@@ -794,6 +935,61 @@ export default function ConversationPanel({
 
   // Reset selection when filter changes
   useEffect(() => { setSlashIndex(0) }, [slashFilter])
+
+  // Search files when @ mention query changes
+  useEffect(() => {
+    if (!atMentionActive || !cwd) {
+      setAtMentionFiles([])
+      return
+    }
+    let cancelled = false
+    const doSearch = async () => {
+      try {
+        const results = await api.searchFiles(cwd, atMentionQuery, compact ? 6 : 10)
+        if (!cancelled) {
+          setAtMentionFiles(results)
+          setAtMentionIndex(0)
+        }
+      } catch {
+        if (!cancelled) setAtMentionFiles([])
+      }
+    }
+    // Small debounce for typing
+    const timer = setTimeout(doSearch, atMentionQuery ? 80 : 0)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [atMentionActive, atMentionQuery, cwd, compact])
+
+  // Detect @ mentions in input (only when enabled in settings)
+  const updateAtMention = useCallback((value: string, cursorPos: number) => {
+    if (!settings.atMentionsEnabled) {
+      setAtMentionActive(false)
+      return
+    }
+    // Look backwards from cursor for an unmatched @
+    let atPos = -1
+    for (let i = cursorPos - 1; i >= 0; i--) {
+      const ch = value[i]
+      if (ch === '@') {
+        // Check it's at start of input or preceded by a space/newline
+        if (i === 0 || value[i - 1] === ' ' || value[i - 1] === '\n') {
+          atPos = i
+        }
+        break
+      }
+      if (ch === ' ' || ch === '\n') break
+    }
+
+    if (atPos >= 0) {
+      const query = value.substring(atPos + 1, cursorPos)
+      setAtMentionActive(true)
+      setAtMentionQuery(query)
+      setAtMentionStart(atPos)
+    } else {
+      setAtMentionActive(false)
+      setAtMentionQuery('')
+      setAtMentionStart(-1)
+    }
+  }, [settings.atMentionsEnabled])
 
   // Auto-scroll
   useEffect(() => {
@@ -828,9 +1024,34 @@ export default function ConversationPanel({
     inputRef.current?.focus()
   }
 
+  const selectFileMention = useCallback((filePath: string) => {
+    // Add file to context files list
+    if (!contextFiles.includes(filePath)) {
+      setContextFiles(prev => [...prev, filePath])
+    }
+    // Replace the @query with nothing (the file shows as a pill above)
+    const before = input.substring(0, atMentionStart)
+    const after = input.substring(atMentionStart + 1 + atMentionQuery.length)
+    setInput(before + after)
+    setAtMentionActive(false)
+    setAtMentionQuery('')
+    setAtMentionStart(-1)
+    inputRef.current?.focus()
+  }, [input, atMentionStart, atMentionQuery, contextFiles])
+
+  const removeContextFile = useCallback((filePath: string) => {
+    setContextFiles(prev => prev.filter(f => f !== filePath))
+  }, [])
+
   const handleSubmit = () => {
     const text = input.trim()
-    if (!text) return
+    if (!text && contextFiles.length === 0) return
+
+    // If @ autocomplete is open, select highlighted file
+    if (atMentionActive && atMentionFiles.length > 0) {
+      selectFileMention(atMentionFiles[atMentionIndex])
+      return
+    }
 
     // If autocomplete is open and user presses Enter, select the highlighted command
     if (showAutocomplete && filteredMatches.length > 0) {
@@ -844,12 +1065,44 @@ export default function ConversationPanel({
       setInput('')
       return
     }
-    onSend(text)
+
+    // Build message with context file references
+    let message = text
+    if (contextFiles.length > 0) {
+      const fileRefs = contextFiles.map(f => `@${f}`).join(' ')
+      message = `${fileRefs} ${text}`.trim()
+    }
+    onSend(message)
     setInput('')
+    setContextFiles([])
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    // Autocomplete navigation
+    // @ mention autocomplete navigation
+    if (atMentionActive && atMentionFiles.length > 0) {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setAtMentionIndex(prev => (prev > 0 ? prev - 1 : atMentionFiles.length - 1))
+        return
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setAtMentionIndex(prev => (prev < atMentionFiles.length - 1 ? prev + 1 : 0))
+        return
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        e.preventDefault()
+        selectFileMention(atMentionFiles[atMentionIndex])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setAtMentionActive(false)
+        return
+      }
+    }
+
+    // Slash autocomplete navigation
     if (showAutocomplete && filteredMatches.length > 0) {
       if (e.key === 'ArrowUp') {
         e.preventDefault()
@@ -939,9 +1192,73 @@ export default function ConversationPanel({
             />
           )}
 
+          {/* @ file mention autocomplete */}
+          {atMentionActive && atMentionFiles.length > 0 && (
+            <FileAutocomplete
+              files={atMentionFiles}
+              selectedIndex={atMentionIndex}
+              onSelect={selectFileMention}
+              compact={compact}
+            />
+          )}
+
           {/* Permission banner — skip AskUserQuestion (handled by AgentCell sticky banner) */}
           {permissionRequest && permissionRequest.toolName !== 'AskUserQuestion' && (
             <PermissionBanner request={permissionRequest} onRespond={onRespondPermission} />
+          )}
+
+          {/* Context file pills */}
+          {contextFiles.length > 0 && (
+            <div style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: 4,
+              padding: '6px 0 2px',
+              borderTop: `1px solid ${colors.border}`,
+            }}>
+              {contextFiles.map(filePath => {
+                const fileName = filePath.split('/').pop() || filePath
+                return (
+                  <span
+                    key={filePath}
+                    title={filePath}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      padding: '2px 8px',
+                      background: `${colors.blue}15`,
+                      border: `1px solid ${colors.blue}30`,
+                      borderRadius: 6,
+                      fontSize: 11,
+                      fontFamily: 'inherit',
+                      color: colors.blue,
+                      fontWeight: 500,
+                      cursor: 'default',
+                      maxWidth: 200,
+                    }}
+                  >
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      @{fileName}
+                    </span>
+                    <span
+                      onClick={() => removeContextFile(filePath)}
+                      style={{
+                        cursor: 'pointer',
+                        fontSize: 13,
+                        lineHeight: 1,
+                        opacity: 0.6,
+                        fontWeight: 400,
+                      }}
+                      onMouseEnter={e => { (e.target as HTMLElement).style.opacity = '1' }}
+                      onMouseLeave={e => { (e.target as HTMLElement).style.opacity = '0.6' }}
+                    >
+                      ×
+                    </span>
+                  </span>
+                )
+              })}
+            </div>
           )}
 
           {/* Input area */}
@@ -949,7 +1266,7 @@ export default function ConversationPanel({
             display: 'flex',
             gap: 0,
             alignItems: 'flex-start',
-            borderTop: `1px solid ${colors.border}`,
+            borderTop: contextFiles.length > 0 ? 'none' : `1px solid ${colors.border}`,
             padding: compact ? '6px 0 0' : '8px 0 0',
           }}>
             {/* Blue prompt chevron — matches UserMessage > */}
@@ -969,10 +1286,13 @@ export default function ConversationPanel({
               ref={inputRef}
               value={input}
               onChange={e => {
-                setInput(e.target.value);
+                const value = e.target.value;
+                setInput(value);
                 const ta = e.target;
                 ta.style.height = 'auto';
                 ta.style.height = Math.min(ta.scrollHeight, 84) + 'px';
+                // Detect @ mentions
+                updateAtMention(value, ta.selectionStart);
               }}
               placeholder={compact ? 'Message...' : 'Message Claude...'}
               onKeyDown={handleKeyDown}

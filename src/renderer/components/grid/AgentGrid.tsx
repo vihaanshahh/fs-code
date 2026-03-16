@@ -277,7 +277,7 @@ export default function AgentGrid({
             <AgentCell
               descriptor={agents[0]} index={0} isFocused={agents[0].id === focusedId}
               compact onFocus={() => onFocus(agents[0].id)} onClose={() => onClose(agents[0].id)}
-              onSlashCommand={onSlashCommand} draggable onDragStart={0}
+              onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={0}
             />
           </div>
           <Divider direction="vertical" onDrag={handleHDrag} />
@@ -289,7 +289,7 @@ export default function AgentGrid({
             <AgentCell
               descriptor={agents[1]} index={1} isFocused={agents[1].id === focusedId}
               compact onFocus={() => onFocus(agents[1].id)} onClose={() => onClose(agents[1].id)}
-              onSlashCommand={onSlashCommand} draggable onDragStart={1}
+              onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={1}
             />
           </div>
         </div>
@@ -306,7 +306,7 @@ export default function AgentGrid({
             <AgentCell
               descriptor={agents[0]} index={0} isFocused={agents[0].id === focusedId}
               compact onFocus={() => onFocus(agents[0].id)} onClose={() => onClose(agents[0].id)}
-              onSlashCommand={onSlashCommand} draggable onDragStart={0}
+              onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={0}
             />
           </div>
           <Divider direction="horizontal" onDrag={handleVDrag} />
@@ -319,7 +319,7 @@ export default function AgentGrid({
               <AgentCell
                 descriptor={agents[1]} index={1} isFocused={agents[1].id === focusedId}
                 compact onFocus={() => onFocus(agents[1].id)} onClose={() => onClose(agents[1].id)}
-                onSlashCommand={onSlashCommand} draggable onDragStart={1}
+                onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={1}
               />
             </div>
             <Divider direction="vertical" onDrag={handleHDrag} />
@@ -331,7 +331,7 @@ export default function AgentGrid({
               <AgentCell
                 descriptor={agents[2]} index={2} isFocused={agents[2].id === focusedId}
                 compact onFocus={() => onFocus(agents[2].id)} onClose={() => onClose(agents[2].id)}
-                onSlashCommand={onSlashCommand} draggable onDragStart={2}
+                onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={2}
               />
             </div>
           </div>
@@ -352,7 +352,7 @@ export default function AgentGrid({
               <AgentCell
                 descriptor={agents[0]} index={0} isFocused={agents[0].id === focusedId}
                 compact onFocus={() => onFocus(agents[0].id)} onClose={() => onClose(agents[0].id)}
-                onSlashCommand={onSlashCommand} draggable onDragStart={0}
+                onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={0}
               />
             </div>
             <Divider direction="vertical" onDrag={handleHDrag} />
@@ -364,7 +364,7 @@ export default function AgentGrid({
               <AgentCell
                 descriptor={agents[1]} index={1} isFocused={agents[1].id === focusedId}
                 compact onFocus={() => onFocus(agents[1].id)} onClose={() => onClose(agents[1].id)}
-                onSlashCommand={onSlashCommand} draggable onDragStart={1}
+                onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={1}
               />
             </div>
           </div>
@@ -379,7 +379,7 @@ export default function AgentGrid({
               <AgentCell
                 descriptor={agents[2]} index={2} isFocused={agents[2].id === focusedId}
                 compact onFocus={() => onFocus(agents[2].id)} onClose={() => onClose(agents[2].id)}
-                onSlashCommand={onSlashCommand} draggable onDragStart={2}
+                onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={2}
               />
             </div>
             <Divider direction="vertical" onDrag={handleHDrag} />
@@ -391,7 +391,7 @@ export default function AgentGrid({
               <AgentCell
                 descriptor={agents[3]} index={3} isFocused={agents[3].id === focusedId}
                 compact onFocus={() => onFocus(agents[3].id)} onClose={() => onClose(agents[3].id)}
-                onSlashCommand={onSlashCommand} draggable onDragStart={3}
+                onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={3}
               />
             </div>
           </div>

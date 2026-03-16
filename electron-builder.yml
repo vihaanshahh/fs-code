@@ -7,6 +7,8 @@ files:
   - out/**/*
   - "!node_modules/**/*"
   - node_modules/@anthropic-ai/claude-agent-sdk/**/*
+  - node_modules/@img/**/*
+  - node_modules/zod/**/*
   - node_modules/node-pty/lib/**/*
   - node_modules/node-pty/build/**/*
   - node_modules/node-pty/package.json
@@ -17,7 +19,8 @@ extraResources:
       - "**/*"
 asar: true
 asarUnpack:
-  - node_modules/@anthropic-ai/claude-agent-sdk/cli.js
+  - node_modules/@anthropic-ai/claude-agent-sdk/**/*
+  - node_modules/@img/**/*
 mac:
   target:
     - dmg

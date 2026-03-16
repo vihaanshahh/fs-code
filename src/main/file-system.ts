@@ -337,6 +337,76 @@ export async function gitDiscard(filePath: string, cwd: string): Promise<{ succe
   }
 }
 
+/**
+ * Search files in the repo using git ls-files + fuzzy matching.
+ * Returns relative paths sorted by match quality.
+ */
+export async function searchFiles(cwd: string, query: string, limit = 15): Promise<string[]> {
+  const absCwd = resolve(cwd)
+
+  let repoRoot: string
+  try {
+    repoRoot = await findRepoRoot(absCwd)
+  } catch {
+    repoRoot = absCwd
+  }
+
+  // Cache key for file list (refresh every 5s)
+  const cacheKey = `files:${repoRoot}`
+  let allFiles = getCached<string[]>(cacheKey)
+
+  if (!allFiles) {
+    try {
+      // Use git ls-files for tracked files + untracked (but not ignored)
+      const { stdout } = await execFileAsync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], {
+        cwd: repoRoot,
+        maxBuffer: 10 * 1024 * 1024,
+      })
+      allFiles = stdout.trim().split('\n').filter(Boolean)
+      setCache(cacheKey, allFiles)
+    } catch {
+      // Fallback: no files
+      return []
+    }
+  }
+
+  if (!query) return allFiles.slice(0, limit)
+
+  const q = query.toLowerCase()
+
+  // Score each file: basename match > path match > fuzzy
+  const scored: { path: string; score: number }[] = []
+  for (const f of allFiles) {
+    const lower = f.toLowerCase()
+    const base = lower.split('/').pop() || lower
+
+    let score = 0
+    if (base === q) {
+      score = 100 // exact basename match
+    } else if (base.startsWith(q)) {
+      score = 80 // basename starts with query
+    } else if (base.includes(q)) {
+      score = 60 // basename contains query
+    } else if (lower.includes(q)) {
+      score = 40 // full path contains query
+    } else {
+      // Fuzzy: check if all chars of query appear in order
+      let qi = 0
+      for (let i = 0; i < lower.length && qi < q.length; i++) {
+        if (lower[i] === q[qi]) qi++
+      }
+      if (qi === q.length) {
+        score = 20
+      }
+    }
+
+    if (score > 0) scored.push({ path: f, score })
+  }
+
+  scored.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+  return scored.slice(0, limit).map(s => s.path)
+}
+
 /** Commit staged changes */
 export async function gitCommit(message: string, cwd: string): Promise<{ success: boolean; hash?: string; error?: string }> {
   if (!message.trim()) return { success: false, error: 'Commit message cannot be empty' }

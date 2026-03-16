@@ -19,29 +19,30 @@ process.on('unhandledRejection', (err: any) => {
 
 let mainWindow: BrowserWindow | null = null
 
-// ── Single-instance lock ──────────────────────────────────────────────
-// If a second instance is launched (e.g. `fluidstate ~/foo` while the app
-// is already running), focus the existing window and open the new directory.
-const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) {
-  app.quit()
+// ── Multi-instance support ──────────────────────────────────────────
+// Allow multiple FluidState windows/instances to run simultaneously.
+// In dev mode we never lock so the production app doesn't block dev.
+// In production, a second launch opens a new window in the existing process
+// (keeping one Dock icon) but you can also force a fresh process with --new-instance.
+const isDev = !!process.env.ELECTRON_RENDERER_URL
+const wantNewProcess = process.argv.includes('--new-instance')
+
+if (isDev || wantNewProcess) {
+  // Skip the single-instance lock entirely — run as a standalone process
 } else {
-  app.on('second-instance', (_event, argv) => {
-    // Extract --open-dir from the second instance's argv
-    const openDirArg = argv.find((a) => a.startsWith('--open-dir='))
-    const dir = openDirArg ? openDirArg.split('=')[1] : null
-
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.focus()
-
-      if (dir) {
-        const resolved = resolve(dir)
-        console.log('[main] second-instance open-dir:', resolved)
-        mainWindow.webContents.send(IPC.APP_INITIAL_CWD, resolved)
-      }
-    }
-  })
+  const gotLock = app.requestSingleInstanceLock()
+  if (!gotLock) {
+    // Another production instance is running — tell it to open a new window, then quit
+    app.quit()
+  } else {
+    app.on('second-instance', (_event, argv) => {
+      // Extract --open-dir from the second instance's argv
+      const openDirArg = argv.find((a: string) => a.startsWith('--open-dir='))
+      const dir = openDirArg ? openDirArg.split('=')[1] : null
+      // Open a new window instead of just focusing the existing one
+      createWindow(dir ? resolve(dir) : null)
+    })
+  }
 }
 
 function createWindow(initialCwd: string | null = null) {
@@ -219,7 +220,11 @@ app.whenReady().then(async () => {
       agent.setMainWindow(mainWindow)
       terminal.setMainWindow(mainWindow)
     }
-    console.log('[main] agent + terminal ready')
+    // Wire up keystore → provider factory
+    const { setApiKeyGetter } = await import('./providers')
+    const keystoreMod = await import('./keystore')
+    setApiKeyGetter((provider) => keystoreMod.getApiKey(provider))
+    console.log('[main] agent + terminal + providers ready')
   } catch (err: any) {
     console.error('[main] Failed to load agent SDK:', err)
   }

@@ -1,16 +1,17 @@
 {
   "name": "FluidState",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "IDE built on the Claude Agent SDK",
   "author": "Vihaan Shah <vihaan@fluidstate.dev>",
   "productName": "FluidState",
   "main": "out/main/index.js",
   "type": "module",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "env -u ELECTRON_RUN_AS_NODE electron-vite dev",
     "build": "electron-vite build",
-    "start": "electron-vite preview",
-    "postinstall": "electron-builder install-app-deps"
+    "start": "env -u ELECTRON_RUN_AS_NODE electron-vite preview",
+    "postinstall": "electron-builder install-app-deps",
+    "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.74",
@@ -32,6 +33,7 @@
     "electron-builder": "^26.0.12",
     "electron-vite": "^5.0.0",
     "typescript": "^5.8.3",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "vitest": "^4.1.0"
   }
 }

@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/types'
-import type { PermissionResponse } from '../shared/types'
+import type { PermissionResponse, ProviderId, ProviderConfig } from '../shared/types'
 
 const api = {
   // Auth
@@ -13,8 +13,8 @@ const api = {
     ipcRenderer.invoke(IPC.DIALOG_OPEN_FOLDER),
 
   // Agent lifecycle
-  createAgent: (name: string, cwd: string) =>
-    ipcRenderer.invoke(IPC.AGENT_CREATE, { name, cwd }),
+  createAgent: (name: string, cwd: string, provider?: ProviderId) =>
+    ipcRenderer.invoke(IPC.AGENT_CREATE, { name, cwd, provider }),
   closeAgent: (agentId: string) =>
     ipcRenderer.invoke(IPC.AGENT_CLOSE, { agentId }),
   listAgents: () =>
@@ -80,6 +80,10 @@ const api = {
     ipcRenderer.invoke(IPC.FS_GIT_DISCARD, { path, cwd }),
   gitCommit: (message: string, cwd: string) =>
     ipcRenderer.invoke(IPC.FS_GIT_COMMIT, { message, cwd }),
+  // File search (for @ mentions)
+  searchFiles: (cwd: string, query: string, limit?: number): Promise<string[]> =>
+    ipcRenderer.invoke(IPC.FS_SEARCH_FILES, { cwd, query, limit }),
+
   // CLI install
   installCLI: () => ipcRenderer.invoke(IPC.CLI_INSTALL),
   uninstallCLI: () => ipcRenderer.invoke(IPC.CLI_UNINSTALL),
@@ -96,6 +100,16 @@ const api = {
     ipcRenderer.invoke(IPC.TERM_RESIZE, { terminalId, cols, rows }),
   closeTerminal: (terminalId: string) =>
     ipcRenderer.invoke(IPC.TERM_CLOSE, { terminalId }),
+
+  // Providers
+  listProviders: (): Promise<Record<ProviderId, ProviderConfig>> =>
+    ipcRenderer.invoke(IPC.PROVIDER_LIST),
+  detectProviders: (): Promise<Record<ProviderId, { available: boolean; error?: string }>> =>
+    ipcRenderer.invoke(IPC.PROVIDER_DETECT),
+  setProviderApiKey: (provider: ProviderId, key: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.PROVIDER_SET_API_KEY, { provider, key }),
+  hasProviderApiKey: (provider: ProviderId): Promise<boolean> =>
+    ipcRenderer.invoke(IPC.PROVIDER_GET_API_KEY, { provider }),
 
   // Window pill mode
   minimizeToPill: (agentCount: number) =>

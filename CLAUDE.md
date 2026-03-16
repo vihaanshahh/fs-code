@@ -32,6 +32,8 @@ src/ (49 files, 242 symbols) → imports from: (none — leaf dependency)
 - `package-lock.json`
 - `package.json`
 - `src/main/agent.ts` — setMainWindow, createAgent, closeAgent, listAgents, sendPrompt, stopSession, setPermissionMode, getPermissionMode +10 more
+- `src/main/agent-env.ts` — buildCleanEnv, getCliAccessFlag, getCliAccessError (cross-platform env sanitization, extracted for testability)
+- `src/main/agent-env.test.ts` — Tests for Windows/Unix environment handling (vitest)
 - `src/main/auth.ts` — getAuthStatus, getClaudePath, ensureClaudeBin, login, logout, fetchUsage
 - `src/main/cli-install.ts` — installCLI, uninstallCLI, isCLIInstalled
 - `src/main/file-system.ts` — readDirectory, readFileContent, writeFileContent, getGitStatus, getGitDiff, getGitStatusDetailed, gitStage, gitUnstage +2 more
@@ -83,6 +85,18 @@ src/ (49 files, 242 symbols) → imports from: (none — leaf dependency)
 - `tsconfig.json`
 - `tsconfig.node.json`
 - `tsconfig.web.json`
+
+## Testing
+- **Runner**: Vitest (`npm test` or `vitest run`)
+- Tests live next to source files as `*.test.ts`
+- `src/main/agent-env.test.ts` — 25 tests covering Windows & Unix env sanitization, case-insensitive matching, dangerous var blocking, CLI access flags
+
+## Cross-Platform (Windows) Notes
+- `agent-env.ts` handles env sanitization for both Windows and Unix — Windows requires `SYSTEMROOT`, `WINDIR`, `COMSPEC`, `PATHEXT`, `USERPROFILE`, `APPDATA`, etc. to be passed through or subprocess spawning breaks
+- Windows env var names are case-insensitive (`Path` vs `PATH`) — matching is normalized to uppercase
+- `fs.constants.X_OK` does not work on Windows (always fails) — use `R_OK` instead for CLI accessibility checks
+- `XDG_` prefixes are Linux-only; not passed through on Windows
+- All path construction uses `path.join()` (never hardcoded `/` or `\`)
 
 ## Codex MCP Tools — USE THESE
 

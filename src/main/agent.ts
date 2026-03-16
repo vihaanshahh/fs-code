@@ -1,44 +1,28 @@
-import { query, listSessions, renameSession, getSessionMessages } from '@anthropic-ai/claude-agent-sdk'
-import type { Query, SDKMessage, PermissionResult, ModelInfo } from '@anthropic-ai/claude-agent-sdk'
+import { listSessions, renameSession, getSessionMessages } from '@anthropic-ai/claude-agent-sdk'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { existsSync } from 'node:fs'
 import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
-
-// Resolve the path to the SDK's cli.js executable.
-// In production, electron-builder unpacks it from the ASAR to app.asar.unpacked/.
-function getCliPath(): string {
-  const sdkCliRel = join('node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js')
-  if (app.isPackaged) {
-    // electron-builder places asarUnpack files at app.asar.unpacked/
-    return join(process.resourcesPath, 'app.asar.unpacked', sdkCliRel)
-  }
-  return join(app.getAppPath(), sdkCliRel)
-}
+import { createProvider, type ProviderDriver, type ClaudeProvider } from './providers'
 
 import { IPC } from '../shared/types'
-import type { UIMessage, PermissionRequest, AgentDescriptor, PermissionMode } from '../shared/types'
+import type { UIMessage, PermissionRequest, AgentDescriptor, PermissionMode, ProviderId } from '../shared/types'
 
 // Per-agent state
 interface AgentState {
   name: string
   cwd: string
-  activeQuery: Query | null
+  providerId: ProviderId
+  provider: ProviderDriver
   activeSessionId: string | null
-  streamingText: string
-  streamingId: string
-  pendingPermissions: Map<string, { resolve: (result: PermissionResult) => void; originalInput: Record<string, unknown>; timeoutId: ReturnType<typeof setTimeout> }>
+  pendingPermissions: Map<string, { resolve: (result: { behavior: 'allow' | 'deny'; message?: string; updatedInput?: Record<string, unknown>; updatedPermissions?: unknown[] }) => void; originalInput: Record<string, unknown>; timeoutId: ReturnType<typeof setTimeout> }>
   permissionMode: PermissionMode
   /** When set, the next sendPrompt will resume this session */
   pendingResumeId: string | null
   /** When set, the next sendPrompt will continue the most recent session */
   pendingContinue: boolean
-  /** SDK session ID from last completed query — auto-resumed on next message */
-  sdkSessionId: string | null
   /** Whether we've shown the "Connected" init message (suppress on follow-ups) */
   hasShownInit: boolean
-  /** Current model from last init */
-  currentModel: string
 }
 
 const agents = new Map<string, AgentState>()
@@ -60,39 +44,42 @@ function uid(): string {
 
 // --- Agent lifecycle ---
 
-export function createAgent(name: string, cwd: string): AgentDescriptor {
+export function createAgent(name: string, cwd: string, providerId: ProviderId = 'claude'): AgentDescriptor {
   const id = uid()
-  agents.set(id, {
+  const provider = createProvider(providerId)
+
+  const state: AgentState = {
     name,
     cwd,
-    activeQuery: null,
+    providerId,
+    provider,
     activeSessionId: null,
-    streamingText: '',
-    streamingId: '',
     pendingPermissions: new Map(),
     permissionMode: 'default',
     pendingResumeId: null,
     pendingContinue: false,
-    sdkSessionId: null,
     hasShownInit: false,
-    currentModel: '',
-  })
-  return { id, name, cwd, isActive: false }
+  }
+
+  // Set up permission handler on the provider
+  provider.setPermissionHandler(makePermissionHandler(id, state))
+
+  agents.set(id, state)
+  return { id, name, cwd, isActive: false, provider: providerId }
 }
 
 export function closeAgent(agentId: string): boolean {
   const state = agents.get(agentId)
   if (!state) return false
   // Stop any active query
-  if (state.activeQuery) {
-    state.activeQuery.close()
-  }
+  state.provider.stop()
   // Deny all pending permissions and clear their timeouts
   for (const [, { resolve, timeoutId }] of state.pendingPermissions) {
     clearTimeout(timeoutId)
     resolve({ behavior: 'deny', message: 'Agent closed' })
   }
   state.pendingPermissions.clear()
+  state.provider.dispose()
   agents.delete(agentId)
   return true
 }
@@ -102,23 +89,17 @@ export function listAgents(): AgentDescriptor[] {
     id,
     name: s.name,
     cwd: s.cwd,
-    isActive: s.activeQuery !== null,
+    isActive: s.activeSessionId !== null,
+    provider: s.providerId,
   }))
 }
 
 // --- Messaging ---
 
-function makePermissionHandler(agentId: string) {
-  return async (toolName: string, input: Record<string, unknown>, opts: any): Promise<PermissionResult> => {
-    const state = agents.get(agentId)
-    if (!state) return { behavior: 'deny', message: 'Agent not found' }
-
-    // Auto-approve SDK internal tools that should not require user interaction
-    const autoApproveTools = ['ExitPlanMode', 'EnterPlanMode', 'ExitWorktree', 'EnterWorktree']
-    if (autoApproveTools.includes(toolName)) {
-      console.log(`[agent:${agentId}] canUseTool: auto-approving internal tool ${toolName}`)
-      return { behavior: 'allow', updatedInput: input }
-    }
+function makePermissionHandler(agentId: string, state: AgentState) {
+  return async (toolName: string, input: Record<string, unknown>, opts: { decisionReason?: string; suggestions?: unknown[] }) => {
+    const currentState = agents.get(agentId)
+    if (!currentState) return { behavior: 'deny' as const, message: 'Agent not found' }
 
     const requestId = uid()
     console.log(`[agent:${agentId}] canUseTool: ${toolName} req=${requestId} inputKeys=${Object.keys(input).join(',')}`)
@@ -131,14 +112,14 @@ function makePermissionHandler(agentId: string) {
     }
     send(IPC.AGENT_PERMISSION_REQUEST, { agentId, ...req })
 
-    return new Promise<PermissionResult>((resolve) => {
+    return new Promise<{ behavior: 'allow' | 'deny'; message?: string; updatedInput?: Record<string, unknown>; updatedPermissions?: unknown[] }>((resolve) => {
       const timeoutId = setTimeout(() => {
-        if (state.pendingPermissions.has(requestId)) {
-          state.pendingPermissions.delete(requestId)
+        if (currentState.pendingPermissions.has(requestId)) {
+          currentState.pendingPermissions.delete(requestId)
           resolve({ behavior: 'deny', message: 'Permission request timed out' })
         }
       }, 300_000)
-      state.pendingPermissions.set(requestId, { resolve, originalInput: input, timeoutId })
+      currentState.pendingPermissions.set(requestId, { resolve, originalInput: input, timeoutId })
     })
   }
 }
@@ -151,102 +132,79 @@ export async function sendPrompt(agentId: string, message: string): Promise<stri
   const state = agents.get(agentId)
   if (!state) throw new Error(`Agent ${agentId} not found`)
 
-  console.log(`[agent:${agentId}] sendPrompt:`, message.slice(0, 80))
+  console.log(`[agent:${agentId}] sendPrompt (${state.providerId}):`, message.slice(0, 80))
 
-  // Close existing query
-  if (state.activeQuery) {
-    state.activeQuery.close()
-    state.activeQuery = null
+  // Validate CWD with fallback
+  let cwd = state.cwd || process.cwd()
+  if (!existsSync(cwd)) {
+    const fallback = app.getPath('home')
+    console.warn(`[agent:${agentId}] cwd "${cwd}" not found, falling back to ${fallback}`)
+    emitMessage(agentId, { id: uid(), type: 'system', text: `Folder not found, using ${fallback}`, ts: Date.now() })
+    cwd = fallback
+    state.cwd = fallback
+  }
+
+  // Preflight validation via provider
+  const preflightErrors = await state.provider.validatePreflight(cwd)
+  if (preflightErrors.length > 0) {
+    for (const err of preflightErrors) {
+      emitMessage(agentId, { id: uid(), type: 'error', message: err, ts: Date.now() })
+    }
+    return ''
   }
 
   const sessionId = randomUUID()
   state.activeSessionId = sessionId
 
-  // User message is added optimistically on the renderer side
-
-  // Build query options, applying any pending resume/continue
-  const opts: Record<string, unknown> = {
-    pathToClaudeCodeExecutable: getCliPath(),
-    executable: process.execPath,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    cwd: state.cwd || process.cwd(),
-    includePartialMessages: true,
-    canUseTool: makePermissionHandler(agentId),
-    permissionMode: state.permissionMode,
+  // Build options for the provider
+  const options = {
+    resumeSessionId: state.pendingResumeId,
+    continueSession: state.pendingContinue,
   }
+
+  // Clear pending flags
   if (state.pendingResumeId) {
-    opts.resume = state.pendingResumeId
+    console.log(`[agent:${agentId}] applying pending resume: ${state.pendingResumeId}`)
     state.pendingResumeId = null
-    console.log(`[agent:${agentId}] applying pending resume: ${opts.resume}`)
-  } else if (state.pendingContinue) {
-    opts.continue = true
-    state.pendingContinue = false
+  }
+  if (state.pendingContinue) {
     console.log(`[agent:${agentId}] applying pending continue`)
-  } else if (state.sdkSessionId) {
-    // Auto-resume the previous SDK session so conversation continues seamlessly
-    opts.resume = state.sdkSessionId
-    console.log(`[agent:${agentId}] auto-resuming SDK session: ${state.sdkSessionId}`)
+    state.pendingContinue = false
   }
 
-  // Log the exact options being passed to SDK
-  const { canUseTool, ...loggableOpts } = opts
-  console.log(`[agent:${agentId}] query options:`, JSON.stringify(loggableOpts))
+  // Also pass current SDK session ID for auto-resume (Claude-specific, handled in provider)
+  const claudeProvider = state.provider as any
+  if (state.providerId === 'claude' && claudeProvider.sessionId && !options.resumeSessionId) {
+    options.resumeSessionId = claudeProvider.sessionId
+    console.log(`[agent:${agentId}] auto-resuming SDK session: ${options.resumeSessionId}`)
+  }
 
-  // Start query
-  const q = query({
-    prompt: message,
-    options: opts as any,
-  })
-
-  state.activeQuery = q
-  send(IPC.AGENT_SESSION_STARTED, { agentId, sessionId })
-
-  // Process messages in background
-  processMessages(agentId, q, sessionId).catch((err) => {
-    console.error(`[agent:${agentId}] processMessages error:`, err)
+  // Delegate to provider
+  state.provider.sendPrompt(
+    message,
+    cwd,
+    options,
+    (msg) => emitMessage(agentId, msg),
+    () => send(IPC.AGENT_SESSION_STARTED, { agentId, sessionId }),
+    () => {
+      const current = agents.get(agentId)
+      if (current && current.activeSessionId === sessionId) {
+        current.activeSessionId = null
+      }
+      send(IPC.AGENT_SESSION_ENDED, { agentId, sessionId })
+    },
+  ).catch((err) => {
+    console.error(`[agent:${agentId}] sendPrompt error:`, err)
+    emitMessage(agentId, { id: uid(), type: 'error', message: err?.message || String(err), ts: Date.now() })
   })
 
   return sessionId
 }
 
-async function processMessages(agentId: string, q: Query, sessionId: string) {
-  const state = agents.get(agentId)
-  if (!state) return
-
-  try {
-    for await (const msg of q) {
-      // Check agent still exists and session matches
-      const current = agents.get(agentId)
-      if (!current || current.activeSessionId !== sessionId) break
-      const uiMsgs = parseSDKMessage(current, msg)
-      for (const m of uiMsgs) emitMessage(agentId, m)
-    }
-  } catch (err: any) {
-    console.error(`[agent:${agentId}] stream error:`, err)
-    const msg = err?.message || String(err) || 'Unknown error'
-    const isAuth = /auth|unauthorized|401|not.?logged.?in|not.?authenticated|invalid.?token/i.test(msg)
-    emitMessage(agentId, {
-      id: uid(),
-      type: 'error',
-      message: isAuth ? 'Not authenticated — use /login or click Sign In in the status bar' : msg,
-      ts: Date.now(),
-    })
-  } finally {
-    const current = agents.get(agentId)
-    if (current && current.activeSessionId === sessionId) {
-      current.activeQuery = null
-    }
-    send(IPC.AGENT_SESSION_ENDED, { agentId, sessionId })
-  }
-}
-
 export function stopSession(agentId: string) {
   const state = agents.get(agentId)
   if (!state) return
-  if (state.activeQuery) {
-    state.activeQuery.close()
-    state.activeQuery = null
-  }
+  state.provider.stop()
   state.activeSessionId = null
   for (const [, { resolve, timeoutId }] of state.pendingPermissions) {
     clearTimeout(timeoutId)
@@ -262,16 +220,8 @@ export async function setPermissionMode(agentId: string, mode: string): Promise<
   const validModes = ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'dontAsk']
   if (!validModes.includes(mode)) throw new Error(`Invalid mode: ${mode}`)
 
-  state.permissionMode = mode as any
-
-  // If there's an active query, change its mode live
-  if (state.activeQuery) {
-    try {
-      await state.activeQuery.setPermissionMode(mode as any)
-    } catch (err) {
-      console.log(`[agent:${agentId}] setPermissionMode on active query failed (non-streaming):`, err)
-    }
-  }
+  state.permissionMode = mode as PermissionMode
+  state.provider.setPermissionMode(mode as PermissionMode)
 
   console.log(`[agent:${agentId}] permissionMode → ${mode}`)
   return mode
@@ -298,10 +248,12 @@ export function resolvePermission(agentId: string, requestId: string, behavior: 
   const { resolve: resolver, originalInput } = pending
 
   if (behavior === 'allow') {
-    // Pass the user's modified input if provided, otherwise preserve the original tool input
-    const result: PermissionResult = { behavior: 'allow', updatedInput: updatedInput && Object.keys(updatedInput).length > 0 ? updatedInput : originalInput }
-    if (updatedPermissions) result.updatedPermissions = updatedPermissions as any
-    console.log(`[agent:${agentId}] resolvePermission ALLOW req=${requestId} hasUpdatedInput=${!!updatedInput} keys=${updatedInput ? Object.keys(updatedInput).join(',') : 'none'}`)
+    const result: { behavior: 'allow'; updatedInput?: Record<string, unknown>; updatedPermissions?: unknown[] } = {
+      behavior: 'allow',
+      updatedInput: updatedInput && Object.keys(updatedInput).length > 0 ? updatedInput : originalInput,
+    }
+    if (updatedPermissions) result.updatedPermissions = updatedPermissions
+    console.log(`[agent:${agentId}] resolvePermission ALLOW req=${requestId}`)
     resolver(result)
   } else {
     console.log(`[agent:${agentId}] resolvePermission DENY req=${requestId}`)
@@ -313,10 +265,15 @@ export function resolvePermission(agentId: string, requestId: string, behavior: 
 export function clearSession(agentId: string) {
   const state = agents.get(agentId)
   if (!state) return
-  state.sdkSessionId = null
-  state.hasShownInit = false
+  // For Claude provider, clear SDK session ID
+  if (state.providerId === 'claude') {
+    const cp = state.provider as ClaudeProvider
+    cp.sessionId = null
+    cp.sessionShownInit = false
+  }
   state.pendingResumeId = null
   state.pendingContinue = false
+  state.hasShownInit = false
   console.log(`[agent:${agentId}] session cleared — next message starts fresh`)
 }
 
@@ -331,7 +288,6 @@ export async function getSessions(cwd?: string) {
 }
 
 // --- Resume a previous session ---
-// Stores the session ID and loads history. The NEXT sendPrompt will use `resume`.
 
 export async function resumeSession(agentId: string, resumeSessionId: string): Promise<void> {
   const state = agents.get(agentId)
@@ -339,16 +295,13 @@ export async function resumeSession(agentId: string, resumeSessionId: string): P
 
   console.log(`[agent:${agentId}] resumeSession: storing ${resumeSessionId}`)
 
-  // Store for next sendPrompt
   state.pendingResumeId = resumeSessionId
   state.pendingContinue = false
 
-  // Load and display previous messages from the session
   try {
     const history = await getSessionMessages(resumeSessionId, {
       dir: state.cwd || undefined,
     })
-    // Batch all history messages into a single IPC send
     const batch: UIMessage[] = [{
       id: uid(),
       type: 'system',
@@ -378,7 +331,6 @@ export async function resumeSession(agentId: string, resumeSessionId: string): P
 }
 
 // --- Continue most recent session ---
-// Stores continue flag. The NEXT sendPrompt will use `continue: true`.
 
 export async function continueSession(agentId: string): Promise<void> {
   const state = agents.get(agentId)
@@ -389,16 +341,13 @@ export async function continueSession(agentId: string): Promise<void> {
   state.pendingContinue = true
   state.pendingResumeId = null
 
-  // Try to load recent session history
   try {
     const sessions = await listSessions({ dir: state.cwd || undefined })
     if (sessions.length > 0) {
       const latest = sessions.sort((a, b) => b.lastModified - a.lastModified)[0]
-      // Load messages from the most recent session
       const history = await getSessionMessages(latest.sessionId, {
         dir: state.cwd || undefined,
       })
-      // Batch all history messages into a single IPC send
       const batch: UIMessage[] = [{
         id: uid(),
         type: 'system',
@@ -439,9 +388,7 @@ export async function continueSession(agentId: string): Promise<void> {
 /** Extract text from SDK message content (handles various formats) */
 function extractText(content: unknown): string | null {
   if (!content) return null
-  // String
   if (typeof content === 'string') return content
-  // { content: [...] } or { content: "..." }
   const obj = content as any
   if (obj.content) {
     if (typeof obj.content === 'string') return obj.content
@@ -454,7 +401,6 @@ function extractText(content: unknown): string | null {
       return texts.join('') || null
     }
   }
-  // Array of content blocks
   if (Array.isArray(content)) {
     const texts: string[] = []
     for (const block of content) {
@@ -472,29 +418,19 @@ export async function getModelInfo(agentId: string): Promise<{ current: string; 
   const state = agents.get(agentId)
   if (!state) throw new Error(`Agent ${agentId} not found`)
 
-  let models: { value: string; displayName: string; description: string }[] = []
-  if (state.activeQuery) {
-    try {
-      const supported = await state.activeQuery.supportedModels()
-      models = supported.map(m => ({ value: m.value, displayName: m.displayName, description: m.description }))
-    } catch { /* no active query */ }
-  }
-
-  return { current: state.currentModel, models }
+  const models = await state.provider.getModels()
+  return { current: state.provider.getCurrentModel(), models }
 }
 
 export async function switchModel(agentId: string, model: string): Promise<void> {
   const state = agents.get(agentId)
   if (!state) throw new Error(`Agent ${agentId} not found`)
 
-  if (state.activeQuery) {
-    await state.activeQuery.setModel(model)
-  }
-  state.currentModel = model
+  state.provider.setModel(model)
   console.log(`[agent:${agentId}] model → ${model}`)
 }
 
-// --- Rename agent (update in-memory name) ---
+// --- Rename agent ---
 
 export function renameAgentName(agentId: string, name: string): boolean {
   const state = agents.get(agentId)
@@ -519,228 +455,57 @@ export async function sendPromptWithOptions(
   const state = agents.get(agentId)
   if (!state) throw new Error(`Agent ${agentId} not found`)
 
-  console.log(`[agent:${agentId}] sendPromptWithOptions:`, message.slice(0, 80))
+  console.log(`[agent:${agentId}] sendPromptWithOptions (${state.providerId}):`, message.slice(0, 80))
 
-  if (state.activeQuery) {
-    state.activeQuery.close()
-    state.activeQuery = null
+  let cwd = state.cwd || process.cwd()
+  if (!existsSync(cwd)) {
+    const fallback = app.getPath('home')
+    cwd = fallback
+    state.cwd = fallback
+  }
+
+  const preflightErrors = await state.provider.validatePreflight(cwd)
+  if (preflightErrors.length > 0) {
+    for (const err of preflightErrors) {
+      emitMessage(agentId, { id: uid(), type: 'error', message: err, ts: Date.now() })
+    }
+    return ''
   }
 
   const sessionId = randomUUID()
   state.activeSessionId = sessionId
 
-  // User message is added optimistically on the renderer side
-
-  // Build query options — must include CLI path/executable/env just like sendPrompt
-  const opts: Record<string, unknown> = {
-    pathToClaudeCodeExecutable: getCliPath(),
-    executable: process.execPath,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    cwd: state.cwd || process.cwd(),
-    includePartialMessages: true,
-    canUseTool: makePermissionHandler(agentId),
-    permissionMode: state.permissionMode,
+  const options = {
+    resumeSessionId: state.pendingResumeId,
+    continueSession: state.pendingContinue,
+    extraOptions,
   }
 
-  // Apply session resume logic (same as sendPrompt)
-  if (state.pendingResumeId) {
-    opts.resume = state.pendingResumeId
-    state.pendingResumeId = null
-    console.log(`[agent:${agentId}] sendPromptWithOptions applying pending resume: ${opts.resume}`)
-  } else if (state.pendingContinue) {
-    opts.continue = true
-    state.pendingContinue = false
-    console.log(`[agent:${agentId}] sendPromptWithOptions applying pending continue`)
-  } else if (state.sdkSessionId) {
-    opts.resume = state.sdkSessionId
-    console.log(`[agent:${agentId}] sendPromptWithOptions auto-resuming SDK session: ${state.sdkSessionId}`)
+  if (state.pendingResumeId) state.pendingResumeId = null
+  if (state.pendingContinue) state.pendingContinue = false
+
+  // Auto-resume for Claude
+  const claudeProvider = state.provider as any
+  if (state.providerId === 'claude' && claudeProvider.sessionId && !options.resumeSessionId) {
+    options.resumeSessionId = claudeProvider.sessionId
   }
 
-  const q = query({
-    prompt: message,
-    options: {
-      ...opts,
-      ...extraOptions,
-    } as any,
-  })
-
-  state.activeQuery = q
-  send(IPC.AGENT_SESSION_STARTED, { agentId, sessionId })
-
-  processMessages(agentId, q, sessionId).catch((err) => {
+  state.provider.sendPrompt(
+    message,
+    cwd,
+    options,
+    (msg) => emitMessage(agentId, msg),
+    () => send(IPC.AGENT_SESSION_STARTED, { agentId, sessionId }),
+    () => {
+      const current = agents.get(agentId)
+      if (current && current.activeSessionId === sessionId) {
+        current.activeSessionId = null
+      }
+      send(IPC.AGENT_SESSION_ENDED, { agentId, sessionId })
+    },
+  ).catch((err) => {
     console.error(`[agent:${agentId}] sendPromptWithOptions error:`, err)
   })
 
   return sessionId
-}
-
-// --- SDK message parsing (per-agent streaming state) ---
-
-function parseSDKMessage(state: AgentState, msg: SDKMessage): UIMessage[] {
-  const out: UIMessage[] = []
-  // Debug: log message types to trace usage data flow
-  const debugTypes = new Set(['rate_limit_event', 'result', 'auth_status'])
-  if (debugTypes.has(msg.type)) {
-    console.log(`[SDK:${msg.type}]`, JSON.stringify(msg).slice(0, 800))
-  }
-  switch (msg.type) {
-    case 'system': {
-      const sys = msg as any
-      if (sys.subtype === 'init') {
-        if (sys.model) state.currentModel = sys.model
-        // Only show "Connected" on first init, suppress on auto-resumed follow-ups
-        if (!state.hasShownInit) {
-          state.hasShownInit = true
-          out.push({ id: uid(), type: 'system', text: `Connected · ${sys.model}`, ts: Date.now() })
-        }
-      } else if (sys.subtype === 'status' && sys.status === 'compacting') {
-        out.push({ id: uid(), type: 'system', text: 'Compacting context...', ts: Date.now() })
-      } else if (sys.subtype === 'task_started') {
-        out.push({ id: uid(), type: 'system', text: `Task: ${sys.description}`, ts: Date.now() })
-      } else if (sys.subtype === 'task_notification') {
-        out.push({ id: uid(), type: 'system', text: `Task ${sys.status}: ${sys.summary}`, ts: Date.now() })
-      } else if (sys.subtype === 'local_command_output') {
-        // Output from slash commands handled natively by Claude Code (e.g. /cost, /usage, /doctor)
-        out.push({ id: uid(), type: 'system', text: sys.content || '', ts: Date.now() })
-      }
-      return out
-    }
-
-    case 'assistant': {
-      const am = msg as any
-      state.streamingText = ''
-      state.streamingId = ''
-      if (!am.message?.content) return out
-      for (const block of am.message.content) {
-        if (block.type === 'text') {
-          out.push({ id: uid(), type: 'assistant', text: block.text, isStreaming: false, ts: Date.now() })
-        } else if (block.type === 'tool_use') {
-          out.push({ id: uid(), type: 'tool-use', toolName: block.name, toolUseId: block.id, input: block.input, ts: Date.now() })
-        }
-      }
-      // Emit token usage from the message if available
-      if (am.message?.usage) {
-        const u = am.message.usage
-        if (u.input_tokens || u.output_tokens) {
-          out.push({ id: uid(), type: 'token-usage', inputTokens: u.input_tokens || 0, outputTokens: u.output_tokens || 0, ts: Date.now() })
-        }
-      }
-      return out
-    }
-
-    case 'stream_event': {
-      const se = msg as any
-      const event = se.event
-      if (!event) return out
-
-      if (event.type === 'content_block_start') {
-        if (event.content_block?.type === 'text') {
-          state.streamingId = uid()
-          state.streamingText = event.content_block.text || ''
-          out.push({ id: state.streamingId, type: 'assistant', text: state.streamingText, isStreaming: true, ts: Date.now() })
-        } else if (event.content_block?.type === 'tool_use') {
-          out.push({ id: uid(), type: 'tool-use', toolName: event.content_block.name, toolUseId: event.content_block.id, input: {}, ts: Date.now() })
-        }
-      } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-        state.streamingText += event.delta.text
-        out.push({ id: state.streamingId || uid(), type: 'assistant', text: state.streamingText, isStreaming: true, ts: Date.now() })
-      } else if (event.type === 'message_stop' || event.type === 'content_block_stop') {
-        if (state.streamingText && state.streamingId) {
-          out.push({ id: state.streamingId, type: 'assistant', text: state.streamingText, isStreaming: false, ts: Date.now() })
-          state.streamingText = ''
-          state.streamingId = ''
-        }
-      }
-      // Capture usage from message_delta events (Anthropic sends usage here)
-      if (event.type === 'message_delta' && event.usage) {
-        const u = event.usage
-        out.push({ id: uid(), type: 'token-usage', inputTokens: u.input_tokens || 0, outputTokens: u.output_tokens || 0, ts: Date.now() })
-      }
-      return out
-    }
-
-    case 'tool_progress': {
-      const tp = msg as any
-      out.push({ id: uid(), type: 'tool-progress', toolName: tp.tool_name, toolUseId: tp.tool_use_id, elapsed: tp.elapsed_time_seconds, ts: Date.now() })
-      return out
-    }
-
-    case 'tool_use_summary': {
-      const ts = msg as any
-      out.push({ id: uid(), type: 'system', text: ts.summary, ts: Date.now() })
-      return out
-    }
-
-    case 'result': {
-      const r = msg as any
-      // Capture SDK session ID so we can auto-resume on the next message
-      if (r.session_id) {
-        state.sdkSessionId = r.session_id
-        console.log(`[agent] captured SDK session: ${r.session_id}`)
-      }
-      if (r.is_error) {
-        out.push({ id: uid(), type: 'error', message: r.errors?.join('\n') || r.result || 'Error', ts: Date.now() })
-      } else {
-        out.push({ id: uid(), type: 'result', cost: r.total_cost_usd || 0, duration: r.duration_ms || 0, numTurns: r.num_turns || 0, ts: Date.now() })
-      }
-      // Emit token usage from result
-      if (r.usage) {
-        out.push({ id: uid(), type: 'token-usage', inputTokens: r.usage.input_tokens || 0, outputTokens: r.usage.output_tokens || 0, ts: Date.now() })
-      }
-      // Emit per-model usage (contextWindow, tokens) for context fill tracking
-      if (r.modelUsage) {
-        for (const [model, mu] of Object.entries(r.modelUsage)) {
-          const m = mu as any
-          if (m.contextWindow && m.inputTokens) {
-            out.push({
-              id: uid(),
-              type: 'usage' as const,
-              utilization: (m.inputTokens + m.outputTokens + (m.cacheReadInputTokens || 0) + (m.cacheCreationInputTokens || 0)) / m.contextWindow,
-              resetsAt: null,
-              limitType: 'context_window',
-              status: 'allowed',
-              ts: Date.now(),
-            })
-            break // only need one model's context fill
-          }
-        }
-      }
-      return out
-    }
-
-    case 'rate_limit_event': {
-      const rl = msg as any
-      const info = rl.rate_limit_info
-      if (!info) return out
-
-      if (info.status === 'rejected') {
-        const resetsIn = info.resetsAt ? Math.max(0, Math.round((info.resetsAt * 1000 - Date.now()) / 60000)) : null
-        out.push({ id: uid(), type: 'error', message: `Rate limited${resetsIn ? ` — resets in ${resetsIn}m` : ''}`, ts: Date.now() })
-      }
-
-      // Always forward utilization data so the UI can track real usage
-      if (typeof info.utilization === 'number') {
-        out.push({
-          id: uid(),
-          type: 'usage' as const,
-          utilization: info.utilization,
-          resetsAt: info.resetsAt ? info.resetsAt * 1000 : null,
-          limitType: info.rateLimitType || 'unknown',
-          status: info.status || 'allowed',
-          ts: Date.now(),
-        })
-      }
-      return out
-    }
-
-    case 'auth_status': {
-      const a = msg as any
-      if (a.error) out.push({ id: uid(), type: 'error', message: `Auth error: ${a.error}. Use /login to sign in.`, ts: Date.now() })
-      else if (a.account?.email) out.push({ id: uid(), type: 'system', text: `Signed in as ${a.account.email}`, ts: Date.now() })
-      return out
-    }
-
-    default:
-      return out
-  }
 }

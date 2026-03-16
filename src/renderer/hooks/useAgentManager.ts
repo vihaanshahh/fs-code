@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { api } from '../lib/api'
 import { clearAgentCache } from './useAgent'
 import { addRecentFolder } from './useRecentFolders'
-import type { AgentDescriptor } from '../../shared/types'
+import type { AgentDescriptor, ProviderId } from '../../shared/types'
 
 const MAX_AGENTS = 4
 const AGENT_NAMES = ['Agent 1', 'Agent 2', 'Agent 3', 'Agent 4']
@@ -10,7 +10,7 @@ const SESSION_KEY = 'fs-code-session'
 const SESSION_MAX_AGE = 24 * 60 * 60 * 1000 // 24h
 
 type SavedSession = {
-  agents: { name: string; cwd: string }[]
+  agents: { name: string; cwd: string; provider?: ProviderId }[]
   focusedIndex: number
   savedAt: number
 }
@@ -35,7 +35,7 @@ export function saveSession(agents: AgentDescriptor[], focusedId: string | null)
   }
   const focusedIndex = focusedId ? agents.findIndex(a => a.id === focusedId) : 0
   const data: SavedSession = {
-    agents: agents.map(a => ({ name: a.name, cwd: a.cwd })),
+    agents: agents.map(a => ({ name: a.name, cwd: a.cwd, provider: a.provider })),
     focusedIndex: Math.max(0, focusedIndex),
     savedAt: Date.now(),
   }
@@ -52,11 +52,11 @@ export function useAgentManager() {
   agentsRef.current = agents
   const restoredRef = useRef(false)
 
-  // Low-level create: takes a resolved cwd, calls main process, updates state
-  const doCreateAgent = useCallback(async (cwd: string): Promise<AgentDescriptor | null> => {
+  // Low-level create: takes a resolved cwd + optional provider, calls main process, updates state
+  const doCreateAgent = useCallback(async (cwd: string, provider?: ProviderId): Promise<AgentDescriptor | null> => {
     if (agentsRef.current.length >= MAX_AGENTS) return null
     const name = AGENT_NAMES[agentsRef.current.length] || `Agent ${agentsRef.current.length + 1}`
-    const descriptor: AgentDescriptor = await api.createAgent(name, cwd)
+    const descriptor: AgentDescriptor = await api.createAgent(name, cwd, provider)
     setAgents(prev => [...prev, descriptor])
     setFocusedId(descriptor.id)
     addRecentFolder(cwd)
@@ -64,18 +64,18 @@ export function useAgentManager() {
   }, [])
 
   // Always pick a folder for new agents
-  const pickAndCreate = useCallback(async (): Promise<AgentDescriptor | null> => {
+  const pickAndCreate = useCallback(async (provider?: ProviderId): Promise<AgentDescriptor | null> => {
     if (agentsRef.current.length >= MAX_AGENTS) return null
     const folder = await api.openFolderDialog()
     if (!folder) return null
-    return doCreateAgent(folder)
+    return doCreateAgent(folder, provider)
   }, [doCreateAgent])
 
   // Create agent — if cwd given, use it directly; otherwise open folder picker
-  const createAgent = useCallback(async (cwd?: string): Promise<AgentDescriptor | null> => {
+  const createAgent = useCallback(async (cwd?: string, provider?: ProviderId): Promise<AgentDescriptor | null> => {
     if (agentsRef.current.length >= MAX_AGENTS) return null
-    if (cwd) return doCreateAgent(cwd)
-    return pickAndCreate()
+    if (cwd) return doCreateAgent(cwd, provider)
+    return pickAndCreate(provider)
   }, [doCreateAgent, pickAndCreate])
 
   // Restore previous session on mount (once)
@@ -94,6 +94,7 @@ export function useAgentManager() {
           const desc = await api.createAgent(
             saved.name,
             saved.cwd,
+            saved.provider,
           )
           created.push(desc)
           addRecentFolder(saved.cwd)

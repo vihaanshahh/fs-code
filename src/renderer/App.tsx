@@ -21,6 +21,7 @@ import { useTheme } from './ThemeContext'
 import { getRecentFolders } from './hooks/useRecentFolders'
 import { resolveAlias } from './components/palette/commands'
 import { api } from './lib/api'
+import SettingsPanel from './components/settings/SettingsPanel'
 import type { TrackedFile, UIMessage } from '../shared/types'
 
 /** Copy text to clipboard (works in Electron renderer) */
@@ -76,6 +77,7 @@ export default function App() {
   const [editingTabId, setEditingTabId] = useState<string | null>(null)
   const [editingTabValue, setEditingTabValue] = useState('')
   const [minimizedView, setMinimizedView] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [activePanel, setActivePanel] = useState<'files' | 'scm'>('files')
 
   const manager = useAgentManager()
@@ -622,11 +624,12 @@ export default function App() {
                       onChange={e => { if (e.target.value.length <= 8) setEditingTabValue(e.target.value) }}
                       onKeyDown={e => {
                         if (e.key === 'Enter') {
+                          e.stopPropagation()
                           const v = editingTabValue.trim()
                           if (v) manager.renameAgent(a.id, v)
                           setEditingTabId(null)
                         }
-                        if (e.key === 'Escape') setEditingTabId(null)
+                        if (e.key === 'Escape') { e.stopPropagation(); setEditingTabId(null) }
                       }}
                       onBlur={() => {
                         const v = editingTabValue.trim()
@@ -715,7 +718,19 @@ export default function App() {
           >
             {'$_'}
           </span>
+          <span
+            style={{ cursor: 'pointer', fontSize: 14, color: showSettings ? colors.text : colors.textMuted, position: 'relative' }}
+            onClick={() => setShowSettings(v => !v)}
+            title="Settings"
+          >
+            {'\u2699'}
+          </span>
         </div>
+
+        {/* Settings panel dropdown */}
+        {showSettings && (
+          <SettingsPanel onClose={() => setShowSettings(false)} />
+        )}
       </div>
 
       {/* Journey bar */}
