@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # First: check if version changed — skip everything if it didn't
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if version bumped
+        id: check
+        run: |
+          CURRENT=$(node -p "require('./package.json').version")
+          PREV=$(git show HEAD~1:package.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).version" 2>/dev/null || echo "")
+          echo "current=$CURRENT prev=$PREV"
+          if [ "$CURRENT" != "$PREV" ] && [ -n "$PREV" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Build on all 3 platforms in parallel
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build app
+        run: npx electron-vite build
+
+      - name: Package (${{ matrix.platform }})
+        run: npx electron-builder --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.exe
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.yml
+            dist/*.yaml
+          if-no-files-found: ignore
+
+  # Create GitHub Release with all platform artifacts
+  release:
+    needs: [check-version, build]
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: FluidState v${{ needs.check-version.outputs.version }}
+          body: |
+            ## FluidState v${{ needs.check-version.outputs.version }}
+
+            **Auto-update:** Existing installs will detect this update automatically.
+
+            ### Downloads
+            - **macOS:** `.dmg` (installer) or `.zip` (portable)
+            - **Windows:** `.exe` (NSIS installer)
+            - **Linux:** `.AppImage` or `.deb`
+          files: dist/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
