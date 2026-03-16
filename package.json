@@ -1,6 +1,6 @@
 {
   "name": "FluidState",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "IDE built on the Claude Agent SDK",
   "author": "Vihaan Shah <vihaan@fluidstate.dev>",
   "productName": "FluidState",
