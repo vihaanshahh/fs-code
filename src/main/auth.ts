@@ -13,7 +13,7 @@ const isWindows = process.platform === 'win32'
 /** Try running a claude binary candidate — returns the candidate string on success */
 async function tryBin(bin: string): Promise<string> {
   await execFileAsync(bin, ['--version'], {
-    timeout: 3000,
+    timeout: 8000,
     // shell: true lets Windows run .ps1 / .cmd files
     shell: isWindows,
   })
@@ -65,9 +65,11 @@ async function findClaudeBin(): Promise<string | null> {
 let cachedBin: string | null | undefined
 
 async function claudeBin(): Promise<string | null> {
-  if (cachedBin !== undefined) return cachedBin
-  cachedBin = await findClaudeBin()
-  return cachedBin
+  // Only cache successful results — a null means "not found yet" and should retry
+  if (cachedBin) return cachedBin
+  const found = await findClaudeBin()
+  if (found) cachedBin = found
+  return found
 }
 
 /** Synchronous accessor — returns cached path (or null if not yet resolved / not found) */

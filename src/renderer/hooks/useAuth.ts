@@ -8,25 +8,33 @@ export function useAuth() {
   const autoLoginAttempted = useRef(false)
 
   // Check auth on mount — auto-login if not authenticated
+  // Retries up to 3 times if CLI not found (Windows cold-start can be slow)
   useEffect(() => {
     let cancelled = false
     ;(async () => {
-      try {
-        const s: AuthStatus = await api.authStatus()
-        if (cancelled) return
-        setStatus(s)
-
-        // Auto-trigger login if not authenticated and CLI exists
-        if (!s.authenticated && !s.error?.includes('not found') && !autoLoginAttempted.current) {
-          autoLoginAttempted.current = true
-          const loginResult: AuthStatus = await api.authLogin()
-          if (!cancelled) setStatus(loginResult)
+      let s: AuthStatus = { authenticated: false }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          s = await api.authStatus()
+        } catch {
+          s = { authenticated: false, error: 'Could not check auth' }
         }
-      } catch {
-        if (!cancelled) setStatus({ authenticated: false, error: 'Could not check auth' })
-      } finally {
-        if (!cancelled) setLoading(false)
+        if (cancelled) return
+        // If CLI found (no "not found" error), stop retrying
+        if (!s.error?.includes('not found')) break
+        // Wait before retrying (2s, 4s)
+        if (attempt < 2) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)))
       }
+      if (cancelled) return
+      setStatus(s)
+
+      // Auto-trigger login if not authenticated and CLI exists
+      if (!s.authenticated && !s.error?.includes('not found') && !autoLoginAttempted.current) {
+        autoLoginAttempted.current = true
+        const loginResult: AuthStatus = await api.authLogin()
+        if (!cancelled) setStatus(loginResult)
+      }
+      setLoading(false)
     })()
     return () => { cancelled = true }
   }, [])
