@@ -27,11 +27,21 @@ let cachedCliPath: string | null = null
 
 /**
  * Resolve the Claude Code CLI path.
+ * Priority:
+ * 0. FLUIDSTATE_CLAUDE_PATH env var (user override — always wins)
  * 1. Bundled SDK cli.js (inside packaged app)
- * 2. User-installed `claude` on PATH (fallback — covers Windows where ASAR unpack can fail)
+ * 2. User-installed `claude` on PATH / known locations
  */
 function getCliPath(): string {
   if (cachedCliPath) return cachedCliPath
+
+  // 0. User override via env var — skip all detection
+  const envPath = process.env.FLUIDSTATE_CLAUDE_PATH
+  if (envPath && existsSync(envPath)) {
+    console.log(`[claude-provider] using FLUIDSTATE_CLAUDE_PATH: ${envPath}`)
+    cachedCliPath = envPath
+    return envPath
+  }
 
   // 1. Try bundled SDK cli.js
   const sdkCliRel = join('node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js')
@@ -49,7 +59,7 @@ function getCliPath(): string {
     }
   }
 
-  // 2. Fallback: find `claude` on PATH (user's own install)
+  // 2. Fallback: find `claude` on PATH / known install locations
   const systemCli = findClaudeOnPath()
   if (systemCli) {
     console.log(`[claude-provider] using system CLI: ${systemCli}`)
@@ -85,7 +95,8 @@ function findClaudeOnPath(): string | null {
     const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local')
 
     const candidates = [
-      // npm global install — the most common case
+      // npm global install — checks .ps1, .cmd, and extensionless
+      join(appData, 'npm', 'claude.ps1'),
       join(appData, 'npm', 'claude.cmd'),
       join(appData, 'npm', 'claude'),
       // Claude's own installer
@@ -95,6 +106,7 @@ function findClaudeOnPath(): string | null {
       join(home, '.claude', 'local', 'claude.exe'),
       join(home, '.claude', 'bin', 'claude.exe'),
       // pnpm / yarn global
+      join(localAppData, 'pnpm', 'claude.ps1'),
       join(localAppData, 'pnpm', 'claude.cmd'),
       join(localAppData, 'pnpm', 'claude'),
       // Scoop
@@ -118,10 +130,10 @@ function findClaudeOnPath(): string | null {
         shell: true,
       }).trim()
       if (npmBin) {
-        const npmClaude = join(npmBin, 'claude.cmd')
-        if (existsSync(npmClaude)) return npmClaude
-        const npmClaude2 = join(npmBin, 'claude')
-        if (existsSync(npmClaude2)) return npmClaude2
+        for (const ext of ['claude.ps1', 'claude.cmd', 'claude']) {
+          const p = join(npmBin, ext)
+          if (existsSync(p)) return p
+        }
       }
     } catch { /* npm not available */ }
   }
@@ -149,7 +161,7 @@ export class ClaudeProvider implements ProviderDriver {
   async checkAvailability(): Promise<string | null> {
     const cliPath = getCliPath()
     if (!existsSync(cliPath)) {
-      return `Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code`
+      return `Claude Code CLI not found. Install it or set FLUIDSTATE_CLAUDE_PATH to your claude binary.`
     }
     try {
       accessSync(cliPath, getCliAccessFlag(isWindows))
@@ -167,7 +179,7 @@ export class ClaudeProvider implements ProviderDriver {
       errors.push(
         'Claude Code CLI not found. '
         + (isWindows
-          ? 'Make sure `claude` is installed and on your PATH (run `where claude` to check).'
+          ? 'Set FLUIDSTATE_CLAUDE_PATH to your claude path, or make sure `claude` is on your PATH.'
           : 'Reinstall the app or run `npm install -g @anthropic-ai/claude-code`.')
       )
       return errors
