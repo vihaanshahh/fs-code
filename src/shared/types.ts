@@ -247,6 +247,7 @@ export const IPC = {
   AGENT_MESSAGE: 'agent:message',
   AGENT_MESSAGE_BATCH: 'agent:message-batch',
   AGENT_PERMISSION_REQUEST: 'agent:permission-request',
+  AGENT_PERMISSION_DISMISSED: 'agent:permission-dismissed',
   AGENT_SESSION_STARTED: 'agent:session-started',
   AGENT_SESSION_ENDED: 'agent:session-ended',
   // Dialog

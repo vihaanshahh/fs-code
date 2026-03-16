@@ -29,7 +29,7 @@ export function createGeminiProvider(getApiKey: () => string | null): JsonlProvi
     },
     parseEvent(event: Record<string, unknown>): UIMessage[] {
       const out: UIMessage[] = []
-      const type = event.type as string
+      const type = (event.type ?? '') as string
 
       if (type === 'text' || type === 'content') {
         const text = (event.text || event.content || '') as string

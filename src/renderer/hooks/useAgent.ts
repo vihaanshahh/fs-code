@@ -65,6 +65,25 @@ api.onPermissionRequest((data: any) => {
   setState(data.agentId, prev => ({ ...prev, permissionRequest: data }))
 })
 
+api.onPermissionDismissed((data: { agentId: string; requestId: string }) => {
+  setState(data.agentId, prev => {
+    // Only clear if the dismissed request matches the currently displayed one
+    if (prev.permissionRequest?.requestId === data.requestId) {
+      return {
+        ...prev,
+        permissionRequest: null,
+        messages: [...prev.messages, {
+          id: Math.random().toString(36).slice(2, 10),
+          type: 'system' as const,
+          text: 'Permission request timed out — automatically denied.',
+          ts: Date.now(),
+        }],
+      }
+    }
+    return prev
+  })
+})
+
 api.onSessionStarted((data: any) => {
   setState(data.agentId, prev => ({ ...prev, isActive: true }))
 })
@@ -109,13 +128,13 @@ export function useAgent(agentId: string) {
     setState(agentId, prev => ({ ...prev, isActive: false }))
   }, [agentId])
 
-  const respondPermission = useCallback(async (behavior: 'allow' | 'deny', updatedInput?: Record<string, unknown>) => {
+  const respondPermission = useCallback(async (behavior: 'allow' | 'deny', updatedInput?: Record<string, unknown>, alwaysAllow?: boolean) => {
     const pr = getState(agentId).permissionRequest
     if (!pr) return
     await api.respondPermission(agentId, {
       requestId: pr.requestId,
       behavior,
-      updatedPermissions: behavior === 'allow' ? pr.suggestions : undefined,
+      updatedPermissions: behavior === 'allow' && alwaysAllow ? pr.suggestions : undefined,
       updatedInput,
     })
     setState(agentId, prev => ({ ...prev, permissionRequest: null }))

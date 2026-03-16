@@ -136,6 +136,11 @@ const api = {
     ipcRenderer.on(IPC.AGENT_PERMISSION_REQUEST, handler)
     return () => ipcRenderer.removeListener(IPC.AGENT_PERMISSION_REQUEST, handler)
   },
+  onPermissionDismissed: (cb: (data: { agentId: string; requestId: string }) => void) => {
+    const handler = (_: any, data: any) => cb(data)
+    ipcRenderer.on(IPC.AGENT_PERMISSION_DISMISSED, handler)
+    return () => ipcRenderer.removeListener(IPC.AGENT_PERMISSION_DISMISSED, handler)
+  },
   onSessionStarted: (cb: (data: any) => void) => {
     const handler = (_: any, data: any) => cb(data)
     ipcRenderer.on(IPC.AGENT_SESSION_STARTED, handler)

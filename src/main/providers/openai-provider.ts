@@ -30,7 +30,7 @@ export function createOpenAIProvider(getApiKey: () => string | null): JsonlProvi
     },
     parseEvent(event: Record<string, unknown>): UIMessage[] {
       const out: UIMessage[] = []
-      const type = event.type as string
+      const type = (event.type ?? '') as string
 
       if (type === 'message' || type === 'text') {
         const text = (event.text || event.content || event.message || '') as string
@@ -51,6 +51,7 @@ export function createOpenAIProvider(getApiKey: () => string | null): JsonlProvi
       } else if (type === 'done' || type === 'complete') {
         out.push({ id: uid(), type: 'result', cost: 0, duration: 0, numTurns: 1, ts: Date.now() })
       }
+      // Unrecognized type — let the base class fallback handle it via extractTextFromJson
 
       return out
     },

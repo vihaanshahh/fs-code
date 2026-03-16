@@ -330,7 +330,7 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
 
 export default function MarkdownRenderer({ text }: { text: string }) {
   const { colors, fonts } = useTheme()
-  const blocks = parseBlocks(text)
+  const blocks = parseBlocks(text || '')
   const ri = (nodes: InlineNode[], keyPrefix = '') => renderInline(nodes, colors, fonts.mono, keyPrefix)
 
   return (

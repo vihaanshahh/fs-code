@@ -893,9 +893,20 @@ export default function App() {
                 fontFamily: fonts.mono,
                 color: apiUsage.sessionPct > 80 ? colors.red : apiUsage.sessionPct > 50 ? colors.amber : colors.textMuted,
               }}
-              title={`5h session: ${apiUsage.sessionPct}%${apiUsage.sessionReset ? ` · resets ${apiUsage.sessionReset}` : ''}${apiUsage.weekPct != null ? `\n7d week: ${apiUsage.weekPct}%` : ''}${apiUsage.extraSpent != null ? `\nExtra: $${apiUsage.extraSpent.toFixed(2)}${apiUsage.extraLimit != null ? ` / $${apiUsage.extraLimit.toFixed(2)}` : ''}` : ''}`}
+              title={`5h session: ${apiUsage.sessionPct}%${apiUsage.sessionReset ? ` · resets ${apiUsage.sessionReset}` : ''}${apiUsage.weekPct != null ? `\n7d week: ${apiUsage.weekPct}%` : ''}${apiUsage.weekSonnetPct != null ? `\n7d Sonnet: ${apiUsage.weekSonnetPct}%` : ''}${apiUsage.extraSpent != null ? `\nExtra: $${apiUsage.extraSpent.toFixed(2)}${apiUsage.extraLimit != null ? ` / $${apiUsage.extraLimit.toFixed(2)}` : ''}` : ''}`}
             >
-              {apiUsage.sessionPct}%{apiUsage.sessionReset ? ` · ${apiUsage.sessionReset}` : ''}
+              5h {apiUsage.sessionPct}%{apiUsage.sessionReset ? ` · ${apiUsage.sessionReset}` : ''}
+            </span>
+          )}
+          {apiUsage.weekPct != null && (
+            <span
+              style={{
+                fontFamily: fonts.mono,
+                color: apiUsage.weekPct > 80 ? colors.red : apiUsage.weekPct > 50 ? colors.amber : colors.textMuted,
+              }}
+              title={`7d all models: ${apiUsage.weekPct}%${apiUsage.weekReset ? ` · resets ${apiUsage.weekReset}` : ''}${apiUsage.weekSonnetPct != null ? `\nSonnet: ${apiUsage.weekSonnetPct}%${apiUsage.weekSonnetReset ? ` · resets ${apiUsage.weekSonnetReset}` : ''}` : ''}`}
+            >
+              7d {apiUsage.weekPct}%
             </span>
           )}
           <span>{totalFiles} files</span>

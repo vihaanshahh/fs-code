@@ -1,18 +1,17 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
 import type { AuthStatus } from '../../shared/types'
 
 export function useAuth() {
   const [status, setStatus] = useState<AuthStatus>({ authenticated: false })
   const [loading, setLoading] = useState(true)
-  const autoLoginAttempted = useRef(false)
 
-  // Check auth on mount — retries up to 3 times if CLI not found (Windows cold-start)
+  // Check auth on mount — retries once after a short delay if CLI not found (Windows cold-start)
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       let s: AuthStatus = { authenticated: false }
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 2; attempt++) {
         try {
           s = await api.authStatus()
         } catch {
@@ -20,22 +19,13 @@ export function useAuth() {
         }
         if (cancelled) return
         if (!s.error?.includes('not found')) break
-        if (attempt < 2) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)))
+        // One retry after 2s for Windows cold-start PATH availability
+        if (attempt < 1) await new Promise(r => setTimeout(r, 2000))
       }
-      if (cancelled) return
-      setStatus(s)
-
-      // Auto-trigger login if not authenticated and CLI exists
-      if (!s.authenticated && !s.error?.includes('not found') && !autoLoginAttempted.current) {
-        autoLoginAttempted.current = true
-        try {
-          const loginResult: AuthStatus = await api.authLogin()
-          if (!cancelled) setStatus(loginResult)
-        } catch {
-          if (!cancelled) setStatus({ authenticated: false, error: 'Login failed' })
-        }
+      if (!cancelled) {
+        setStatus(s)
+        setLoading(false)
       }
-      if (!cancelled) setLoading(false)
     })()
     return () => { cancelled = true }
   }, [])

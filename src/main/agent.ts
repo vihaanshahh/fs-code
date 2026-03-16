@@ -74,8 +74,9 @@ export function closeAgent(agentId: string): boolean {
   // Stop any active query
   state.provider.stop()
   // Deny all pending permissions and clear their timeouts
-  for (const [, { resolve, timeoutId }] of state.pendingPermissions) {
+  for (const [requestId, { resolve, timeoutId }] of state.pendingPermissions) {
     clearTimeout(timeoutId)
+    send(IPC.AGENT_PERMISSION_DISMISSED, { agentId, requestId })
     resolve({ behavior: 'deny', message: 'Agent closed' })
   }
   state.pendingPermissions.clear()
@@ -116,9 +117,12 @@ function makePermissionHandler(agentId: string, state: AgentState) {
       const timeoutId = setTimeout(() => {
         if (currentState.pendingPermissions.has(requestId)) {
           currentState.pendingPermissions.delete(requestId)
+          console.log(`[agent:${agentId}] permission timed out req=${requestId}`)
+          // Notify renderer to clear the stale permission banner
+          send(IPC.AGENT_PERMISSION_DISMISSED, { agentId, requestId })
           resolve({ behavior: 'deny', message: 'Permission request timed out' })
         }
-      }, 300_000)
+      }, 120_000) // 2 minutes
       currentState.pendingPermissions.set(requestId, { resolve, originalInput: input, timeoutId })
     })
   }
@@ -212,8 +216,9 @@ export function stopSession(agentId: string) {
   if (!state) return
   state.provider.stop()
   state.activeSessionId = null
-  for (const [, { resolve, timeoutId }] of state.pendingPermissions) {
+  for (const [requestId, { resolve, timeoutId }] of state.pendingPermissions) {
     clearTimeout(timeoutId)
+    send(IPC.AGENT_PERMISSION_DISMISSED, { agentId, requestId })
     resolve({ behavior: 'deny', message: 'Session stopped' })
   }
   state.pendingPermissions.clear()

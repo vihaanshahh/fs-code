@@ -11,9 +11,9 @@ const execFileAsync = promisify(execFile)
 const isWindows = process.platform === 'win32'
 
 /** Try running a claude binary candidate — returns the candidate string on success */
-async function tryBin(bin: string): Promise<string> {
+async function tryBin(bin: string, timeout = 8000): Promise<string> {
   await execFileAsync(bin, ['--version'], {
-    timeout: 8000,
+    timeout,
     // shell: true lets Windows run .ps1 / .cmd files
     shell: isWindows,
   })
@@ -39,11 +39,12 @@ async function findClaudeBin(): Promise<string | null> {
     const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local')
     candidates.push(
       'claude',                                        // on PATH
-      join(appData, 'npm', 'claude.ps1'),
       join(appData, 'npm', 'claude.cmd'),
       join(appData, 'npm', 'claude'),
       join(localAppData, 'Programs', 'claude', 'claude.exe'),
       join(home, '.claude', 'local', 'claude.exe'),
+      // .ps1 last — PowerShell scripts can prompt for execution policy and hang
+      join(appData, 'npm', 'claude.ps1'),
     )
   } else {
     candidates.push(
@@ -55,8 +56,16 @@ async function findClaudeBin(): Promise<string | null> {
     )
   }
 
+  // On Windows, use a shorter per-candidate timeout and add an overall race timeout
+  // so we don't hang for minutes when ALL candidates fail.
+  const perBinTimeout = isWindows ? 4000 : 8000
+  const overallTimeout = isWindows ? 10_000 : 20_000
+
   try {
-    return await Promise.any(candidates.map(bin => tryBin(bin)))
+    return await Promise.race([
+      Promise.any(candidates.map(bin => tryBin(bin, perBinTimeout))),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), overallTimeout)),
+    ])
   } catch {
     return null
   }
@@ -201,17 +210,19 @@ export async function logout(): Promise<AuthStatus> {
 
 /** Read OAuth access token — tries macOS keychain first, falls back to ~/.claude.json */
 async function getOAuthToken(): Promise<string | null> {
-  // macOS keychain (where Claude Code stores tokens)
-  try {
-    const { stdout } = await execFileAsync(
-      'security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
-      { timeout: 3000 },
-    )
-    const creds = JSON.parse(stdout.trim())
-    if (creds?.claudeAiOauth?.accessToken) return creds.claudeAiOauth.accessToken
-  } catch { /* not in keychain */ }
+  // macOS keychain (where Claude Code stores tokens) — skip on non-macOS
+  if (process.platform === 'darwin') {
+    try {
+      const { stdout } = await execFileAsync(
+        'security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+        { timeout: 3000 },
+      )
+      const creds = JSON.parse(stdout.trim())
+      if (creds?.claudeAiOauth?.accessToken) return creds.claudeAiOauth.accessToken
+    } catch { /* not in keychain */ }
+  }
 
-  // Fallback: ~/.claude.json
+  // Fallback: ~/.claude.json (works on all platforms)
   try {
     const configPath = join(process.env.CLAUDE_CONFIG_DIR || homedir(), '.claude.json')
     const raw = await readFile(configPath, 'utf-8')

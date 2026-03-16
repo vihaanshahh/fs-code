@@ -37,6 +37,60 @@ export interface JsonlProviderConfig {
   defaultModel: string
 }
 
+/**
+ * Try to extract meaningful text from an arbitrary JSON object.
+ * CLIs output wildly different schemas — this covers common patterns:
+ *   { content: "..." }, { message: { content: "..." } }, { text: "..." },
+ *   { output: "..." }, { response: "..." }, { data: { text: "..." } },
+ *   { candidates: [{ content: { parts: [{ text: "..." }] } }] }  (Gemini REST)
+ */
+function extractTextFromJson(obj: Record<string, unknown>): string | null {
+  // Direct string fields
+  for (const key of ['text', 'content', 'output', 'response', 'answer', 'result', 'delta']) {
+    if (typeof obj[key] === 'string' && obj[key]) return obj[key] as string
+  }
+
+  // message.content (OpenAI chat format)
+  if (typeof obj.message === 'object' && obj.message !== null) {
+    const msg = obj.message as Record<string, unknown>
+    if (typeof msg.content === 'string' && msg.content) return msg.content
+    if (typeof msg.text === 'string' && msg.text) return msg.text
+  }
+
+  // choices[].message.content or choices[].delta.content (OpenAI streaming)
+  if (Array.isArray(obj.choices) && obj.choices.length > 0) {
+    const choice = obj.choices[0] as Record<string, unknown>
+    for (const field of ['message', 'delta']) {
+      if (typeof choice[field] === 'object' && choice[field] !== null) {
+        const inner = choice[field] as Record<string, unknown>
+        if (typeof inner.content === 'string' && inner.content) return inner.content
+      }
+    }
+    if (typeof choice.text === 'string' && choice.text) return choice.text
+  }
+
+  // candidates[].content.parts[].text (Gemini)
+  if (Array.isArray(obj.candidates) && obj.candidates.length > 0) {
+    const cand = obj.candidates[0] as Record<string, unknown>
+    if (typeof cand.content === 'object' && cand.content !== null) {
+      const content = cand.content as Record<string, unknown>
+      if (Array.isArray(content.parts) && content.parts.length > 0) {
+        const part = content.parts[0] as Record<string, unknown>
+        if (typeof part.text === 'string' && part.text) return part.text
+      }
+    }
+  }
+
+  // data.text / data.content wrapper
+  if (typeof obj.data === 'object' && obj.data !== null) {
+    const data = obj.data as Record<string, unknown>
+    if (typeof data.text === 'string' && data.text) return data.text
+    if (typeof data.content === 'string' && data.content) return data.content
+  }
+
+  return null
+}
+
 export class JsonlProvider implements ProviderDriver {
   readonly id: string
   readonly displayName: string
@@ -150,7 +204,18 @@ export class JsonlProvider implements ProviderDriver {
         try {
           const event = JSON.parse(trimmed)
           const msgs = this.config.parseEvent(event)
-          for (const m of msgs) onMessage(m)
+          if (msgs.length > 0) {
+            for (const m of msgs) onMessage(m)
+          } else {
+            // parseEvent didn't recognize this JSON — try to extract text generically
+            const fallbackText = extractTextFromJson(event)
+            if (fallbackText) {
+              this.streamingText += (this.streamingText ? '\n' : '') + fallbackText
+              if (!this.streamingId) this.streamingId = uid()
+              onMessage({ id: this.streamingId, type: 'assistant', text: this.streamingText, isStreaming: true, ts: Date.now() })
+            }
+            // If no text could be extracted, silently skip (status/metadata events)
+          }
         } catch {
           // Not JSON — treat as plain text output
           if (trimmed) {
@@ -178,7 +243,14 @@ export class JsonlProvider implements ProviderDriver {
         try {
           const event = JSON.parse(trimmed)
           const msgs = this.config.parseEvent(event)
-          for (const m of msgs) onMessage(m)
+          if (msgs.length > 0) {
+            for (const m of msgs) onMessage(m)
+          } else {
+            const fallbackText = extractTextFromJson(event)
+            if (fallbackText) {
+              this.streamingText += (this.streamingText ? '\n' : '') + fallbackText
+            }
+          }
         } catch {
           if (trimmed) {
             this.streamingText += (this.streamingText ? '\n' : '') + trimmed

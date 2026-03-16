@@ -65,13 +65,17 @@ export function useApiUsage() {
   // Derived summary for the status bar
   const fiveHour = data?.five_hour
   const sevenDay = data?.seven_day
+  const sevenDaySonnet = data?.seven_day_sonnet
   const extra = data?.extra_usage
 
   const sessionPct = fiveHour?.utilization != null ? Math.floor(fiveHour.utilization) : null
   const sessionReset = fiveHour ? formatResetTime(fiveHour.resets_at) : null
   const weekPct = sevenDay?.utilization != null ? Math.floor(sevenDay.utilization) : null
+  const weekReset = sevenDay ? formatResetTime(sevenDay.resets_at) : null
+  const weekSonnetPct = sevenDaySonnet?.utilization != null ? Math.floor(sevenDaySonnet.utilization) : null
+  const weekSonnetReset = sevenDaySonnet ? formatResetTime(sevenDaySonnet.resets_at) : null
   const extraSpent = extra?.used_credits != null ? (extra.used_credits / 100) : null
   const extraLimit = extra?.monthly_limit != null ? (extra.monthly_limit / 100) : null
 
-  return { data, error, sessionPct, sessionReset, weekPct, extraSpent, extraLimit, refetch: () => fetchRef.current?.() }
+  return { data, error, sessionPct, sessionReset, weekPct, weekReset, weekSonnetPct, weekSonnetReset, extraSpent, extraLimit, refetch: () => fetchRef.current?.() }
 }

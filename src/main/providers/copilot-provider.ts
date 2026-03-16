@@ -24,7 +24,7 @@ export function createCopilotProvider(): JsonlProvider {
     },
     parseEvent(event: Record<string, unknown>): UIMessage[] {
       const out: UIMessage[] = []
-      const type = event.type as string
+      const type = (event.type ?? '') as string
 
       if (type === 'content' || type === 'message' || type === 'text') {
         const text = (event.text || event.content || event.message || '') as string
