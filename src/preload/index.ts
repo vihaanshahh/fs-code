@@ -117,6 +117,16 @@ const api = {
   restoreFromPill: () =>
     ipcRenderer.invoke(IPC.WINDOW_RESTORE_PILL),
 
+  // Auto-update
+  checkForUpdates: () => ipcRenderer.invoke(IPC.UPDATE_CHECK),
+  downloadUpdate: () => ipcRenderer.invoke(IPC.UPDATE_DOWNLOAD),
+  installUpdate: () => ipcRenderer.invoke(IPC.UPDATE_INSTALL),
+  onUpdateStatus: (cb: (data: any) => void) => {
+    const handler = (_: any, data: any) => cb(data)
+    ipcRenderer.on(IPC.UPDATE_STATUS, handler)
+    return () => ipcRenderer.removeListener(IPC.UPDATE_STATUS, handler)
+  },
+
   // Events — all agent events now include { agentId, ...payload }
   onAgentMessage: (cb: (data: any) => void) => {
     const handler = (_: any, data: any) => cb(data)

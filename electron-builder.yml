@@ -3,6 +3,10 @@ productName: FluidState
 directories:
   buildResources: resources
   output: dist
+publish:
+  provider: github
+  owner: vihaanshahh
+  repo: fs-code
 files:
   - out/**/*
   - "!node_modules/**/*"
@@ -12,6 +16,9 @@ files:
   - node_modules/node-pty/lib/**/*
   - node_modules/node-pty/build/**/*
   - node_modules/node-pty/package.json
+  - node_modules/electron-updater/**/*
+  - node_modules/builder-util-runtime/**/*
+  - node_modules/lazy-val/**/*
 extraResources:
   - from: resources/bin
     to: bin

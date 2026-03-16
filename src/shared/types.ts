@@ -291,4 +291,17 @@ export const IPC = {
   // Window pill mode
   WINDOW_MINIMIZE_PILL: 'window:minimize-pill',
   WINDOW_RESTORE_PILL: 'window:restore-pill',
+  // Auto-update
+  UPDATE_CHECK: 'update:check',
+  UPDATE_DOWNLOAD: 'update:download',
+  UPDATE_INSTALL: 'update:install',
+  UPDATE_STATUS: 'update:status',
 } as const
+
+export type UpdateStatus =
+  | { state: 'checking' }
+  | { state: 'available'; version: string; releaseNotes?: string }
+  | { state: 'not-available'; currentVersion: string }
+  | { state: 'downloading'; percent: number }
+  | { state: 'downloaded'; version: string }
+  | { state: 'error'; message: string }

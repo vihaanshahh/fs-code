@@ -23,6 +23,7 @@ import { resolveAlias } from './components/palette/commands'
 import { api } from './lib/api'
 import SettingsPanel from './components/settings/SettingsPanel'
 import { useSettings } from './hooks/useSettings'
+import { useUpdateStatus } from './hooks/useUpdateStatus'
 import type { TrackedFile, UIMessage } from '../shared/types'
 
 /** Copy text to clipboard (works in Electron renderer) */
@@ -120,6 +121,7 @@ export default function App() {
   )
   const contextUsage = useContextUsage()
   const apiUsage = useApiUsage()
+  const updateStatus = useUpdateStatus()
 
   // Minimize to floating pill / restore
   const enterPillMode = useCallback(() => {
@@ -757,6 +759,50 @@ export default function App() {
 
       {/* Journey bar */}
       <JourneyBar agents={manager.agents} agentColors={agentColors} focusedId={manager.focusedId} onAnyAwaiting={setAnyAwaiting} />
+
+      {/* Update banner */}
+      {updateStatus.status?.state === 'downloaded' && (
+        <div style={{
+          padding: '6px 16px',
+          background: `${colors.green}12`,
+          borderBottom: `1px solid ${colors.green}25`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          fontSize: 12,
+        }}>
+          <span style={{ color: colors.green }}>
+            FluidState v{updateStatus.status.version} is ready — restart to update
+          </span>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              onClick={updateStatus.install}
+              style={{
+                background: colors.green,
+                border: 'none',
+                color: '#fff',
+                borderRadius: 6,
+                padding: '3px 10px',
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >Restart Now</button>
+            <button
+              onClick={updateStatus.dismiss}
+              style={{
+                background: 'none',
+                border: `1px solid ${colors.border}`,
+                color: colors.textMuted,
+                borderRadius: 6,
+                padding: '3px 10px',
+                fontSize: 11,
+                cursor: 'pointer',
+              }}
+            >Later</button>
+          </div>
+        </div>
+      )}
 
       {/* Main content */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>

@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react'
 import { useTheme } from '../../ThemeContext'
 import { useSettings } from '../../hooks/useSettings'
 import ProviderSection from './ProviderSection'
+import UpdateSection from './UpdateSection'
 
 function ToggleSwitch({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
   const { colors } = useTheme()
@@ -174,6 +175,21 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           defaultProvider={settings.defaultProvider}
           onDefaultChange={(id) => update({ defaultProvider: id })}
         />
+      </div>
+
+      {/* Updates section */}
+      <div style={{ borderTop: `1px solid ${colors.border}` }}>
+        <div style={{
+          padding: '8px 16px 4px',
+          fontSize: 10,
+          fontWeight: 600,
+          color: colors.textMuted,
+          textTransform: 'uppercase',
+          letterSpacing: '0.5px',
+        }}>
+          Updates
+        </div>
+        <UpdateSection />
       </div>
 
       {/* Footer hint */}

@@ -141,6 +141,14 @@ app.whenReady().then(async () => {
     },
   }
 
+  const checkForUpdatesMenuItem: Electron.MenuItemConstructorOptions = {
+    label: 'Check for Updates...',
+    click: async () => {
+      const { checkForUpdates } = await import('./updater')
+      checkForUpdates()
+    },
+  }
+
   if (process.platform === 'darwin') {
     const template: Electron.MenuItemConstructorOptions[] = [
       {
@@ -149,6 +157,7 @@ app.whenReady().then(async () => {
           { role: 'about' },
           { type: 'separator' },
           installCLIMenuItem,
+          checkForUpdatesMenuItem,
           { type: 'separator' },
           { role: 'services' },
           { type: 'separator' },
@@ -195,7 +204,7 @@ app.whenReady().then(async () => {
       },
       {
         label: 'Help',
-        submenu: [installCLIMenuItem],
+        submenu: [installCLIMenuItem, checkForUpdatesMenuItem],
       },
     ]
     Menu.setApplicationMenu(Menu.buildFromTemplate(template))
@@ -237,6 +246,16 @@ app.whenReady().then(async () => {
     console.warn('[main] CLI auto-install check failed:', err.message)
   }
 
+  // Auto-updater
+  try {
+    const updater = await import('./updater')
+    if (mainWindow) updater.setMainWindow(mainWindow)
+    updater.initAutoUpdater()
+    console.log('[main] auto-updater initialized')
+  } catch (err: any) {
+    console.warn('[main] auto-updater init failed:', err.message)
+  }
+
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
@@ -245,6 +264,8 @@ app.whenReady().then(async () => {
         const termMod = await import('./terminal')
         agentMod.setMainWindow(mainWindow)
         termMod.setMainWindow(mainWindow)
+        const updaterMod = await import('./updater')
+        updaterMod.setMainWindow(mainWindow)
       }
     }
   })

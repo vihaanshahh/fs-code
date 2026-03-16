@@ -1,6 +1,7 @@
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'path'
+import pkg from './package.json'
 
 export default defineConfig({
   main: {
@@ -8,7 +9,7 @@ export default defineConfig({
     build: {
       minify: true,
       rollupOptions: {
-        external: ['@anthropic-ai/claude-agent-sdk']
+        external: ['@anthropic-ai/claude-agent-sdk', 'electron-updater']
       }
     }
   },
@@ -21,6 +22,9 @@ export default defineConfig({
   renderer: {
     plugins: [react()],
     root: resolve('src/renderer'),
+    define: {
+      __APP_VERSION__: JSON.stringify(pkg.version),
+    },
     build: {
       sourcemap: false,
       rollupOptions: {

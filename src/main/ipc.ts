@@ -307,5 +307,21 @@ export function registerIpcHandlers() {
     }
   })
 
+  // Auto-update
+  ipcMain.handle(IPC.UPDATE_CHECK, async () => {
+    const updater = await import('./updater')
+    updater.checkForUpdates()
+  })
+
+  ipcMain.handle(IPC.UPDATE_DOWNLOAD, async () => {
+    const updater = await import('./updater')
+    updater.downloadUpdate()
+  })
+
+  ipcMain.handle(IPC.UPDATE_INSTALL, async () => {
+    const updater = await import('./updater')
+    updater.installUpdate()
+  })
+
   console.log('[ipc] all handlers registered')
 }
