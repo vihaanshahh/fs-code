@@ -64,8 +64,9 @@ function getCliPath(): string {
   return expected
 }
 
-/** Try to find `claude` on the user's PATH */
+/** Try to find `claude` on the user's system */
 function findClaudeOnPath(): string | null {
+  // 1. Try `where`/`which` first
   try {
     const cmd = isWindows ? 'where' : 'which'
     const result = execFileSync(cmd, ['claude'], {
@@ -73,10 +74,58 @@ function findClaudeOnPath(): string | null {
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim()
-    // `where` on Windows can return multiple lines — take the first
     const first = result.split(/\r?\n/)[0]?.trim()
     if (first && existsSync(first)) return first
   } catch { /* not on PATH */ }
+
+  // 2. On Windows, check common install locations that shells find but `where` misses
+  if (isWindows) {
+    const home = process.env.USERPROFILE || process.env.HOME || ''
+    const appData = process.env.APPDATA || join(home, 'AppData', 'Roaming')
+    const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local')
+
+    const candidates = [
+      // npm global install — the most common case
+      join(appData, 'npm', 'claude.cmd'),
+      join(appData, 'npm', 'claude'),
+      // Claude's own installer
+      join(localAppData, 'Programs', 'claude', 'claude.exe'),
+      join(localAppData, 'claude', 'claude.exe'),
+      // .claude local bin
+      join(home, '.claude', 'local', 'claude.exe'),
+      join(home, '.claude', 'bin', 'claude.exe'),
+      // pnpm / yarn global
+      join(localAppData, 'pnpm', 'claude.cmd'),
+      join(localAppData, 'pnpm', 'claude'),
+      // Scoop
+      join(home, 'scoop', 'shims', 'claude.cmd'),
+      join(home, 'scoop', 'shims', 'claude.exe'),
+    ]
+
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        console.log(`[claude-provider] found CLI at known location: ${p}`)
+        return p
+      }
+    }
+
+    // 3. Last resort: ask npm where its global bin is
+    try {
+      const npmBin = execFileSync('npm', ['prefix', '-g'], {
+        encoding: 'utf-8',
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: true,
+      }).trim()
+      if (npmBin) {
+        const npmClaude = join(npmBin, 'claude.cmd')
+        if (existsSync(npmClaude)) return npmClaude
+        const npmClaude2 = join(npmBin, 'claude')
+        if (existsSync(npmClaude2)) return npmClaude2
+      }
+    } catch { /* npm not available */ }
+  }
+
   return null
 }
 
