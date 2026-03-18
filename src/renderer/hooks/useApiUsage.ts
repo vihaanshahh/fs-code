@@ -13,7 +13,7 @@ interface ExtraUsageData {
   utilization: number | null
 }
 
-interface UsageAPIData {
+export interface UsageAPIData {
   five_hour?: UsageLimitData
   seven_day?: UsageLimitData
   seven_day_sonnet?: UsageLimitData

@@ -4,7 +4,6 @@ import { useTheme } from '../../ThemeContext'
 import { slashCommands } from '../palette/commands'
 import { api } from '../../lib/api'
 import { useSettings } from '../../hooks/useSettings'
-import { useApiUsage } from '../../hooks/useApiUsage'
 import MarkdownRenderer from './MarkdownRenderer'
 
 // --- Braille Spinner (CSS-only, zero re-renders) ---
@@ -242,101 +241,7 @@ function ErrorMessage({ msg }: { msg: Extract<UIMessage, { type: 'error' }> }) {
   )
 }
 
-function ResultMessage({ msg }: { msg: Extract<UIMessage, { type: 'result' }> }) {
-  const { colors, fonts } = useTheme()
-  const apiUsage = useApiUsage()
-  const weekPct = apiUsage.weekPct
-  const weekSonnetPct = apiUsage.weekSonnetPct
-  const hasWeekly = weekPct != null || weekSonnetPct != null
-
-  return (
-    <div style={{
-      margin: '8px 0',
-      borderRadius: 8,
-      border: `1px solid ${colors.green}20`,
-      overflow: 'hidden',
-    }}>
-      {/* Session result row */}
-      <div style={{
-        padding: '8px 16px',
-        fontSize: 12,
-        color: colors.green,
-        background: `${colors.green}08`,
-        display: 'flex',
-        gap: 16,
-      }}>
-        <span>Done in {(msg.duration / 1000).toFixed(1)}s</span>
-        <span>{msg.numTurns} turns</span>
-        <span>${msg.cost.toFixed(4)}</span>
-      </div>
-
-      {/* Weekly usage row */}
-      {hasWeekly && (
-        <div style={{
-          padding: '6px 16px',
-          fontSize: 11,
-          color: colors.textMuted,
-          background: `${colors.bgSurface}80`,
-          display: 'flex',
-          gap: 16,
-          alignItems: 'center',
-        }}>
-          <span style={{ fontWeight: 600, fontSize: 10, letterSpacing: 0.5 }}>WEEK</span>
-          {weekPct != null && (
-            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span>All models</span>
-              <span style={{
-                fontFamily: fonts.mono,
-                fontWeight: 600,
-                color: weekPct > 80 ? colors.red : weekPct > 50 ? colors.amber : colors.textSecondary,
-              }}>{weekPct}%</span>
-              <div style={{
-                width: 48,
-                height: 4,
-                background: `${colors.border}`,
-                borderRadius: 2,
-                overflow: 'hidden',
-              }}>
-                <div style={{
-                  width: `${Math.min(100, weekPct)}%`,
-                  height: '100%',
-                  background: weekPct > 80 ? colors.red : weekPct > 50 ? colors.amber : colors.blue,
-                  borderRadius: 2,
-                }} />
-              </div>
-              {apiUsage.weekReset && <span style={{ fontSize: 10 }}>· {apiUsage.weekReset}</span>}
-            </span>
-          )}
-          {weekSonnetPct != null && (
-            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span>Sonnet</span>
-              <span style={{
-                fontFamily: fonts.mono,
-                fontWeight: 600,
-                color: weekSonnetPct > 80 ? colors.red : weekSonnetPct > 50 ? colors.amber : colors.textSecondary,
-              }}>{weekSonnetPct}%</span>
-              <div style={{
-                width: 48,
-                height: 4,
-                background: `${colors.border}`,
-                borderRadius: 2,
-                overflow: 'hidden',
-              }}>
-                <div style={{
-                  width: `${Math.min(100, weekSonnetPct)}%`,
-                  height: '100%',
-                  background: weekSonnetPct > 80 ? colors.red : weekSonnetPct > 50 ? colors.amber : colors.blue,
-                  borderRadius: 2,
-                }} />
-              </div>
-              {apiUsage.weekSonnetReset && <span style={{ fontSize: 10 }}>· {apiUsage.weekSonnetReset}</span>}
-            </span>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
+// ResultMessage intentionally not rendered — case 'result' returns null in MessageRenderer
 
 // --- Usage Card (real API data) ---
 
@@ -594,7 +499,7 @@ const MessageRenderer = React.memo(function MessageRenderer({ msg, phaseColor, o
     case 'assistant': return <AssistantMessage msg={msg} phaseColor={phaseColor} />
     case 'tool-use': return <ToolCard msg={msg} />
     case 'error': return <ErrorMessage msg={msg} />
-    case 'result': return <ResultMessage msg={msg} />
+    case 'result': return null
     case 'system': return <SystemMessage msg={msg} onSlashCommand={onSlashCommand} />
     case 'tool-result':
     case 'tool-progress':

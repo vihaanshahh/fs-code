@@ -8,9 +8,10 @@ const execFileAsync = promisify(execFile)
 
 const SKIP = new Set(['node_modules', '.git', 'dist', '.next', '.cache', '__pycache__', '.turbo', 'out', '.DS_Store'])
 
-// --- TTL cache for git operations (avoids redundant git process spawns) ---
-const TTL_MS = 1500
+// --- TTL cache + in-flight deduplication for git operations ---
+const TTL_MS = 3000
 const gitCacheTTL = new Map<string, { data: any; ts: number }>()
+const inflight = new Map<string, Promise<any>>()
 
 function getCached<T>(key: string): T | undefined {
   const entry = gitCacheTTL.get(key)
@@ -20,6 +21,15 @@ function getCached<T>(key: string): T | undefined {
 
 function setCache(key: string, data: any): void {
   gitCacheTTL.set(key, { data, ts: Date.now() })
+}
+
+/** Deduplicate concurrent identical git calls — if one is already running, piggyback on it */
+function dedup<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const existing = inflight.get(key)
+  if (existing) return existing as Promise<T>
+  const p = fn().finally(() => inflight.delete(key))
+  inflight.set(key, p)
+  return p
 }
 
 // Cache repo root lookups (rarely changes)
@@ -101,38 +111,43 @@ export async function getGitStatus(cwd: string): Promise<{
   files: { path: string; status: 'modified' | 'added' | 'deleted' | 'untracked' }[]
 }> {
   const absCwd = resolve(cwd)
+  const cacheKey = `status:${absCwd}`
+  const cached = getCached<{ files: { path: string; status: 'modified' | 'added' | 'deleted' | 'untracked' }[] }>(cacheKey)
+  if (cached) return cached
 
-  let repoRoot: string
-  try {
-    const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: absCwd })
-    repoRoot = stdout.trim()
-  } catch {
-    return { files: [] }
-  }
-
-  try {
-    const { stdout } = await execFileAsync('git', ['status', '--porcelain', '-u'], { cwd: repoRoot })
-    if (!stdout.trim()) return { files: [] }
-
-    const files: { path: string; status: 'modified' | 'added' | 'deleted' | 'untracked' }[] = []
-    for (const line of stdout.trim().split('\n')) {
-      if (!line || line.length < 3) continue
-      const code = line.substring(0, 2)
-      const filePath = line.substring(3).trim()
-      if (!filePath) continue
-      // Skip renamed files' old path portion
-      if (filePath.includes(' -> ')) continue
-
-      const absPath = join(repoRoot, filePath)
-      if (code.includes('?')) files.push({ path: absPath, status: 'untracked' })
-      else if (code.includes('A')) files.push({ path: absPath, status: 'added' })
-      else if (code.includes('D')) files.push({ path: absPath, status: 'deleted' })
-      else if (code.includes('M') || code.includes('U')) files.push({ path: absPath, status: 'modified' })
+  return dedup(cacheKey, async () => {
+    let repoRoot: string
+    try {
+      repoRoot = await findRepoRoot(absCwd)
+    } catch {
+      return { files: [] }
     }
-    return { files }
-  } catch {
-    return { files: [] }
-  }
+
+    try {
+      const { stdout } = await execFileAsync('git', ['status', '--porcelain', '-u'], { cwd: repoRoot })
+      if (!stdout.trim()) { setCache(cacheKey, { files: [] }); return { files: [] } }
+
+      const files: { path: string; status: 'modified' | 'added' | 'deleted' | 'untracked' }[] = []
+      for (const line of stdout.trim().split('\n')) {
+        if (!line || line.length < 3) continue
+        const code = line.substring(0, 2)
+        const filePath = line.substring(3).trim()
+        if (!filePath) continue
+        if (filePath.includes(' -> ')) continue
+
+        const absPath = join(repoRoot, filePath)
+        if (code.includes('?')) files.push({ path: absPath, status: 'untracked' })
+        else if (code.includes('A')) files.push({ path: absPath, status: 'added' })
+        else if (code.includes('D')) files.push({ path: absPath, status: 'deleted' })
+        else if (code.includes('M') || code.includes('U')) files.push({ path: absPath, status: 'modified' })
+      }
+      const result = { files }
+      setCache(cacheKey, result)
+      return result
+    } catch {
+      return { files: [] }
+    }
+  })
 }
 
 /**
@@ -157,6 +172,7 @@ export async function getGitDiff(filePath: string): Promise<{
   try {
     const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
       cwd: absPath.substring(0, absPath.lastIndexOf('/')),
+      timeout: GIT_TIMEOUT,
     })
     repoRoot = stdout.trim()
   } catch {
@@ -170,6 +186,7 @@ export async function getGitDiff(filePath: string): Promise<{
   try {
     const { stdout: statusOut } = await execFileAsync('git', ['status', '--porcelain', '--', relPath], {
       cwd: repoRoot,
+      timeout: GIT_TIMEOUT,
     })
 
     const statusLine = statusOut.trim()
@@ -212,15 +229,18 @@ export async function getGitDiff(filePath: string): Promise<{
 
 // ── SCM operations ─────────────────────────────────────────────────
 
-/** Helper: find repo root from a cwd (cached) */
+/** Helper: find repo root from a cwd (cached + deduped) */
 async function findRepoRoot(cwd: string): Promise<string> {
   const absCwd = resolve(cwd)
   const cached = repoRootCache.get(absCwd)
   if (cached && Date.now() - cached.ts < REPO_ROOT_TTL) return cached.root
-  const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: absCwd })
-  const root = stdout.trim()
-  repoRootCache.set(absCwd, { root, ts: Date.now() })
-  return root
+  const key = `root:${absCwd}`
+  return dedup(key, async () => {
+    const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: absCwd })
+    const root = stdout.trim()
+    repoRootCache.set(absCwd, { root, ts: Date.now() })
+    return root
+  })
 }
 
 /**
@@ -232,52 +252,50 @@ export async function getGitStatusDetailed(cwd: string): Promise<{ files: GitFil
   const cached = getCached<{ files: GitFileStatus[] }>(cacheKey)
   if (cached) return cached
 
-  let repoRoot: string
-  try {
-    repoRoot = await findRepoRoot(cwd)
-  } catch {
-    return { files: [] }
-  }
-
-  try {
-    const { stdout } = await execFileAsync('git', ['status', '--porcelain', '-u'], { cwd: repoRoot })
-    if (!stdout.trim()) return { files: [] }
-
-    const files: GitFileStatus[] = []
-    for (const line of stdout.trim().split('\n')) {
-      if (!line || line.length < 3) continue
-      const x = line[0] // index (staged) status
-      const y = line[1] // work-tree status
-      let filePath = line.substring(3).trim()
-      if (!filePath) continue
-      // Handle renames: "R  old -> new"
-      if (filePath.includes(' -> ')) {
-        filePath = filePath.split(' -> ')[1]
-      }
-
-      const absPath = join(repoRoot, filePath)
-      const name = basename(filePath)
-
-      if (x === '?' && y === '?') {
-        // Untracked
-        files.push({ path: absPath, basename: name, indexStatus: '?', workTreeStatus: '?', category: 'untracked' })
-      } else {
-        // If the file has staged changes (index column is not ' ' and not '?')
-        if (x !== ' ' && x !== '?') {
-          files.push({ path: absPath, basename: name, indexStatus: x, workTreeStatus: ' ', category: 'staged' })
-        }
-        // If the file also has unstaged changes (work-tree column is not ' ')
-        if (y !== ' ' && y !== '?') {
-          files.push({ path: absPath, basename: name, indexStatus: ' ', workTreeStatus: y, category: 'unstaged' })
-        }
-      }
+  return dedup(cacheKey, async () => {
+    let repoRoot: string
+    try {
+      repoRoot = await findRepoRoot(cwd)
+    } catch {
+      return { files: [] }
     }
-    const result = { files }
-    setCache(cacheKey, result)
-    return result
-  } catch {
-    return { files: [] }
-  }
+
+    try {
+      const { stdout } = await execFileAsync('git', ['status', '--porcelain', '-u'], { cwd: repoRoot })
+      if (!stdout.trim()) return { files: [] }
+
+      const files: GitFileStatus[] = []
+      for (const line of stdout.trim().split('\n')) {
+        if (!line || line.length < 3) continue
+        const x = line[0]
+        const y = line[1]
+        let filePath = line.substring(3).trim()
+        if (!filePath) continue
+        if (filePath.includes(' -> ')) {
+          filePath = filePath.split(' -> ')[1]
+        }
+
+        const absPath = join(repoRoot, filePath)
+        const name = basename(filePath)
+
+        if (x === '?' && y === '?') {
+          files.push({ path: absPath, basename: name, indexStatus: '?', workTreeStatus: '?', category: 'untracked' })
+        } else {
+          if (x !== ' ' && x !== '?') {
+            files.push({ path: absPath, basename: name, indexStatus: x, workTreeStatus: ' ', category: 'staged' })
+          }
+          if (y !== ' ' && y !== '?') {
+            files.push({ path: absPath, basename: name, indexStatus: ' ', workTreeStatus: y, category: 'unstaged' })
+          }
+        }
+      }
+      const result = { files }
+      setCache(cacheKey, result)
+      return result
+    } catch {
+      return { files: [] }
+    }
+  })
 }
 
 /** Stage a file */
@@ -357,15 +375,16 @@ export async function searchFiles(cwd: string, query: string, limit = 15): Promi
 
   if (!allFiles) {
     try {
-      // Use git ls-files for tracked files + untracked (but not ignored)
-      const { stdout } = await execFileAsync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], {
-        cwd: repoRoot,
-        maxBuffer: 10 * 1024 * 1024,
+      allFiles = await dedup(cacheKey, async () => {
+        const { stdout } = await execFileAsync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], {
+          cwd: repoRoot,
+          maxBuffer: 10 * 1024 * 1024,
+        })
+        const files = stdout.trim().split('\n').filter(Boolean)
+        setCache(cacheKey, files)
+        return files
       })
-      allFiles = stdout.trim().split('\n').filter(Boolean)
-      setCache(cacheKey, allFiles)
     } catch {
-      // Fallback: no files
       return []
     }
   }
