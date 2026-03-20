@@ -16,6 +16,7 @@ export default function TerminalDrawer({
   const { colors, spacing, fonts } = useTheme()
   const [height, setHeight] = useState(spacing.terminalDefaultHeight)
   const [resizing, setResizing] = useState(false)
+  const [minimized, setMinimized] = useState(false)
 
   useEffect(() => {
     if (!resizing) return
@@ -37,38 +38,46 @@ export default function TerminalDrawer({
 
   return (
     <div style={{
-      height,
+      height: minimized ? 33 : height,
       borderTop: `1px solid ${colors.border}`,
       display: 'flex',
       flexDirection: 'column',
       overflow: 'hidden',
       flexShrink: 0,
+      transition: minimized ? 'height 0.15s ease-out' : undefined,
     }}>
-      {/* Resize handle */}
-      <div
-        style={{
-          height: 4,
-          cursor: 'row-resize',
-          background: resizing ? colors.blue : 'transparent',
-          transition: 'background 0.1s',
-        }}
-        onMouseDown={() => setResizing(true)}
-        onMouseEnter={e => { if (!resizing) e.currentTarget.style.background = colors.border }}
-        onMouseLeave={e => { if (!resizing) e.currentTarget.style.background = 'transparent' }}
-      />
+      {/* Resize handle — hidden when minimized */}
+      {!minimized && (
+        <div
+          style={{
+            height: 4,
+            cursor: 'row-resize',
+            background: resizing ? colors.blue : 'transparent',
+            transition: 'background 0.1s',
+          }}
+          onMouseDown={() => setResizing(true)}
+          onMouseEnter={e => { if (!resizing) e.currentTarget.style.background = colors.border }}
+          onMouseLeave={e => { if (!resizing) e.currentTarget.style.background = 'transparent' }}
+        />
+      )}
 
       {/* Drawer header */}
-      <div style={{
-        height: 28,
-        padding: '0 12px',
-        borderBottom: `1px solid ${colors.border}`,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        background: colors.bgOverlay,
-        userSelect: 'none',
-        flexShrink: 0,
-      }}>
+      <div
+        style={{
+          height: 28,
+          padding: '0 12px',
+          borderBottom: minimized ? undefined : `1px solid ${colors.border}`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          background: colors.bgOverlay,
+          userSelect: 'none',
+          flexShrink: 0,
+          cursor: minimized ? 'pointer' : undefined,
+        }}
+        onDoubleClick={() => setMinimized(m => !m)}
+        onClick={minimized ? () => setMinimized(false) : undefined}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 }}>
             Terminal
@@ -84,19 +93,32 @@ export default function TerminalDrawer({
             {shortCwd}
           </span>
         </div>
-        <span
-          onClick={onToggle}
-          style={{ cursor: 'pointer', fontSize: 11, color: colors.textMuted, fontFamily: fonts.mono }}
-          title="Close (Cmd+`)"
-        >
-          {'\u2715'}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {/* Minimize / restore button */}
+          <span
+            onClick={e => { e.stopPropagation(); setMinimized(m => !m) }}
+            style={{ cursor: 'pointer', fontSize: 10, color: colors.textMuted, fontFamily: fonts.mono, lineHeight: 1 }}
+            title={minimized ? 'Restore terminal' : 'Minimize terminal'}
+          >
+            {minimized ? '\u25B2' : '\u25BC'}
+          </span>
+          {/* Close button */}
+          <span
+            onClick={e => { e.stopPropagation(); onToggle() }}
+            style={{ cursor: 'pointer', fontSize: 11, color: colors.textMuted, fontFamily: fonts.mono }}
+            title="Close (Cmd+`)"
+          >
+            {'\u2715'}
+          </span>
+        </div>
       </div>
 
-      {/* Terminal content */}
-      <div style={{ flex: 1, overflow: 'hidden' }}>
-        <TerminalPanel agentId={agentId} cwd={cwd} />
-      </div>
+      {/* Terminal content — hidden when minimized */}
+      {!minimized && (
+        <div style={{ flex: 1, overflow: 'hidden' }}>
+          <TerminalPanel agentId={agentId} cwd={cwd} />
+        </div>
+      )}
     </div>
   )
 }
