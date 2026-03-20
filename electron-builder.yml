@@ -19,6 +19,24 @@ files:
   - node_modules/electron-updater/**/*
   - node_modules/builder-util-runtime/**/*
   - node_modules/lazy-val/**/*
+  - node_modules/better-sqlite3/**/*
+  - node_modules/tree-sitter/**/*
+  - node_modules/tree-sitter-typescript/**/*
+  - node_modules/tree-sitter-javascript/**/*
+  - node_modules/tree-sitter-python/**/*
+  - node_modules/tree-sitter-rust/**/*
+  - node_modules/tree-sitter-go/**/*
+  - node_modules/tree-sitter-bash/**/*
+  - node_modules/tree-sitter-c/**/*
+  - node_modules/tree-sitter-cpp/**/*
+  - node_modules/tree-sitter-json/**/*
+  - node_modules/tree-sitter-css/**/*
+  - node_modules/tree-sitter-html/**/*
+  - node_modules/chokidar/**/*
+  - node_modules/bindings/**/*
+  - node_modules/file-uri-to-path/**/*
+  - node_modules/prebuild-install/**/*
+  - node_modules/node-addon-api/**/*
 extraResources:
   - from: resources/bin
     to: bin
@@ -28,6 +46,19 @@ asar: true
 asarUnpack:
   - node_modules/@anthropic-ai/claude-agent-sdk/**/*
   - node_modules/@img/**/*
+  - node_modules/better-sqlite3/**/*
+  - node_modules/tree-sitter/**/*
+  - node_modules/tree-sitter-typescript/**/*
+  - node_modules/tree-sitter-javascript/**/*
+  - node_modules/tree-sitter-python/**/*
+  - node_modules/tree-sitter-rust/**/*
+  - node_modules/tree-sitter-go/**/*
+  - node_modules/tree-sitter-bash/**/*
+  - node_modules/tree-sitter-c/**/*
+  - node_modules/tree-sitter-cpp/**/*
+  - node_modules/tree-sitter-json/**/*
+  - node_modules/tree-sitter-css/**/*
+  - node_modules/tree-sitter-html/**/*
 mac:
   target:
     - dmg

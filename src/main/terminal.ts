@@ -15,7 +15,7 @@ const terminals = new Map<string, TerminalEntry>()
 const agentTerminals = new Map<string, string>()
 let mainWindow: BrowserWindow | null = null
 
-const MAX_BUFFER = 100_000 // keep ~100KB of scrollback per terminal
+const MAX_BUFFER = 50_000 // keep ~50KB scrollback per terminal (50K × 9 = 450KB total)
 
 export function setMainWindow(win: BrowserWindow) {
   mainWindow = win
@@ -69,7 +69,11 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
   terminals.set(id, entry)
   agentTerminals.set(agentId, id)
 
-  // Batch terminal data into 16ms windows to reduce IPC message count
+  // Batch terminal data into 50ms windows with a 16KB cap to prevent IPC flooding.
+  // At 9 terminals under heavy output (npm install, test runs), raw data can exceed 9MB/s.
+  // Wider window + lower cap keeps renderer responsive even at 2-3× load.
+  const MAX_PENDING = 16_000 // 16KB max per IPC message (16K × 9 = 144KB/flush max)
+  const FLUSH_MS = 50        // 50ms batch window (vs 32ms before — fewer IPC calls)
   let pendingData = ''
   let flushTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -80,6 +84,10 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
       entry.buffer = entry.buffer.slice(-MAX_BUFFER)
     }
     pendingData += data
+    // If pending data is huge, truncate to tail (keep most recent output)
+    if (pendingData.length > MAX_PENDING) {
+      pendingData = pendingData.slice(-MAX_PENDING)
+    }
     if (!flushTimer) {
       flushTimer = setTimeout(() => {
         if (pendingData) {
@@ -87,7 +95,7 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
           pendingData = ''
         }
         flushTimer = null
-      }, 16)
+      }, FLUSH_MS)
     }
   })
 

@@ -296,7 +296,23 @@ export const IPC = {
   UPDATE_DOWNLOAD: 'update:download',
   UPDATE_INSTALL: 'update:install',
   UPDATE_STATUS: 'update:status',
+  // Logging
+  LOG_GET_USAGE: 'log:get-usage',
+  LOG_GET_PATH: 'log:get-path',
+  // Resource stats (observability)
+  RESOURCE_STATS: 'resource:stats',
 } as const
+
+export interface ResourceStats {
+  memoryMB: number
+  heapUsedMB: number
+  heapTotalMB: number
+  externalMB: number
+  agentCount: number
+  activeAgentCount: number
+  codexReadyCount: number
+  uptimeSeconds: number
+}
 
 export type UpdateStatus =
   | { state: 'checking' }

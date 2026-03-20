@@ -3,6 +3,7 @@ import type { PhaseInfo, AgentPhase, AgentDescriptor } from '../../../shared/typ
 import { useTheme } from '../../ThemeContext'
 import { useAgent } from '../../hooks/useAgent'
 import { useJourneyPhase } from '../../hooks/useJourneyPhase'
+import { useResourceStats } from '../../hooks/useResourceStats'
 
 // Main journey steps shown in the bar
 const JOURNEY_PHASES: { key: AgentPhase; label: string }[] = [
@@ -59,6 +60,7 @@ export default function JourneyBar({
   onAnyAwaiting?: (awaiting: boolean) => void
 }) {
   const { colors, spacing } = useTheme()
+  const stats = useResourceStats()
   const [phases, setPhases] = useState<Record<string, PhaseInfo>>({})
 
   const reportRef = useRef((id: string, phase: PhaseInfo) => {
@@ -87,6 +89,10 @@ export default function JourneyBar({
     onAnyAwaiting?.(awaitingAgents.length > 0)
   }, [awaitingAgents.length > 0]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Memory pressure level for color coding
+  const memLevel = !stats ? 'ok' : stats.memoryMB > 2000 ? 'critical' : stats.memoryMB > 1200 ? 'warn' : 'ok'
+  const memColor = memLevel === 'critical' ? colors.red : memLevel === 'warn' ? '#e5a100' : colors.textMuted
+
   return (
     <div style={{
       height: spacing.journeyBarHeight,
@@ -98,7 +104,32 @@ export default function JourneyBar({
       justifyContent: 'center',
       gap: 2,
       userSelect: 'none',
+      position: 'relative',
     }}>
+      {/* Resource stats — right side */}
+      {stats && (
+        <div
+          title={`Heap: ${stats.heapUsedMB}/${stats.heapTotalMB}MB | External: ${stats.externalMB}MB | Agents: ${stats.agentCount} (${stats.activeAgentCount} active) | Codex: ${stats.codexReadyCount} ready | Uptime: ${Math.round(stats.uptimeSeconds / 60)}m`}
+          style={{
+            position: 'absolute',
+            right: 12,
+            top: '50%',
+            transform: 'translateY(-50%)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            fontSize: 10,
+            fontFamily: 'monospace',
+            color: memColor,
+            opacity: memLevel === 'ok' ? 0.5 : 1,
+            transition: 'opacity 0.3s, color 0.3s',
+          }}
+        >
+          <span>{stats.memoryMB}MB</span>
+          <span style={{ opacity: 0.5 }}>|</span>
+          <span>{stats.agentCount}A{stats.activeAgentCount > 0 ? ` ${stats.activeAgentCount} active` : ''}</span>
+        </div>
+      )}
       {/* Invisible phase reporters */}
       {agents.map(a => (
         <AgentPhaseReporter key={a.id} agentId={a.id} reportRef={reportRef} />

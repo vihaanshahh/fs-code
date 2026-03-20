@@ -129,12 +129,14 @@ describe('basic collection', () => {
     expect(collectFiles(tmpDir).some(f => f.endsWith('.yaml'))).toBe(false)
   })
 
-  it('respects MAX_FILE_SIZE (512KB) — skips large file', () => {
+  it('collects large files (size filtering moved to indexer)', () => {
     const bigContent = Buffer.alloc(513 * 1024, 'x').toString()
     touch('big.ts', bigContent)
     touch('small.ts', '// ok')
     const files = collectFiles(tmpDir)
-    expect(files).not.toContain('big.ts')
+    // Collector no longer filters by size — indexer handles that.
+    // This avoids a redundant statSync per file.
+    expect(files).toContain('big.ts')
     expect(files).toContain('small.ts')
   })
 })

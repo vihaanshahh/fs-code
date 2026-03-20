@@ -8,6 +8,7 @@ import * as terminal from './terminal'
 import { detectProviders } from './providers'
 import { PROVIDER_CONFIGS } from '../shared/types'
 import * as keystore from './keystore'
+import { log } from './logger'
 import { resolve, isAbsolute } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -58,7 +59,7 @@ export function registerIpcHandlers() {
 
   // Agent messaging — now with agentId
   ipcMain.handle(IPC.AGENT_SEND, async (_, { agentId, message }: { agentId: string; message: string }) => {
-    console.log('[ipc] agent:send', agentId, message.slice(0, 60))
+    log.info('ipc', `agent:send ${agentId} ${message.slice(0, 60)}`)
     const sessionId = await agent.sendPrompt(agentId, message)
     return { sessionId }
   })
@@ -68,7 +69,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle(IPC.AGENT_PERMISSION_RESPOND, async (_, response) => {
-    console.log(`[ipc] permission-respond agent=${response.agentId} req=${response.requestId} behavior=${response.behavior} hasUpdatedInput=${!!response.updatedInput} keys=${response.updatedInput ? Object.keys(response.updatedInput).join(',') : 'none'}`)
+    log.info('ipc', `permission-respond agent=${response.agentId} req=${response.requestId} behavior=${response.behavior}`)
     agent.resolvePermission(response.agentId, response.requestId, response.behavior, response.updatedPermissions, response.updatedInput)
   })
 
@@ -77,12 +78,12 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle(IPC.AGENT_RESUME, async (_, { agentId, sessionId }: { agentId: string; sessionId: string }) => {
-    console.log('[ipc] agent:resume', agentId, sessionId)
+    log.info('ipc', `agent:resume ${agentId} ${sessionId}`)
     await agent.resumeSession(agentId, sessionId)
   })
 
   ipcMain.handle(IPC.AGENT_CONTINUE, async (_, { agentId }: { agentId: string }) => {
-    console.log('[ipc] agent:continue', agentId)
+    log.info('ipc', `agent:continue ${agentId}`)
     await agent.continueSession(agentId)
   })
 
@@ -323,5 +324,22 @@ export function registerIpcHandlers() {
     updater.installUpdate()
   })
 
-  console.log('[ipc] all handlers registered')
+  // Log usage stats
+  ipcMain.handle(IPC.LOG_GET_USAGE, async () => {
+    return log.getUsage()
+  })
+
+  ipcMain.handle(IPC.LOG_GET_PATH, async () => {
+    return log.getLogPath()
+  })
+
+  // Resource stats (on-demand)
+  ipcMain.handle(IPC.RESOURCE_STATS, async () => {
+    return agent.getResourceStats()
+  })
+
+  // Start periodic memory monitoring (pushes stats to renderer)
+  agent.startMemoryMonitor()
+
+  log.info('ipc', 'all handlers registered')
 }

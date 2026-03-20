@@ -398,6 +398,54 @@ export default function AgentGrid({
         </div>
       )}
 
+      {/* 5-9 agents: 3-column CSS grid */}
+      {n >= 5 && (() => {
+        const rows = Math.ceil(n / 3)
+        return (
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(3, 1fr)',
+            gridTemplateRows: `repeat(${rows}, 1fr)`,
+            height: '100%',
+            gap: 1,
+            background: colors.border,
+          }}>
+            {agents.map((agent, i) => (
+              <div
+                key={agent.id}
+                style={{
+                  overflow: 'hidden',
+                  minWidth: 0,
+                  minHeight: 0,
+                  background: colors.bg,
+                  // Last row: if fewer than 3 items, let them fill naturally
+                  ...(i >= n - (n % 3 || 3) && n % 3 !== 0 ? {} : {}),
+                }}
+                onDragOver={e => e.preventDefault()}
+                onDrop={e => {
+                  e.preventDefault()
+                  const from = parseInt(e.dataTransfer.getData('text/plain'))
+                  if (from !== i) onReorder(from, i)
+                }}
+              >
+                <AgentCell
+                  descriptor={agent}
+                  index={i}
+                  isFocused={agent.id === focusedId}
+                  compact
+                  onFocus={() => onFocus(agent.id)}
+                  onClose={() => onClose(agent.id)}
+                  onSlashCommand={onSlashCommand}
+                  onRename={onRename}
+                  draggable
+                  onDragStart={i}
+                />
+              </div>
+            ))}
+          </div>
+        )
+      })()}
+
     </div>
   )
 }

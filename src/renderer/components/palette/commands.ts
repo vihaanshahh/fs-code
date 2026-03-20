@@ -111,7 +111,7 @@ export function resolveAlias(input: string): string {
 export const keyboardShortcuts: KeyboardShortcut[] = [
   { keys: 'Cmd+K', description: 'Open command palette', category: 'navigation' },
   { keys: 'Cmd+?', description: 'Show keyboard shortcuts', category: 'navigation' },
-  { keys: 'Cmd+1-4', description: 'Focus agent 1-4', category: 'agent' },
+  { keys: 'Cmd+1-9', description: 'Focus agent 1-9', category: 'agent' },
   { keys: 'Cmd+N', description: 'New agent', category: 'agent' },
   { keys: 'Cmd+W', description: 'Close focused agent', category: 'agent' },
   { keys: 'Cmd+`', description: 'Toggle terminal', category: 'view' },

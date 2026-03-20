@@ -13,6 +13,7 @@ import { execFileSync } from 'node:child_process'
 import { app } from 'electron'
 import { getAuthStatus } from '../auth'
 import { buildCleanEnv as _buildCleanEnv, getCliAccessFlag, getCliAccessError } from '../agent-env'
+import { log } from '../logger'
 import type { ProviderDriver, ProviderHandle, ModelInfo, PermissionHandler, SendPromptOptions } from './provider'
 import type { UIMessage, PermissionMode } from '../../shared/types'
 
@@ -38,7 +39,7 @@ function getCliPath(): string {
   // 0. User override via env var — skip all detection
   const envPath = process.env.FLUIDSTATE_CLAUDE_PATH
   if (envPath && existsSync(envPath)) {
-    console.log(`[claude-provider] using FLUIDSTATE_CLAUDE_PATH: ${envPath}`)
+    log.info('claude-provider', `using FLUIDSTATE_CLAUDE_PATH: ${envPath}`)
     cachedCliPath = envPath
     return envPath
   }
@@ -62,7 +63,7 @@ function getCliPath(): string {
   // 2. Fallback: find `claude` on PATH / known install locations
   const systemCli = findClaudeOnPath()
   if (systemCli) {
-    console.log(`[claude-provider] using system CLI: ${systemCli}`)
+    log.info('claude-provider', `using system CLI: ${systemCli}`)
     cachedCliPath = systemCli
     return systemCli
   }
@@ -116,7 +117,7 @@ function findClaudeOnPath(): string | null {
 
     for (const p of candidates) {
       if (existsSync(p)) {
-        console.log(`[claude-provider] found CLI at known location: ${p}`)
+        log.info('claude-provider', `found CLI at known location: ${p}`)
         return p
       }
     }
@@ -270,6 +271,16 @@ export class ClaudeProvider implements ProviderDriver {
       Object.assign(opts, options.extraOptions)
     }
 
+    // Code intelligence: MCP servers (in-process codex tools)
+    if (options.mcpServers && Object.keys(options.mcpServers).length > 0) {
+      opts.mcpServers = options.mcpServers
+    }
+
+    // Code intelligence: hooks (brief, pre-edit context, post-edit reindex)
+    if (options.hooks && Object.keys(options.hooks).length > 0) {
+      opts.hooks = options.hooks
+    }
+
     const q = query({ prompt, options: opts as any })
     this.activeQuery = q
 
@@ -383,7 +394,7 @@ export class ClaudeProvider implements ProviderDriver {
     const out: UIMessage[] = []
     const debugTypes = new Set(['rate_limit_event', 'result', 'auth_status'])
     if (debugTypes.has(msg.type)) {
-      console.log(`[SDK:${msg.type}]`, JSON.stringify(msg).slice(0, 800))
+      log.info(`SDK:${msg.type}`, JSON.stringify(msg).slice(0, 800))
     }
 
     switch (msg.type) {
@@ -474,12 +485,20 @@ export class ClaudeProvider implements ProviderDriver {
         const r = msg as any
         if (r.session_id) {
           this.sdkSessionId = r.session_id
-          console.log(`[claude-provider] captured SDK session: ${r.session_id}`)
+          log.info('claude-provider', `captured SDK session: ${r.session_id}`)
         }
         if (r.is_error) {
+          log.error('claude-provider', `session error: ${r.errors?.join('; ') || r.result || 'Unknown'}`)
           out.push({ id: uid(), type: 'error', message: r.errors?.join('\n') || r.result || 'Error', ts: Date.now() })
         } else {
           out.push({ id: uid(), type: 'result', cost: r.total_cost_usd || 0, duration: r.duration_ms || 0, numTurns: r.num_turns || 0, ts: Date.now() })
+          // Log usage for this completed session
+          log.usage('claude-provider', {
+            inputTokens: r.usage?.input_tokens || 0,
+            outputTokens: r.usage?.output_tokens || 0,
+            costUsd: r.total_cost_usd || 0,
+            model: this.currentModel || undefined,
+          })
         }
         if (r.usage) {
           out.push({ id: uid(), type: 'token-usage', inputTokens: r.usage.input_tokens || 0, outputTokens: r.usage.output_tokens || 0, ts: Date.now() })

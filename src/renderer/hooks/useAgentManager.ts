@@ -4,8 +4,12 @@ import { clearAgentCache } from './useAgent'
 import { addRecentFolder } from './useRecentFolders'
 import type { AgentDescriptor, ProviderId } from '../../shared/types'
 
-const MAX_AGENTS = 4
-const AGENT_NAMES = ['Agent 1', 'Agent 2', 'Agent 3', 'Agent 4']
+const MAX_AGENTS = 9
+const AGENT_NAMES = [
+  'Agent 1', 'Agent 2', 'Agent 3',
+  'Agent 4', 'Agent 5', 'Agent 6',
+  'Agent 7', 'Agent 8', 'Agent 9',
+]
 const SESSION_KEY = 'fs-code-session'
 const SESSION_MAX_AGE = 24 * 60 * 60 * 1000 // 24h
 

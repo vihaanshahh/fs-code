@@ -41,7 +41,7 @@ export default function TerminalPanel({ agentId, cwd }: { agentId: string; cwd: 
       term = new Terminal({
         fontFamily: "'Geist Mono', ui-monospace, 'SF Mono', 'Fira Code', monospace",
         fontSize: 13,
-        lineHeight: 1.4,
+        lineHeight: 1.15,
         cursorBlink: true,
         cursorStyle: 'bar',
         theme: {

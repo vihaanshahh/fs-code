@@ -15,12 +15,22 @@ const inflight = new Map<string, Promise<any>>()
 
 function getCached<T>(key: string): T | undefined {
   const entry = gitCacheTTL.get(key)
-  if (entry && Date.now() - entry.ts < TTL_MS) return entry.data as T
+  if (!entry) return undefined
+  if (Date.now() - entry.ts < TTL_MS) return entry.data as T
+  // Evict stale entry
+  gitCacheTTL.delete(key)
   return undefined
 }
 
 function setCache(key: string, data: any): void {
   gitCacheTTL.set(key, { data, ts: Date.now() })
+  // Periodic eviction: if cache is large, clean up old entries
+  if (gitCacheTTL.size > 200) {
+    const now = Date.now()
+    for (const [k, v] of gitCacheTTL) {
+      if (now - v.ts > TTL_MS) gitCacheTTL.delete(k)
+    }
+  }
 }
 
 /** Deduplicate concurrent identical git calls — if one is already running, piggyback on it */
@@ -172,7 +182,6 @@ export async function getGitDiff(filePath: string): Promise<{
   try {
     const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
       cwd: absPath.substring(0, absPath.lastIndexOf('/')),
-      timeout: GIT_TIMEOUT,
     })
     repoRoot = stdout.trim()
   } catch {
@@ -186,7 +195,6 @@ export async function getGitDiff(filePath: string): Promise<{
   try {
     const { stdout: statusOut } = await execFileAsync('git', ['status', '--porcelain', '--', relPath], {
       cwd: repoRoot,
-      timeout: GIT_TIMEOUT,
     })
 
     const statusLine = statusOut.trim()

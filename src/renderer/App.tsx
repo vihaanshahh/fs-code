@@ -470,7 +470,7 @@ export default function App() {
       if (meta && e.key === 'w') { e.preventDefault(); if (manager.focusedId) manager.closeAgent(manager.focusedId); return }
       if (meta && e.key === 'b') { e.preventDefault(); setSidebarCollapsed(v => !v); return }
       if (meta && e.shiftKey && e.code === 'KeyG') { e.preventDefault(); setActivePanel(p => p === 'scm' ? 'files' : 'scm'); setSidebarCollapsed(false); return }
-      if (meta && e.key >= '1' && e.key <= '4') { e.preventDefault(); manager.focusByIndex(parseInt(e.key) - 1); return }
+      if (meta && e.key >= '1' && e.key <= '9') { e.preventDefault(); manager.focusByIndex(parseInt(e.key) - 1); return }
       if (e.key === 'Escape') {
         if (showSessionPicker) { setShowSessionPicker(false); return }
         if (showHelp) { setShowHelp(false); return }

@@ -1,6 +1,7 @@
 import { app, BrowserWindow, shell, dialog, nativeImage, Menu } from 'electron'
 import { join, resolve } from 'node:path'
 import { IPC } from '../shared/types'
+import { log } from './logger'
 
 // Set app name before anything else
 app.name = 'FluidState'
@@ -10,11 +11,11 @@ if (process.platform === 'darwin') {
 
 // Catch unhandled errors
 process.on('uncaughtException', (err) => {
-  console.error('[main] uncaughtException:', err)
+  log.error('main', 'uncaughtException', err)
   try { dialog.showErrorBox('FluidState Error', err.message + '\n\n' + err.stack) } catch {}
 })
 process.on('unhandledRejection', (err: any) => {
-  console.error('[main] unhandledRejection:', err)
+  log.error('main', 'unhandledRejection', err)
 })
 
 let mainWindow: BrowserWindow | null = null
@@ -24,7 +25,7 @@ let mainWindow: BrowserWindow | null = null
 // In dev mode we never lock so the production app doesn't block dev.
 // In production, a second launch opens a new window in the existing process
 // (keeping one Dock icon) but you can also force a fresh process with --new-instance.
-const isDev = !!process.env.ELECTRON_RENDERER_URL
+const isDev = !!process.env.ELECTRON_RENDERER_URL || !app.isPackaged
 const wantNewProcess = process.argv.includes('--new-instance')
 
 if (isDev || wantNewProcess) {
@@ -46,7 +47,7 @@ if (isDev || wantNewProcess) {
 }
 
 function createWindow(initialCwd: string | null = null) {
-  console.log('[main] creating window...')
+  log.info('main', 'creating window...')
 
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -79,7 +80,7 @@ function createWindow(initialCwd: string | null = null) {
 
   // Load the renderer
   const rendererUrl = process.env.ELECTRON_RENDERER_URL
-  console.log('[main] loading renderer:', rendererUrl || 'file')
+  log.info('main', `loading renderer: ${rendererUrl || 'file'}`)
 
   if (rendererUrl) {
     mainWindow.loadURL(rendererUrl)
@@ -89,24 +90,58 @@ function createWindow(initialCwd: string | null = null) {
 
   mainWindow.webContents.on('did-finish-load', () => {
     if (initialCwd && mainWindow) {
-      console.log('[main] sending initial cwd:', initialCwd)
+      log.info('main', `sending initial cwd: ${initialCwd}`)
       mainWindow.webContents.send(IPC.APP_INITIAL_CWD, initialCwd)
     }
   })
 
   mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
-    console.error('[main] renderer failed to load:', code, desc)
+    log.error('main', `renderer failed to load: ${code} ${desc}`)
+  })
+
+  // ── Renderer crash recovery ──
+  // If the renderer process crashes (OOM, GPU, etc.), close all agents
+  // to release resources, then reload the renderer automatically.
+  mainWindow.webContents.on('render-process-gone', async (_e, details) => {
+    log.error('main', `renderer crashed: ${details.reason} exit=${details.exitCode}`)
+
+    // Close all agents to free memory (SDK subprocesses, codex, watchers)
+    try {
+      const agent = await import('./agent')
+      const agentList = agent.listAgents()
+      log.info('main', `crash recovery: closing ${agentList.length} agents`)
+      for (const a of agentList) {
+        agent.closeAgent(a.id)
+      }
+    } catch {}
+
+    // Close all terminals
+    try {
+      const terminal = await import('./terminal')
+      terminal.closeAll()
+    } catch {}
+
+    // Reload the renderer -- cleanup is done, reload now
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      log.info('main', 'crash recovery: reloading renderer')
+      const url = process.env.ELECTRON_RENDERER_URL
+      if (url) {
+        mainWindow.loadURL(url)
+      } else {
+        mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+      }
+    }
   })
 
   mainWindow.on('closed', () => {
     mainWindow = null
   })
 
-  console.log('[main] window created')
+  log.info('main', 'window created')
 }
 
 app.whenReady().then(async () => {
-  console.log('[main] app ready, pid:', process.pid)
+  log.info('main', `app ready, pid: ${process.pid}`)
 
   // Set dock icon on macOS
   const iconPath = join(__dirname, '../../resources/icon.png')
@@ -217,9 +252,9 @@ app.whenReady().then(async () => {
   try {
     const { registerIpcHandlers } = await import('./ipc')
     registerIpcHandlers()
-    console.log('[main] IPC handlers registered')
+    log.info('main', 'IPC handlers registered')
   } catch (err: any) {
-    console.error('[main] Failed to register IPC:', err)
+    log.error('main', 'Failed to register IPC', err)
   }
 
   try {
@@ -233,9 +268,9 @@ app.whenReady().then(async () => {
     const { setApiKeyGetter } = await import('./providers')
     const keystoreMod = await import('./keystore')
     setApiKeyGetter((provider) => keystoreMod.getApiKey(provider))
-    console.log('[main] agent + terminal + providers ready')
+    log.info('main', 'agent + terminal + providers ready')
   } catch (err: any) {
-    console.error('[main] Failed to load agent SDK:', err)
+    log.error('main', 'Failed to load agent SDK', err)
   }
 
   // Auto-install CLI on first launch (prompts user once, then remembers)
@@ -243,7 +278,7 @@ app.whenReady().then(async () => {
     const { autoInstallCLI } = await import('./cli-install')
     await autoInstallCLI()
   } catch (err: any) {
-    console.warn('[main] CLI auto-install check failed:', err.message)
+    log.warn('main', `CLI auto-install check failed: ${err.message}`)
   }
 
   // Auto-updater
@@ -251,9 +286,9 @@ app.whenReady().then(async () => {
     const updater = await import('./updater')
     if (mainWindow) updater.setMainWindow(mainWindow)
     updater.initAutoUpdater()
-    console.log('[main] auto-updater initialized')
+    log.info('main', 'auto-updater initialized')
   } catch (err: any) {
-    console.warn('[main] auto-updater init failed:', err.message)
+    log.warn('main', `auto-updater init failed: ${err.message}`)
   }
 
   app.on('activate', async () => {
@@ -272,9 +307,17 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', async () => {
+  log.flush()
   try {
     const terminal = await import('./terminal')
     terminal.closeAll()
+  } catch {}
+  // Close all agents (SDK subprocesses, codex managers, watchers)
+  try {
+    const agent = await import('./agent')
+    for (const a of agent.listAgents()) {
+      agent.closeAgent(a.id)
+    }
   } catch {}
   if (process.platform !== 'darwin') app.quit()
 })

@@ -258,7 +258,7 @@ function parseBlocks(src: string): Block[] {
 
 // ── Code block with copy button ────────────────────────────────────
 
-function CodeBlock({ lang, code }: { lang: string; code: string }) {
+const CodeBlock = React.memo(function CodeBlock({ lang, code }: { lang: string; code: string }) {
   const { colors, fonts } = useTheme()
   const [copied, setCopied] = React.useState(false)
 
@@ -324,13 +324,13 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
       </pre>
     </div>
   )
-}
+})
 
 // ── Main renderer ──────────────────────────────────────────────────
 
-export default function MarkdownRenderer({ text }: { text: string }) {
+export default React.memo(function MarkdownRenderer({ text }: { text: string }) {
   const { colors, fonts } = useTheme()
-  const blocks = parseBlocks(text || '')
+  const blocks = React.useMemo(() => parseBlocks(text || ''), [text])
   const ri = (nodes: InlineNode[], keyPrefix = '') => renderInline(nodes, colors, fonts.mono, keyPrefix)
 
   return (
@@ -458,4 +458,4 @@ export default function MarkdownRenderer({ text }: { text: string }) {
       })}
     </div>
   )
-}
+})

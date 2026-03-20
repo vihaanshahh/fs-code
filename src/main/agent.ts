@@ -4,9 +4,11 @@ import { existsSync } from 'node:fs'
 import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { createProvider, type ProviderDriver, type ClaudeProvider } from './providers'
+import { acquireManager, releaseManager, type CodexManager } from './codex'
 
 import { IPC } from '../shared/types'
-import type { UIMessage, PermissionRequest, AgentDescriptor, PermissionMode, ProviderId } from '../shared/types'
+import type { UIMessage, PermissionRequest, AgentDescriptor, PermissionMode, ProviderId, ResourceStats } from '../shared/types'
+import { log } from './logger'
 
 // Per-agent state
 interface AgentState {
@@ -23,6 +25,8 @@ interface AgentState {
   pendingContinue: boolean
   /** Whether we've shown the "Connected" init message (suppress on follow-ups) */
   hasShownInit: boolean
+  /** Code intelligence manager — indexes, MCP tools, hooks (null if init failed) */
+  codex: CodexManager | null
 }
 
 const agents = new Map<string, AgentState>()
@@ -32,19 +36,163 @@ export function setMainWindow(win: BrowserWindow) {
   mainWindow = win
 }
 
-function send(channel: string, data: unknown) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
+/**
+ * Batched IPC sender — coalesces AGENT_MESSAGE sends into adaptive windows.
+ *
+ * Safety valves for 2-3× load (18-27 equivalent streams):
+ *  - Hard cap on pending queue (512 msgs) — drops oldest on overflow
+ *  - Adaptive batch interval: widens 30→100ms when queue stays full
+ *  - Streaming deltas coalesced: only the latest per-agent is kept
+ */
+const MSG_BATCH_MS_MIN = 30
+const MSG_BATCH_MS_MAX = 100
+const MSG_QUEUE_CAP = 512
+
+let pendingMsgs: { channel: string; data: unknown }[] = []
+let batchTimer: ReturnType<typeof setTimeout> | null = null
+let currentBatchMs = MSG_BATCH_MS_MIN
+/** Consecutive flushes where queue was >50% full — drives adaptive interval */
+let highWaterCount = 0
+
+function flushMessages() {
+  batchTimer = null
+  if (!mainWindow || mainWindow.isDestroyed() || !pendingMsgs.length) {
+    pendingMsgs = []
+    highWaterCount = 0
+    currentBatchMs = MSG_BATCH_MS_MIN
+    return
+  }
+
+  // Adaptive interval: widen when consistently busy, tighten when calm
+  if (pendingMsgs.length > MSG_QUEUE_CAP / 2) {
+    highWaterCount++
+    if (highWaterCount > 3) currentBatchMs = Math.min(currentBatchMs + 10, MSG_BATCH_MS_MAX)
+  } else {
+    highWaterCount = Math.max(0, highWaterCount - 1)
+    if (highWaterCount === 0) currentBatchMs = MSG_BATCH_MS_MIN
+  }
+
+  for (const { channel, data } of pendingMsgs) {
     mainWindow.webContents.send(channel, data)
   }
+  pendingMsgs = []
+}
+
+function send(channel: string, data: unknown) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+
+  if (channel === IPC.AGENT_MESSAGE) {
+    // Coalesce streaming deltas: keep only the latest per agent
+    const msg = data as Record<string, unknown>
+    if (msg.type === 'assistant' && msg.isStreaming && msg.agentId) {
+      // Replace any existing streaming delta for this agent
+      for (let i = pendingMsgs.length - 1; i >= 0; i--) {
+        const prev = pendingMsgs[i].data as Record<string, unknown>
+        if (prev.agentId === msg.agentId && prev.type === 'assistant' && prev.isStreaming) {
+          pendingMsgs[i] = { channel, data }
+          return // replaced — no need to push
+        }
+      }
+    }
+
+    pendingMsgs.push({ channel, data })
+
+    // Hard cap — drop oldest messages if queue overflows
+    if (pendingMsgs.length > MSG_QUEUE_CAP) {
+      const excess = pendingMsgs.length - MSG_QUEUE_CAP
+      pendingMsgs.splice(0, excess)
+    }
+
+    if (!batchTimer) batchTimer = setTimeout(flushMessages, currentBatchMs)
+    return
+  }
+  // Everything else (permissions, session start/end, resource stats) — immediately
+  mainWindow.webContents.send(channel, data)
 }
 
 function uid(): string {
   return randomUUID().slice(0, 8)
 }
 
+// --- Resource limits ---
+
+/** Hard cap on concurrent agents — 3×3 grid */
+const MAX_AGENTS = 9
+
+/** Memory threshold (bytes) — warn and refuse new agents above this */
+const MEMORY_WARN_MB = 1500
+const MEMORY_HARD_LIMIT_MB = 2500
+
+function getMemoryUsageMB(): number {
+  const mem = process.memoryUsage()
+  return Math.round((mem.heapUsed + mem.external + (mem.arrayBuffers || 0)) / 1024 / 1024)
+}
+
+/** Get current resource stats for observability */
+export function getResourceStats(): ResourceStats {
+  const mem = process.memoryUsage()
+  let activeCount = 0
+  let codexReady = 0
+  for (const s of agents.values()) {
+    if (s.activeSessionId) activeCount++
+    if (s.codex) codexReady++
+  }
+  return {
+    memoryMB: Math.round((mem.heapUsed + mem.external + (mem.arrayBuffers || 0)) / 1024 / 1024),
+    heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
+    heapTotalMB: Math.round(mem.heapTotal / 1024 / 1024),
+    externalMB: Math.round(mem.external / 1024 / 1024),
+    agentCount: agents.size,
+    activeAgentCount: activeCount,
+    codexReadyCount: codexReady,
+    uptimeSeconds: Math.round(process.uptime()),
+  }
+}
+
+// ── Adaptive memory monitor ──
+// Checks faster when more agents are active (15s at 5+ agents, 30s otherwise)
+
+let _memoryMonitorTimer: ReturnType<typeof setInterval> | null = null
+let _monitorIntervalMs = 30_000
+
+export function startMemoryMonitor() {
+  if (_memoryMonitorTimer) return
+  const tick = () => {
+    const stats = getResourceStats()
+    send(IPC.RESOURCE_STATS, stats)
+    if (stats.memoryMB > MEMORY_WARN_MB) {
+      log.warn('agent', `HIGH MEMORY: ${stats.memoryMB}MB (${stats.agentCount} agents, ${stats.activeAgentCount} active)`)
+    }
+    // Adapt interval: faster when many agents are active
+    const newInterval = stats.activeAgentCount >= 5 ? 15_000 : 30_000
+    if (newInterval !== _monitorIntervalMs) {
+      _monitorIntervalMs = newInterval
+      clearInterval(_memoryMonitorTimer!)
+      _memoryMonitorTimer = setInterval(tick, _monitorIntervalMs)
+      _memoryMonitorTimer!.unref()
+    }
+  }
+  _memoryMonitorTimer = setInterval(tick, _monitorIntervalMs)
+  _memoryMonitorTimer.unref()
+}
+
 // --- Agent lifecycle ---
 
 export function createAgent(name: string, cwd: string, providerId: ProviderId = 'claude'): AgentDescriptor {
+  // Enforce agent cap
+  if (agents.size >= MAX_AGENTS) {
+    throw new Error(`Maximum ${MAX_AGENTS} agents reached. Close some agents before creating new ones.`)
+  }
+
+  // Check memory pressure
+  const memMB = getMemoryUsageMB()
+  if (memMB > MEMORY_HARD_LIMIT_MB) {
+    throw new Error(`Memory usage too high (${memMB}MB). Close some agents to free resources.`)
+  }
+  if (memMB > MEMORY_WARN_MB) {
+    log.warn('agent', `memory warning: ${memMB}MB used — consider closing some agents`)
+  }
+
   const id = uid()
   const provider = createProvider(providerId)
 
@@ -59,12 +207,28 @@ export function createAgent(name: string, cwd: string, providerId: ProviderId = 
     pendingResumeId: null,
     pendingContinue: false,
     hasShownInit: false,
+    codex: null,
   }
 
   // Set up permission handler on the provider
   provider.setPermissionHandler(makePermissionHandler(id, state))
 
   agents.set(id, state)
+
+  // Initialize code intelligence in background (non-blocking)
+  acquireManager(cwd).then((codex) => {
+    const currentState = agents.get(id)
+    if (currentState) {
+      currentState.codex = codex
+      log.info(`agent:${id}`, `codex ready for ${cwd}`)
+    } else {
+      // Agent was closed before codex finished
+      releaseManager(cwd)
+    }
+  }).catch((err) => {
+    log.error(`agent:${id}`, 'codex init failed', err)
+  })
+
   return { id, name, cwd, isActive: false, provider: providerId }
 }
 
@@ -81,6 +245,11 @@ export function closeAgent(agentId: string): boolean {
   }
   state.pendingPermissions.clear()
   state.provider.dispose()
+  // Release code intelligence manager
+  if (state.codex) {
+    releaseManager(state.cwd)
+    state.codex = null
+  }
   agents.delete(agentId)
   return true
 }
@@ -103,7 +272,7 @@ function makePermissionHandler(agentId: string, state: AgentState) {
     if (!currentState) return { behavior: 'deny' as const, message: 'Agent not found' }
 
     const requestId = uid()
-    console.log(`[agent:${agentId}] canUseTool: ${toolName} req=${requestId} inputKeys=${Object.keys(input).join(',')}`)
+    log.info(`agent:${agentId}`, `canUseTool: ${toolName} req=${requestId} inputKeys=${Object.keys(input).join(',')}`)
     const req: PermissionRequest = {
       requestId,
       toolName,
@@ -117,7 +286,7 @@ function makePermissionHandler(agentId: string, state: AgentState) {
       const timeoutId = setTimeout(() => {
         if (currentState.pendingPermissions.has(requestId)) {
           currentState.pendingPermissions.delete(requestId)
-          console.log(`[agent:${agentId}] permission timed out req=${requestId}`)
+          log.warn(`agent:${agentId}`, `permission timed out req=${requestId}`)
           // Notify renderer to clear the stale permission banner
           send(IPC.AGENT_PERMISSION_DISMISSED, { agentId, requestId })
           resolve({ behavior: 'deny', message: 'Permission request timed out' })
@@ -136,13 +305,13 @@ export async function sendPrompt(agentId: string, message: string): Promise<stri
   const state = agents.get(agentId)
   if (!state) throw new Error(`Agent ${agentId} not found`)
 
-  console.log(`[agent:${agentId}] sendPrompt (${state.providerId}):`, message.slice(0, 80))
+  log.info(`agent:${agentId}`, `sendPrompt (${state.providerId}): ${message.slice(0, 80)}`)
 
   // Validate CWD with fallback
   let cwd = state.cwd || process.cwd()
   if (!existsSync(cwd)) {
     const fallback = app.getPath('home')
-    console.warn(`[agent:${agentId}] cwd "${cwd}" not found, falling back to ${fallback}`)
+    log.warn(`agent:${agentId}`, `cwd "${cwd}" not found, falling back to ${fallback}`)
     emitMessage(agentId, { id: uid(), type: 'system', text: `Folder not found, using ${fallback}`, ts: Date.now() })
     cwd = fallback
     state.cwd = fallback
@@ -159,20 +328,26 @@ export async function sendPrompt(agentId: string, message: string): Promise<stri
 
   const sessionId = randomUUID()
   state.activeSessionId = sessionId
+  log.session(`agent:${agentId}`, agentId, state.providerId)
 
-  // Build options for the provider
+  // Build options for the provider (include codex intelligence for Claude)
+  const codexMcp = state.providerId === 'claude' && state.codex ? state.codex.getMcpServers() : undefined
+  const codexHooks = state.providerId === 'claude' && state.codex ? state.codex.getHooks() : undefined
+
   const options = {
     resumeSessionId: state.pendingResumeId,
     continueSession: state.pendingContinue,
+    mcpServers: codexMcp,
+    hooks: codexHooks,
   }
 
   // Clear pending flags
   if (state.pendingResumeId) {
-    console.log(`[agent:${agentId}] applying pending resume: ${state.pendingResumeId}`)
+    log.info(`agent:${agentId}`, `applying pending resume: ${state.pendingResumeId}`)
     state.pendingResumeId = null
   }
   if (state.pendingContinue) {
-    console.log(`[agent:${agentId}] applying pending continue`)
+    log.info(`agent:${agentId}`, 'applying pending continue')
     state.pendingContinue = false
   }
 
@@ -180,7 +355,7 @@ export async function sendPrompt(agentId: string, message: string): Promise<stri
   const claudeProvider = state.provider as any
   if (state.providerId === 'claude' && claudeProvider.sessionId && !options.resumeSessionId) {
     options.resumeSessionId = claudeProvider.sessionId
-    console.log(`[agent:${agentId}] auto-resuming SDK session: ${options.resumeSessionId}`)
+    log.info(`agent:${agentId}`, `auto-resuming SDK session: ${options.resumeSessionId}`)
   }
 
   // Delegate to provider
@@ -198,7 +373,7 @@ export async function sendPrompt(agentId: string, message: string): Promise<stri
       send(IPC.AGENT_SESSION_ENDED, { agentId, sessionId })
     },
   ).catch((err) => {
-    console.error(`[agent:${agentId}] sendPrompt error:`, err)
+    log.error(`agent:${agentId}`, 'sendPrompt error', err)
     emitMessage(agentId, { id: uid(), type: 'error', message: err?.message || String(err), ts: Date.now() })
     // Clear activeSessionId so agent doesn't appear permanently stuck
     const current = agents.get(agentId)
@@ -234,7 +409,7 @@ export async function setPermissionMode(agentId: string, mode: string): Promise<
   state.permissionMode = mode as PermissionMode
   state.provider.setPermissionMode(mode as PermissionMode)
 
-  console.log(`[agent:${agentId}] permissionMode → ${mode}`)
+  log.info(`agent:${agentId}`, `permissionMode → ${mode}`)
   return mode
 }
 
@@ -246,12 +421,12 @@ export function getPermissionMode(agentId: string): string {
 export function resolvePermission(agentId: string, requestId: string, behavior: 'allow' | 'deny', updatedPermissions?: unknown[], updatedInput?: Record<string, unknown>) {
   const state = agents.get(agentId)
   if (!state) {
-    console.error(`[agent:${agentId}] resolvePermission: agent not found`)
+    log.error(`agent:${agentId}`, 'resolvePermission: agent not found')
     return
   }
   const pending = state.pendingPermissions.get(requestId)
   if (!pending) {
-    console.error(`[agent:${agentId}] resolvePermission: no pending request ${requestId}`)
+    log.error(`agent:${agentId}`, `resolvePermission: no pending request ${requestId}`)
     return
   }
   state.pendingPermissions.delete(requestId)
@@ -264,10 +439,10 @@ export function resolvePermission(agentId: string, requestId: string, behavior: 
       updatedInput: updatedInput && Object.keys(updatedInput).length > 0 ? updatedInput : originalInput,
     }
     if (updatedPermissions) result.updatedPermissions = updatedPermissions
-    console.log(`[agent:${agentId}] resolvePermission ALLOW req=${requestId}`)
+    log.info(`agent:${agentId}`, `resolvePermission ALLOW req=${requestId}`)
     resolver(result)
   } else {
-    console.log(`[agent:${agentId}] resolvePermission DENY req=${requestId}`)
+    log.info(`agent:${agentId}`, `resolvePermission DENY req=${requestId}`)
     resolver({ behavior: 'deny', message: 'User denied' })
   }
 }
@@ -285,7 +460,7 @@ export function clearSession(agentId: string) {
   state.pendingResumeId = null
   state.pendingContinue = false
   state.hasShownInit = false
-  console.log(`[agent:${agentId}] session cleared — next message starts fresh`)
+  log.info(`agent:${agentId}`, 'session cleared — next message starts fresh')
 }
 
 export async function getSessions(agentId: string, cwd?: string) {
@@ -308,7 +483,7 @@ export async function resumeSession(agentId: string, resumeSessionId: string): P
   if (!state) throw new Error(`Agent ${agentId} not found`)
   if (state.providerId !== 'claude') throw new Error('Session resume is only supported for Claude provider')
 
-  console.log(`[agent:${agentId}] resumeSession: storing ${resumeSessionId}`)
+  log.info(`agent:${agentId}`, `resumeSession: storing ${resumeSessionId}`)
 
   state.pendingResumeId = resumeSessionId
   state.pendingContinue = false
@@ -335,7 +510,7 @@ export async function resumeSession(agentId: string, resumeSessionId: string): P
     batch.push({ id: uid(), type: 'system', text: '— end of history — type to continue', ts: Date.now() })
     send(IPC.AGENT_MESSAGE_BATCH, { agentId, messages: batch })
   } catch (err: any) {
-    console.error(`[agent:${agentId}] getSessionMessages error:`, err)
+    log.error(`agent:${agentId}`, 'getSessionMessages error', err)
     emitMessage(agentId, {
       id: uid(),
       type: 'system',
@@ -352,7 +527,7 @@ export async function continueSession(agentId: string): Promise<void> {
   if (!state) throw new Error(`Agent ${agentId} not found`)
   if (state.providerId !== 'claude') throw new Error('Session continue is only supported for Claude provider')
 
-  console.log(`[agent:${agentId}] continueSession: storing flag`)
+  log.info(`agent:${agentId}`, 'continueSession: storing flag')
 
   state.pendingContinue = true
   state.pendingResumeId = null
@@ -391,7 +566,7 @@ export async function continueSession(agentId: string): Promise<void> {
       state.pendingContinue = false
     }
   } catch (err: any) {
-    console.error(`[agent:${agentId}] continueSession list error:`, err)
+    log.error(`agent:${agentId}`, 'continueSession list error', err)
     emitMessage(agentId, {
       id: uid(),
       type: 'system',
@@ -443,7 +618,7 @@ export async function switchModel(agentId: string, model: string): Promise<void>
   if (!state) throw new Error(`Agent ${agentId} not found`)
 
   state.provider.setModel(model)
-  console.log(`[agent:${agentId}] model → ${model}`)
+  log.info(`agent:${agentId}`, `model → ${model}`)
 }
 
 // --- Rename agent ---
@@ -471,7 +646,7 @@ export async function sendPromptWithOptions(
   const state = agents.get(agentId)
   if (!state) throw new Error(`Agent ${agentId} not found`)
 
-  console.log(`[agent:${agentId}] sendPromptWithOptions (${state.providerId}):`, message.slice(0, 80))
+  log.info(`agent:${agentId}`, `sendPromptWithOptions (${state.providerId}): ${message.slice(0, 80)}`)
 
   let cwd = state.cwd || process.cwd()
   if (!existsSync(cwd)) {
@@ -491,10 +666,16 @@ export async function sendPromptWithOptions(
   const sessionId = randomUUID()
   state.activeSessionId = sessionId
 
+  // Include codex intelligence for Claude
+  const codexMcp = state.providerId === 'claude' && state.codex ? state.codex.getMcpServers() : undefined
+  const codexHooks = state.providerId === 'claude' && state.codex ? state.codex.getHooks() : undefined
+
   const options = {
     resumeSessionId: state.pendingResumeId,
     continueSession: state.pendingContinue,
     extraOptions,
+    mcpServers: codexMcp,
+    hooks: codexHooks,
   }
 
   if (state.pendingResumeId) state.pendingResumeId = null
@@ -520,7 +701,13 @@ export async function sendPromptWithOptions(
       send(IPC.AGENT_SESSION_ENDED, { agentId, sessionId })
     },
   ).catch((err) => {
-    console.error(`[agent:${agentId}] sendPromptWithOptions error:`, err)
+    log.error(`agent:${agentId}`, 'sendPromptWithOptions error', err)
+    emitMessage(agentId, { id: uid(), type: 'error', message: err?.message || String(err), ts: Date.now() })
+    const current = agents.get(agentId)
+    if (current && current.activeSessionId === sessionId) {
+      current.activeSessionId = null
+    }
+    send(IPC.AGENT_SESSION_ENDED, { agentId, sessionId })
   })
 
   return sessionId

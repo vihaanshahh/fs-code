@@ -33,6 +33,10 @@ export interface SendPromptOptions {
   continueSession?: boolean
   /** Extra options merged into the query (e.g. for /compact, /model) */
   extraOptions?: Record<string, unknown>
+  /** MCP server configs to pass to the SDK (codex intelligence tools) */
+  mcpServers?: Record<string, unknown>
+  /** Hook callbacks for automatic context injection */
+  hooks?: Partial<Record<string, unknown[]>>
 }
 
 /**

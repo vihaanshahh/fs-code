@@ -117,6 +117,10 @@ const api = {
   restoreFromPill: () =>
     ipcRenderer.invoke(IPC.WINDOW_RESTORE_PILL),
 
+  // Logging
+  getLogUsage: (): Promise<any> => ipcRenderer.invoke(IPC.LOG_GET_USAGE),
+  getLogPath: (): Promise<string | null> => ipcRenderer.invoke(IPC.LOG_GET_PATH),
+
   // Auto-update
   checkForUpdates: () => ipcRenderer.invoke(IPC.UPDATE_CHECK),
   downloadUpdate: () => ipcRenderer.invoke(IPC.UPDATE_DOWNLOAD),
@@ -131,15 +135,14 @@ const api = {
   onAgentMessage: (cb: (data: any) => void) => {
     const handler = (_: any, data: any) => cb(data)
     ipcRenderer.on(IPC.AGENT_MESSAGE, handler)
-    // Handle batched messages (session history) — fan out to same callback
-    const batchHandler = (_: any, data: { agentId: string; messages: any[] }) => {
-      for (const msg of data.messages) cb({ agentId: data.agentId, ...msg })
-    }
-    ipcRenderer.on(IPC.AGENT_MESSAGE_BATCH, batchHandler)
     return () => {
       ipcRenderer.removeListener(IPC.AGENT_MESSAGE, handler)
-      ipcRenderer.removeListener(IPC.AGENT_MESSAGE_BATCH, batchHandler)
     }
+  },
+  onAgentMessageBatch: (cb: (data: { agentId: string; messages: any[] }) => void) => {
+    const handler = (_: any, data: { agentId: string; messages: any[] }) => cb(data)
+    ipcRenderer.on(IPC.AGENT_MESSAGE_BATCH, handler)
+    return () => ipcRenderer.removeListener(IPC.AGENT_MESSAGE_BATCH, handler)
   },
   onPermissionRequest: (cb: (data: any) => void) => {
     const handler = (_: any, data: any) => cb(data)
@@ -175,6 +178,14 @@ const api = {
     const handler = (_: any, cwd: string) => cb(cwd)
     ipcRenderer.on(IPC.APP_INITIAL_CWD, handler)
     return () => ipcRenderer.removeListener(IPC.APP_INITIAL_CWD, handler)
+  },
+
+  // Resource stats
+  getResourceStats: () => ipcRenderer.invoke(IPC.RESOURCE_STATS),
+  onResourceStats: (cb: (data: any) => void) => {
+    const handler = (_: any, data: any) => cb(data)
+    ipcRenderer.on(IPC.RESOURCE_STATS, handler)
+    return () => ipcRenderer.removeListener(IPC.RESOURCE_STATS, handler)
   },
 }
 

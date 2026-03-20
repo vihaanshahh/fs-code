@@ -44,7 +44,7 @@ function BrailleSpinner({ color }: { color: string }) {
 
 // --- Message components ---
 
-function UserMessage({ msg }: { msg: Extract<UIMessage, { type: 'user' }> }) {
+const UserMessage = React.memo(function UserMessage({ msg }: { msg: Extract<UIMessage, { type: 'user' }> }) {
   const { colors } = useTheme()
   return (
     <div style={{
@@ -71,9 +71,9 @@ function UserMessage({ msg }: { msg: Extract<UIMessage, { type: 'user' }> }) {
       </div>
     </div>
   )
-}
+})
 
-function AssistantMessage({ msg, phaseColor }: { msg: Extract<UIMessage, { type: 'assistant' }>; phaseColor: string }) {
+const AssistantMessage = React.memo(function AssistantMessage({ msg, phaseColor }: { msg: Extract<UIMessage, { type: 'assistant' }>; phaseColor: string }) {
   return (
     <div style={{
       padding: '10px 16px',
@@ -86,9 +86,9 @@ function AssistantMessage({ msg, phaseColor }: { msg: Extract<UIMessage, { type:
       )}
     </div>
   )
-}
+})
 
-function ToolCard({ msg }: { msg: Extract<UIMessage, { type: 'tool-use' }> }) {
+const ToolCard = React.memo(function ToolCard({ msg }: { msg: Extract<UIMessage, { type: 'tool-use' }> }) {
   const { colors, fonts } = useTheme()
   const input = (typeof msg.input === 'object' && msg.input ? msg.input : {}) as Record<string, unknown>
   const isEmpty = Object.keys(input).length === 0
@@ -222,9 +222,9 @@ function ToolCard({ msg }: { msg: Extract<UIMessage, { type: 'tool-use' }> }) {
       {summary && <span style={{ color: colors.textMuted }}>{String(summary).slice(0, 80)}</span>}
     </div>
   )
-}
+})
 
-function ErrorMessage({ msg }: { msg: Extract<UIMessage, { type: 'error' }> }) {
+const ErrorMessage = React.memo(function ErrorMessage({ msg }: { msg: Extract<UIMessage, { type: 'error' }> }) {
   const { colors } = useTheme()
   return (
     <div style={{
@@ -239,7 +239,7 @@ function ErrorMessage({ msg }: { msg: Extract<UIMessage, { type: 'error' }> }) {
       {msg.message}
     </div>
   )
-}
+})
 
 // ResultMessage intentionally not rendered — case 'result' returns null in MessageRenderer
 
@@ -983,10 +983,11 @@ export default function ConversationPanel({
     }
   }, [settings.atMentionsEnabled])
 
-  // Auto-scroll
+  // Auto-scroll — only on new messages, not on streaming updates (which replace in-place)
+  const lastMsgId = messages[messages.length - 1]?.id
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length, messages[messages.length - 1]])
+  }, [messages.length, lastMsgId])
 
   // Auto-focus
   useEffect(() => { inputRef.current?.focus() }, [])
