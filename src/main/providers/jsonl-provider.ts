@@ -44,7 +44,7 @@ export interface JsonlProviderConfig {
  *   { output: "..." }, { response: "..." }, { data: { text: "..." } },
  *   { candidates: [{ content: { parts: [{ text: "..." }] } }] }  (Gemini REST)
  */
-function extractTextFromJson(obj: Record<string, unknown>): string | null {
+export function extractTextFromJson(obj: Record<string, unknown>): string | null {
   // Direct string fields
   for (const key of ['text', 'content', 'output', 'response', 'answer', 'result', 'delta']) {
     if (typeof obj[key] === 'string' && obj[key]) return obj[key] as string
@@ -295,8 +295,16 @@ export class JsonlProvider implements ProviderDriver {
   }
 
   stop(): void {
-    if (this.child && !this.child.killed) {
-      this.child.kill('SIGTERM')
+    const child = this.child
+    if (child && !child.killed) {
+      child.kill('SIGTERM')
+      // Escalate to SIGKILL if process doesn't exit within 3s
+      const killTimer = setTimeout(() => {
+        if (!child.killed) {
+          try { child.kill('SIGKILL') } catch { /* already dead */ }
+        }
+      }, 3000)
+      child.once('exit', () => clearTimeout(killTimer))
     }
     this.child = null
   }
