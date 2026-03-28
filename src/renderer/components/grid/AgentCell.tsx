@@ -105,14 +105,12 @@ function ToolPermissionBanner({
   onAllow,
   onAlwaysAllow,
   onDeny,
-  hasSuggestions,
 }: {
   toolName: string
   input: Record<string, unknown>
   onAllow: () => void
   onAlwaysAllow?: () => void
   onDeny: () => void
-  hasSuggestions?: boolean
 }) {
   const { colors, fonts } = useTheme()
 
@@ -195,7 +193,7 @@ function ToolPermissionBanner({
             fontWeight: 600, cursor: 'pointer', flexShrink: 0,
           }}
         >Allow</button>
-        {hasSuggestions && onAlwaysAllow && (
+        {onAlwaysAllow && (
           <button
             onClick={(e) => { e.stopPropagation(); onAlwaysAllow() }}
             style={{
@@ -795,7 +793,6 @@ export default function AgentCell({
               onAllow={() => agent.respondPermission('allow')}
               onAlwaysAllow={() => agent.respondPermission('allow', undefined, true)}
               onDeny={() => agent.respondPermission('deny')}
-              hasSuggestions={!!(agent.permissionRequest.suggestions && agent.permissionRequest.suggestions.length > 0)}
             />
       )}
 

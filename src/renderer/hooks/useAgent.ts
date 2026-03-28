@@ -235,7 +235,9 @@ export function useAgent(agentId: string) {
     await api.respondPermission(agentId, {
       requestId: pr.requestId,
       behavior,
-      updatedPermissions: behavior === 'allow' && alwaysAllow ? pr.suggestions : undefined,
+      updatedPermissions: behavior === 'allow' && alwaysAllow
+        ? (pr.suggestions && pr.suggestions.length > 0 ? pr.suggestions : [{ tool: pr.toolName, allow: true }])
+        : undefined,
       updatedInput,
     })
     setState(agentId, prev => ({ ...prev, permissionRequest: null }))
