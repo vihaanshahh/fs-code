@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useRef, useCallback, useEffect } from 'react'
 import TerminalPanel from '../terminal/Terminal'
 import FluidBackground from './FluidBackground'
 import { useAgent } from '../../hooks/useAgent'
@@ -13,6 +13,7 @@ const MIN_SIDEBAR_WIDTH = 120
 const MAX_SIDEBAR_WIDTH = 320
 
 function clampWidth(v: number): number {
+  if (!Number.isFinite(v)) return DEFAULT_SIDEBAR_WIDTH
   return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, v))
 }
 
@@ -20,26 +21,16 @@ function loadSidebarWidth(): number {
   try {
     const raw = localStorage.getItem(TAB_SIDEBAR_KEY)
     if (raw == null) return DEFAULT_SIDEBAR_WIDTH
-    const parsed = Number(raw)
-    if (!Number.isFinite(parsed)) return DEFAULT_SIDEBAR_WIDTH
-    return clampWidth(parsed)
+    return clampWidth(Number(raw))
   } catch {
     return DEFAULT_SIDEBAR_WIDTH
   }
-}
-
-function saveSidebarWidth(width: number): void {
-  try { localStorage.setItem(TAB_SIDEBAR_KEY, String(width)) } catch { /* quota */ }
 }
 
 function loadSidebarCollapsed(): boolean {
   try {
     return localStorage.getItem(TAB_SIDEBAR_COLLAPSED_KEY) === 'true'
   } catch { return false }
-}
-
-function saveSidebarCollapsed(collapsed: boolean): void {
-  try { localStorage.setItem(TAB_SIDEBAR_COLLAPSED_KEY, String(collapsed)) } catch { /* quota */ }
 }
 
 /** Live status badge for an agent tab — shows phase + detail */
@@ -125,50 +116,56 @@ export default function AgentTabs({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
-  const [sidebarWidth, setSidebarWidthRaw] = useState(loadSidebarWidth)
-  const [sidebarCollapsed, setSidebarCollapsedRaw] = useState(loadSidebarCollapsed)
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed)
   const [isResizing, setIsResizing] = useState(false)
+  // Ref tracks the latest width for the drag handler without stale closures
+  const widthRef = useRef(sidebarWidth)
+  widthRef.current = sidebarWidth
+  // Ref to hold cleanup for document listeners so we can tear down on unmount
+  const cleanupRef = useRef<(() => void) | null>(null)
 
-  const setSidebarWidth = useCallback((width: number) => {
-    const clamped = clampWidth(width)
-    setSidebarWidthRaw(clamped)
-    saveSidebarWidth(clamped)
-  }, [])
+  // Persist collapsed state on change
+  useEffect(() => {
+    try { localStorage.setItem(TAB_SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed)) } catch { /* quota */ }
+  }, [sidebarCollapsed])
 
-  const setSidebarCollapsed = useCallback((collapsed: boolean) => {
-    setSidebarCollapsedRaw(collapsed)
-    saveSidebarCollapsed(collapsed)
+  // Clean up any active drag listeners on unmount
+  useEffect(() => {
+    return () => { cleanupRef.current?.() }
   }, [])
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     setIsResizing(true)
     const startX = e.clientX
-    const startWidth = sidebarWidth
-    let active = true
+    const startWidth = widthRef.current
 
-    const onMouseMove = (e: MouseEvent) => {
-      if (!active) return
-      const delta = e.clientX - startX
-      const newWidth = clampWidth(startWidth + delta)
-      setSidebarWidthRaw(newWidth)
+    const onMouseMove = (ev: MouseEvent) => {
+      const delta = ev.clientX - startX
+      setSidebarWidth(clampWidth(startWidth + delta))
     }
-    const onMouseUp = () => {
-      active = false
+    const cleanup = () => {
       setIsResizing(false)
-      // Persist final width
-      setSidebarWidthRaw(prev => { saveSidebarWidth(prev); return prev })
+      // Persist final width from ref (always current, no stale closure)
+      try { localStorage.setItem(TAB_SIDEBAR_KEY, String(widthRef.current)) } catch { /* quota */ }
       document.removeEventListener('mousemove', onMouseMove)
       document.removeEventListener('mouseup', onMouseUp)
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
+      cleanupRef.current = null
     }
+    const onMouseUp = () => cleanup()
+
+    // Store cleanup so unmount can call it
+    cleanupRef.current?.()
+    cleanupRef.current = cleanup
 
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
     document.addEventListener('mousemove', onMouseMove)
     document.addEventListener('mouseup', onMouseUp)
-  }, [sidebarWidth])
+  }, [])
 
   const n = agents.length
 
@@ -387,8 +384,8 @@ export default function AgentTabs({
                     onDrop={e => {
                       e.preventDefault()
                       setDragOverIndex(null)
-                      const from = parseInt(e.dataTransfer.getData('text/plain'))
-                      if (from !== i) onReorder(from, i)
+                      const from = parseInt(e.dataTransfer.getData('text/plain'), 10)
+                      if (!Number.isNaN(from) && from !== i) onReorder(from, i)
                     }}
                     onClick={() => onFocus(agent.id)}
                     style={{
