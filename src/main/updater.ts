@@ -11,6 +11,11 @@ import { IPC } from '../shared/types'
 
 let mainWindow: BrowserWindow | null = null
 
+/** How often to poll for new releases (30 minutes) */
+const POLL_INTERVAL_MS = 30 * 60 * 1000
+
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
 export function setMainWindow(win: BrowserWindow) {
   mainWindow = win
 }
@@ -47,6 +52,8 @@ export function initAutoUpdater() {
         ? info.releaseNotes
         : undefined,
     })
+    // Stop polling once we know an update is available — no point rechecking
+    stopPolling()
   })
 
   autoUpdater.on('update-not-available', () => {
@@ -84,6 +91,25 @@ export function initAutoUpdater() {
   setTimeout(() => {
     checkForUpdates()
   }, 10_000)
+
+  // Poll periodically so users always see fresh update availability
+  startPolling()
+}
+
+function startPolling() {
+  if (pollTimer) return
+  pollTimer = setInterval(() => {
+    console.log('[updater] periodic check')
+    checkForUpdates()
+  }, POLL_INTERVAL_MS)
+  pollTimer.unref() // don't keep the app alive just for polling
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
 }
 
 export async function checkForUpdates() {

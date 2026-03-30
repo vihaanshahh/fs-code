@@ -62,7 +62,7 @@ export default function UpdateSection() {
             v{status.version} available
           </span>
           <button onClick={download} style={{ ...buttonStyle, borderColor: `${colors.green}60`, color: colors.green }}>
-            Download
+            Download &amp; Install
           </button>
         </div>
       )}
@@ -92,10 +92,10 @@ export default function UpdateSection() {
       {status?.state === 'downloaded' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 12, color: colors.green }}>
-            v{status.version} ready
+            v{status.version} ready to install
           </span>
-          <button onClick={install} style={{ ...buttonStyle, borderColor: `${colors.green}60`, color: colors.green }}>
-            Restart to Update
+          <button onClick={install} style={{ ...buttonStyle, background: colors.green, border: 'none', color: '#fff' }}>
+            Restart &amp; Update
           </button>
         </div>
       )}
