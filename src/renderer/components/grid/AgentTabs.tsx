@@ -1,10 +1,37 @@
-import React, { useState, useRef, useCallback } from 'react'
+import React, { useState, useRef, useCallback, useEffect } from 'react'
 import TerminalPanel from '../terminal/Terminal'
 import FluidBackground from './FluidBackground'
 import { useAgent } from '../../hooks/useAgent'
 import { useJourneyPhase } from '../../hooks/useJourneyPhase'
 import { useTheme } from '../../ThemeContext'
 import type { AgentDescriptor } from '../../../shared/types'
+
+const TAB_SIDEBAR_KEY = 'fs-code-tab-sidebar-width'
+const TAB_SIDEBAR_COLLAPSED_KEY = 'fs-code-tab-sidebar-collapsed'
+const DEFAULT_SIDEBAR_WIDTH = 180
+const MIN_SIDEBAR_WIDTH = 120
+const MAX_SIDEBAR_WIDTH = 320
+
+function clampWidth(v: number): number {
+  if (!Number.isFinite(v)) return DEFAULT_SIDEBAR_WIDTH
+  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, v))
+}
+
+function loadSidebarWidth(): number {
+  try {
+    const raw = localStorage.getItem(TAB_SIDEBAR_KEY)
+    if (raw == null) return DEFAULT_SIDEBAR_WIDTH
+    return clampWidth(Number(raw))
+  } catch {
+    return DEFAULT_SIDEBAR_WIDTH
+  }
+}
+
+function loadSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(TAB_SIDEBAR_COLLAPSED_KEY) === 'true'
+  } catch { return false }
+}
 
 /** Live status badge for an agent tab — shows phase + detail */
 function TabStatus({ agentId, accentColor, isFocusedTab }: { agentId: string; accentColor: string; isFocusedTab: boolean }) {
@@ -89,6 +116,56 @@ export default function AgentTabs({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed)
+  const [isResizing, setIsResizing] = useState(false)
+  // Ref tracks the latest width for the drag handler without stale closures
+  const widthRef = useRef(sidebarWidth)
+  widthRef.current = sidebarWidth
+  // Ref to hold cleanup for document listeners so we can tear down on unmount
+  const cleanupRef = useRef<(() => void) | null>(null)
+
+  // Persist collapsed state on change
+  useEffect(() => {
+    try { localStorage.setItem(TAB_SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed)) } catch { /* quota */ }
+  }, [sidebarCollapsed])
+
+  // Clean up any active drag listeners on unmount
+  useEffect(() => {
+    return () => { cleanupRef.current?.() }
+  }, [])
+
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizing(true)
+    const startX = e.clientX
+    const startWidth = widthRef.current
+
+    const onMouseMove = (ev: MouseEvent) => {
+      const delta = ev.clientX - startX
+      setSidebarWidth(clampWidth(startWidth + delta))
+    }
+    const cleanup = () => {
+      setIsResizing(false)
+      // Persist final width from ref (always current, no stale closure)
+      try { localStorage.setItem(TAB_SIDEBAR_KEY, String(widthRef.current)) } catch { /* quota */ }
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      cleanupRef.current = null
+    }
+    const onMouseUp = () => cleanup()
+
+    // Store cleanup so unmount can call it
+    cleanupRef.current?.()
+    cleanupRef.current = cleanup
+
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }, [])
 
   const n = agents.length
 
@@ -222,187 +299,266 @@ export default function AgentTabs({
     )
   }
 
-  // ── Tab layout ──
+  // ── Left sidebar tab layout ──
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* Tab bar */}
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'row', overflow: 'hidden' }}>
+      {/* Left tab sidebar */}
       <div style={{
-        height: 36,
+        width: sidebarCollapsed ? 36 : sidebarWidth,
         display: 'flex',
-        alignItems: 'stretch',
+        flexDirection: 'column',
         background: colors.bgOverlay,
-        borderBottom: `1px solid ${colors.border}`,
+        borderRight: `1px solid ${colors.border}`,
         flexShrink: 0,
-        overflowX: 'auto',
-        overflowY: 'hidden',
+        overflow: 'hidden',
+        transition: isResizing ? 'none' : 'width 0.15s ease',
         userSelect: 'none',
       }}>
-        {agents.map((agent, i) => {
-          const accentColor = agentColors[i % agentColors.length]
-          const isActive = agent.id === focusedId
-          const isDragOver = dragOverIndex === i
-
-          return (
-            <div
-              key={agent.id}
-              draggable
-              onDragStart={e => {
-                e.dataTransfer.setData('text/plain', String(i))
-                e.dataTransfer.effectAllowed = 'move'
-              }}
-              onDragOver={e => {
-                e.preventDefault()
-                setDragOverIndex(i)
-              }}
-              onDragLeave={() => setDragOverIndex(null)}
-              onDrop={e => {
-                e.preventDefault()
-                setDragOverIndex(null)
-                const from = parseInt(e.dataTransfer.getData('text/plain'))
-                if (from !== i) onReorder(from, i)
-              }}
-              onClick={() => onFocus(agent.id)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '0 12px',
-                cursor: 'pointer',
-                borderBottom: isActive ? `2px solid ${accentColor}` : '2px solid transparent',
-                borderLeft: isDragOver ? `2px solid ${accentColor}` : '2px solid transparent',
-                background: isActive ? `${accentColor}08` : 'transparent',
-                transition: 'background 0.12s ease, border-color 0.12s ease',
-                flexShrink: 0,
-                maxWidth: 200,
-                minWidth: 0,
-              }}
-              onMouseEnter={e => {
-                if (!isActive) e.currentTarget.style.background = `${colors.textMuted}08`
-              }}
-              onMouseLeave={e => {
-                if (!isActive) e.currentTarget.style.background = 'transparent'
-              }}
-            >
-              <TabStatus agentId={agent.id} accentColor={accentColor} isFocusedTab={isActive} />
-
-              {editingId === agent.id ? (
-                <input
-                  autoFocus
-                  spellCheck={false}
-                  maxLength={8}
-                  value={editValue}
-                  onChange={e => { if (e.target.value.length <= 8) setEditValue(e.target.value) }}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') {
-                      e.stopPropagation()
-                      const v = editValue.trim()
-                      if (v) onRename(agent.id, v)
-                      setEditingId(null)
-                    }
-                    if (e.key === 'Escape') { e.stopPropagation(); setEditingId(null) }
-                  }}
-                  onBlur={() => {
-                    const v = editValue.trim()
-                    if (v) onRename(agent.id, v)
-                    setEditingId(null)
-                  }}
-                  onClick={e => e.stopPropagation()}
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 600,
-                    color: colors.text,
-                    background: `${accentColor}12`,
-                    border: `1px solid ${accentColor}40`,
-                    borderRadius: 3,
-                    outline: 'none',
-                    padding: '0 4px',
-                    width: 56,
-                    fontFamily: 'inherit',
-                  }}
-                />
-              ) : (
-                <span
-                  onDoubleClick={e => {
-                    e.stopPropagation()
-                    setEditValue(agent.name)
-                    setEditingId(agent.id)
-                  }}
-                  title={`${agent.name} — ${agent.cwd}\nDouble-click to rename`}
-                  style={{
-                    fontSize: 11,
-                    fontWeight: isActive ? 600 : 400,
-                    color: isActive ? colors.text : colors.textMuted,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {agent.name}
-                </span>
-              )}
-
-              {/* CWD hint */}
-              <span style={{
-                fontSize: 9,
-                color: colors.textMuted,
-                fontFamily: fonts.mono,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                opacity: 0.6,
-                flex: 1,
-                minWidth: 0,
-              }}>
-                {agent.cwd === '.' ? '~' : agent.cwd.split('/').pop()}
-              </span>
-
-              {/* Close */}
-              <span
-                onClick={e => { e.stopPropagation(); onClose(agent.id) }}
-                style={{
-                  fontSize: 13,
-                  color: colors.textMuted,
-                  cursor: 'pointer',
-                  lineHeight: 1,
-                  padding: '0 1px',
-                  opacity: 0.6,
-                  flexShrink: 0,
-                }}
-                onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = colors.text }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = '0.6'; e.currentTarget.style.color = colors.textMuted }}
-              >
-                ×
-              </span>
-            </div>
-          )
-        })}
-
-        {/* Add tab button */}
-        {canAddAgent && (
+        {sidebarCollapsed ? (
+          /* Collapsed state — vertical label */
           <div
-            onClick={onAddAgent}
-            title="New Agent (Cmd+N)"
+            onClick={() => setSidebarCollapsed(false)}
             style={{
+              flex: 1,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              width: 32,
               cursor: 'pointer',
+              writingMode: 'vertical-rl',
+              fontSize: 11,
               color: colors.textMuted,
-              fontSize: 16,
-              flexShrink: 0,
-              transition: 'color 0.12s ease',
+              letterSpacing: 1,
             }}
-            onMouseEnter={e => { e.currentTarget.style.color = colors.text }}
-            onMouseLeave={e => { e.currentTarget.style.color = colors.textMuted }}
           >
-            +
+            Agents ({n})
           </div>
+        ) : (
+          <>
+            {/* Sidebar header */}
+            <div style={{
+              height: 32,
+              display: 'flex',
+              alignItems: 'center',
+              padding: '0 8px',
+              flexShrink: 0,
+              borderBottom: `1px solid ${colors.border}`,
+              gap: 4,
+            }}>
+              <span style={{ fontSize: 10, fontWeight: 600, color: colors.textMuted, letterSpacing: '0.5px', textTransform: 'uppercase', flex: 1 }}>
+                Agents
+              </span>
+              <span
+                onClick={() => setSidebarCollapsed(true)}
+                style={{ cursor: 'pointer', fontSize: 14, color: colors.textMuted, lineHeight: 1, padding: '0 2px' }}
+                title="Collapse sidebar"
+              >
+                {'\u00AB'}
+              </span>
+            </div>
+
+            {/* Tab list */}
+            <div style={{
+              flex: 1,
+              overflowY: 'auto',
+              overflowX: 'hidden',
+              padding: '4px 0',
+            }}>
+              {agents.map((agent, i) => {
+                const accentColor = agentColors[i % agentColors.length]
+                const isActive = agent.id === focusedId
+                const isDragOver = dragOverIndex === i
+
+                return (
+                  <div
+                    key={agent.id}
+                    draggable
+                    onDragStart={e => {
+                      e.dataTransfer.setData('text/plain', String(i))
+                      e.dataTransfer.effectAllowed = 'move'
+                    }}
+                    onDragOver={e => {
+                      e.preventDefault()
+                      setDragOverIndex(i)
+                    }}
+                    onDragLeave={() => setDragOverIndex(null)}
+                    onDrop={e => {
+                      e.preventDefault()
+                      setDragOverIndex(null)
+                      const from = parseInt(e.dataTransfer.getData('text/plain'), 10)
+                      if (!Number.isNaN(from) && from !== i) onReorder(from, i)
+                    }}
+                    onClick={() => onFocus(agent.id)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '6px 8px',
+                      margin: '0 4px',
+                      borderRadius: 6,
+                      cursor: 'pointer',
+                      borderLeft: `2px solid ${isActive ? accentColor : 'transparent'}`,
+                      borderTop: isDragOver ? `2px solid ${accentColor}` : '2px solid transparent',
+                      background: isActive ? `${accentColor}10` : 'transparent',
+                      transition: 'background 0.12s ease, border-color 0.12s ease',
+                      minHeight: 32,
+                    }}
+                    onMouseEnter={e => {
+                      if (!isActive) e.currentTarget.style.background = `${colors.textMuted}08`
+                    }}
+                    onMouseLeave={e => {
+                      if (!isActive) e.currentTarget.style.background = 'transparent'
+                    }}
+                  >
+                    <TabStatus agentId={agent.id} accentColor={accentColor} isFocusedTab={isActive} />
+
+                    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      {editingId === agent.id ? (
+                        <input
+                          autoFocus
+                          spellCheck={false}
+                          maxLength={8}
+                          value={editValue}
+                          onChange={e => { if (e.target.value.length <= 8) setEditValue(e.target.value) }}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') {
+                              e.stopPropagation()
+                              const v = editValue.trim()
+                              if (v) onRename(agent.id, v)
+                              setEditingId(null)
+                            }
+                            if (e.key === 'Escape') { e.stopPropagation(); setEditingId(null) }
+                          }}
+                          onBlur={() => {
+                            const v = editValue.trim()
+                            if (v) onRename(agent.id, v)
+                            setEditingId(null)
+                          }}
+                          onClick={e => e.stopPropagation()}
+                          style={{
+                            fontSize: 11,
+                            fontWeight: 600,
+                            color: colors.text,
+                            background: `${accentColor}12`,
+                            border: `1px solid ${accentColor}40`,
+                            borderRadius: 3,
+                            outline: 'none',
+                            padding: '0 4px',
+                            width: '100%',
+                            fontFamily: 'inherit',
+                          }}
+                        />
+                      ) : (
+                        <span
+                          onDoubleClick={e => {
+                            e.stopPropagation()
+                            setEditValue(agent.name)
+                            setEditingId(agent.id)
+                          }}
+                          title={`${agent.name} — ${agent.cwd}\nDouble-click to rename`}
+                          style={{
+                            fontSize: 11,
+                            fontWeight: isActive ? 600 : 400,
+                            color: isActive ? colors.text : colors.textMuted,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {agent.name}
+                        </span>
+                      )}
+
+                      {/* CWD hint */}
+                      <span style={{
+                        fontSize: 9,
+                        color: colors.textMuted,
+                        fontFamily: fonts.mono,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        opacity: 0.6,
+                      }}>
+                        {agent.cwd === '.' ? '~' : agent.cwd.split('/').pop()}
+                      </span>
+                    </div>
+
+                    {/* Close */}
+                    <span
+                      onClick={e => { e.stopPropagation(); onClose(agent.id) }}
+                      style={{
+                        fontSize: 13,
+                        color: colors.textMuted,
+                        cursor: 'pointer',
+                        lineHeight: 1,
+                        padding: '0 1px',
+                        opacity: 0.6,
+                        flexShrink: 0,
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = colors.text }}
+                      onMouseLeave={e => { e.currentTarget.style.opacity = '0.6'; e.currentTarget.style.color = colors.textMuted }}
+                    >
+                      ×
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Add tab button */}
+            {canAddAgent && (
+              <div
+                onClick={onAddAgent}
+                title="New Agent (Cmd+N)"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 4,
+                  height: 32,
+                  cursor: 'pointer',
+                  color: colors.textMuted,
+                  fontSize: 11,
+                  flexShrink: 0,
+                  borderTop: `1px solid ${colors.border}`,
+                  transition: 'color 0.12s ease, background 0.12s ease',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.color = colors.text; e.currentTarget.style.background = `${colors.textMuted}08` }}
+                onMouseLeave={e => { e.currentTarget.style.color = colors.textMuted; e.currentTarget.style.background = 'transparent' }}
+              >
+                <span style={{ fontSize: 14 }}>+</span>
+                New Agent
+              </div>
+            )}
+          </>
         )}
       </div>
 
+      {/* Resize handle */}
+      {!sidebarCollapsed && (
+        <div
+          onMouseDown={handleResizeStart}
+          style={{
+            width: 5,
+            cursor: 'col-resize',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+            zIndex: 2,
+          }}
+        >
+          <div style={{
+            width: 1,
+            height: 32,
+            background: colors.borderMuted,
+            borderRadius: 1,
+            transition: 'background 0.1s',
+          }} />
+        </div>
+      )}
+
       {/* Agent body — all agents mounted, only focused visible */}
-      <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+      <div style={{ flex: 1, overflow: 'hidden', position: 'relative', minWidth: 0 }}>
         {agents.map((agent) => (
           <div
             key={agent.id}
