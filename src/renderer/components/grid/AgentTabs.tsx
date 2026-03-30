@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react'
+import React, { useState, useCallback } from 'react'
 import TerminalPanel from '../terminal/Terminal'
 import FluidBackground from './FluidBackground'
 import { useAgent } from '../../hooks/useAgent'
@@ -8,19 +8,38 @@ import type { AgentDescriptor } from '../../../shared/types'
 
 const TAB_SIDEBAR_KEY = 'fs-code-tab-sidebar-width'
 const TAB_SIDEBAR_COLLAPSED_KEY = 'fs-code-tab-sidebar-collapsed'
+const DEFAULT_SIDEBAR_WIDTH = 180
+const MIN_SIDEBAR_WIDTH = 120
+const MAX_SIDEBAR_WIDTH = 320
+
+function clampWidth(v: number): number {
+  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, v))
+}
 
 function loadSidebarWidth(): number {
   try {
-    const v = localStorage.getItem(TAB_SIDEBAR_KEY)
-    if (v) return Math.max(120, Math.min(320, parseInt(v, 10)))
-  } catch { /* ignore */ }
-  return 180
+    const raw = localStorage.getItem(TAB_SIDEBAR_KEY)
+    if (raw == null) return DEFAULT_SIDEBAR_WIDTH
+    const parsed = Number(raw)
+    if (!Number.isFinite(parsed)) return DEFAULT_SIDEBAR_WIDTH
+    return clampWidth(parsed)
+  } catch {
+    return DEFAULT_SIDEBAR_WIDTH
+  }
+}
+
+function saveSidebarWidth(width: number): void {
+  try { localStorage.setItem(TAB_SIDEBAR_KEY, String(width)) } catch { /* quota */ }
 }
 
 function loadSidebarCollapsed(): boolean {
   try {
     return localStorage.getItem(TAB_SIDEBAR_COLLAPSED_KEY) === 'true'
   } catch { return false }
+}
+
+function saveSidebarCollapsed(collapsed: boolean): void {
+  try { localStorage.setItem(TAB_SIDEBAR_COLLAPSED_KEY, String(collapsed)) } catch { /* quota */ }
 }
 
 /** Live status badge for an agent tab — shows phase + detail */
@@ -106,35 +125,39 @@ export default function AgentTabs({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
-  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed)
-  const resizing = useRef(false)
-  const containerRef = useRef<HTMLDivElement>(null)
+  const [sidebarWidth, setSidebarWidthRaw] = useState(loadSidebarWidth)
+  const [sidebarCollapsed, setSidebarCollapsedRaw] = useState(loadSidebarCollapsed)
+  const [isResizing, setIsResizing] = useState(false)
 
-  // Persist sidebar width
-  useEffect(() => {
-    try { localStorage.setItem(TAB_SIDEBAR_KEY, String(sidebarWidth)) } catch { /* ignore */ }
-  }, [sidebarWidth])
+  const setSidebarWidth = useCallback((width: number) => {
+    const clamped = clampWidth(width)
+    setSidebarWidthRaw(clamped)
+    saveSidebarWidth(clamped)
+  }, [])
 
-  // Persist sidebar collapsed state
-  useEffect(() => {
-    try { localStorage.setItem(TAB_SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed)) } catch { /* ignore */ }
-  }, [sidebarCollapsed])
+  const setSidebarCollapsed = useCallback((collapsed: boolean) => {
+    setSidebarCollapsedRaw(collapsed)
+    saveSidebarCollapsed(collapsed)
+  }, [])
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
-    resizing.current = true
+    setIsResizing(true)
     const startX = e.clientX
     const startWidth = sidebarWidth
+    let active = true
 
     const onMouseMove = (e: MouseEvent) => {
-      if (!resizing.current) return
+      if (!active) return
       const delta = e.clientX - startX
-      const newWidth = Math.max(120, Math.min(320, startWidth + delta))
-      setSidebarWidth(newWidth)
+      const newWidth = clampWidth(startWidth + delta)
+      setSidebarWidthRaw(newWidth)
     }
     const onMouseUp = () => {
-      resizing.current = false
+      active = false
+      setIsResizing(false)
+      // Persist final width
+      setSidebarWidthRaw(prev => { saveSidebarWidth(prev); return prev })
       document.removeEventListener('mousemove', onMouseMove)
       document.removeEventListener('mouseup', onMouseUp)
       document.body.style.cursor = ''
@@ -281,7 +304,7 @@ export default function AgentTabs({
 
   // ── Left sidebar tab layout ──
   return (
-    <div ref={containerRef} style={{ height: '100%', display: 'flex', flexDirection: 'row', overflow: 'hidden' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'row', overflow: 'hidden' }}>
       {/* Left tab sidebar */}
       <div style={{
         width: sidebarCollapsed ? 36 : sidebarWidth,
@@ -291,7 +314,7 @@ export default function AgentTabs({
         borderRight: `1px solid ${colors.border}`,
         flexShrink: 0,
         overflow: 'hidden',
-        transition: resizing.current ? 'none' : 'width 0.15s ease',
+        transition: isResizing ? 'none' : 'width 0.15s ease',
         userSelect: 'none',
       }}>
         {sidebarCollapsed ? (
