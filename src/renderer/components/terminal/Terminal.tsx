@@ -6,6 +6,34 @@ import '@xterm/xterm/css/xterm.css'
 import { api } from '../../lib/api'
 import { useTheme } from '../../ThemeContext'
 
+// ── Centralized terminal data dispatcher ──
+// Instead of N terminal panels each subscribing to all TERM_DATA events
+// and filtering by ID (O(N) listeners per event), we maintain a single
+// global listener that dispatches to the correct terminal.
+// At 9 agents streaming, this reduces IPC handler invocations from 9→1 per event.
+
+type TermDataHandler = (data: string) => void
+type TermExitHandler = () => void
+
+const dataHandlers = new Map<string, TermDataHandler>()
+const exitHandlers = new Map<string, TermExitHandler>()
+let globalListenersSetup = false
+
+function ensureGlobalListeners() {
+  if (globalListenersSetup) return
+  globalListenersSetup = true
+
+  api.onTerminalData(({ terminalId, data }) => {
+    const handler = dataHandlers.get(terminalId)
+    if (handler) handler(data)
+  })
+
+  api.onTerminalExit(({ terminalId }) => {
+    const handler = exitHandlers.get(terminalId)
+    if (handler) handler()
+  })
+}
+
 export default function TerminalPanel({
   agentId,
   cwd,
@@ -23,6 +51,8 @@ export default function TerminalPanel({
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
+    ensureGlobalListeners()
+
     const container = containerRef.current
     if (!container) return
 
@@ -30,8 +60,6 @@ export default function TerminalPanel({
     let term: Terminal | null = null
     let fitAddon: FitAddon | null = null
     let ptyId: string | null = null
-    let unsubData: (() => void) | null = null
-    let unsubExit: (() => void) | null = null
     let inputDisposable: { dispose: () => void } | null = null
     let resizeDisposable: { dispose: () => void } | null = null
     let observer: ResizeObserver | null = null
@@ -97,6 +125,15 @@ export default function TerminalPanel({
         if (disposed) return
         ptyId = terminalId
 
+        // Register handler BEFORE replaying buffer to avoid missing data
+        dataHandlers.set(terminalId, (data: string) => {
+          if (term && !disposed) term.write(data)
+        })
+
+        exitHandlers.set(terminalId, () => {
+          if (term && !disposed) term.write('\r\n\x1b[90m[process exited — type `claude` to restart]\x1b[0m\r\n')
+        })
+
         // If reattaching to existing PTY, replay buffered output
         if (!isNew && term) {
           const { data } = await api.getTerminalBuffer(terminalId)
@@ -111,19 +148,6 @@ export default function TerminalPanel({
           if (cols && rows) {
             api.resizeTerminal(terminalId, cols, rows)
           }
-        }
-      })
-
-      // PTY → xterm
-      unsubData = api.onTerminalData(({ terminalId: tid, data }) => {
-        if (tid === ptyId && term) {
-          term.write(data)
-        }
-      })
-
-      unsubExit = api.onTerminalExit(({ terminalId: tid }) => {
-        if (tid === ptyId && term) {
-          term.write('\r\n\x1b[90m[process exited]\x1b[0m\r\n')
         }
       })
 
@@ -157,8 +181,10 @@ export default function TerminalPanel({
       observer?.disconnect()
       inputDisposable?.dispose()
       resizeDisposable?.dispose()
-      unsubData?.()
-      unsubExit?.()
+      if (ptyId) {
+        dataHandlers.delete(ptyId)
+        exitHandlers.delete(ptyId)
+      }
       term?.dispose()
       // NOTE: intentionally do NOT close the PTY here.
       // The PTY persists in the main process until the agent is closed.
