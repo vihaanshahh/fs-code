@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -39,16 +39,22 @@ export default function TerminalPanel({
   cwd,
   mode = 'shell',
   resume,
+  provider,
 }: {
   agentId: string
   cwd: string
-  /** 'claude' launches `claude` CLI in the terminal; 'shell' is a plain shell */
-  mode?: 'shell' | 'claude'
+  /** 'claude' launches claude CLI; 'codex' launches codex CLI; 'shell' is a plain shell */
+  mode?: 'shell' | 'claude' | 'codex'
   /** Session ID to resume (only used in claude mode) */
   resume?: string
+  /** Provider ID — used for display purposes */
+  provider?: string
 }) {
   const { colors } = useTheme()
   const containerRef = useRef<HTMLDivElement>(null)
+  const termRef = useRef<Terminal | null>(null)
+  const isCli = mode === 'claude' || mode === 'codex'
+  const [ready, setReady] = useState(!isCli)
 
   useEffect(() => {
     ensureGlobalListeners()
@@ -112,26 +118,46 @@ export default function TerminalPanel({
       fitAddon = new FitAddon()
       term.loadAddon(fitAddon)
       term.loadAddon(new WebLinksAddon())
+      termRef.current = term
 
       term.open(container)
       try { fitAddon.fit() } catch { /* ignore */ }
 
-      // Get or create PTY — use claude terminal or plain shell based on mode
+      // Get or create PTY based on mode
       const createFn = mode === 'claude'
         ? api.createClaudeTerminal(agentId, cwd, resume)
-        : api.createTerminal(agentId, cwd)
+        : mode === 'codex'
+          ? api.createCodexTerminal(agentId, cwd)
+          : api.createTerminal(agentId, cwd)
 
       createFn.then(async ({ terminalId, isNew }) => {
         if (disposed) return
         ptyId = terminalId
 
         // Register handler BEFORE replaying buffer to avoid missing data
+        let gotPrompt = false
         dataHandlers.set(terminalId, (data: string) => {
           if (term && !disposed) term.write(data)
+          // Consider ready only once the CLI prompt appears:
+          // Claude uses ❯, Codex uses > at start of line or "codex>" prompt
+          if (isCli && !disposed && !gotPrompt) {
+            if (mode === 'claude' && (data.includes('❯') || data.includes('\u276f'))) {
+              gotPrompt = true
+              setReady(true)
+            } else if (mode === 'codex' && (data.includes('>') || data.includes('codex'))) {
+              gotPrompt = true
+              setReady(true)
+            }
+          }
         })
+        // Fallback: always show terminal after a timeout
+        if (isCli) {
+          setTimeout(() => { if (!disposed) setReady(true) }, 8000)
+        }
 
+        const cliName = mode === 'codex' ? 'codex' : 'claude'
         exitHandlers.set(terminalId, () => {
-          if (term && !disposed) term.write('\r\n\x1b[90m[process exited — type `claude` to restart]\x1b[0m\r\n')
+          if (term && !disposed) term.write(`\r\n\x1b[90m[process exited — type \`${cliName}\` to restart]\x1b[0m\r\n`)
         })
 
         // If reattaching to existing PTY, replay buffered output
@@ -139,6 +165,10 @@ export default function TerminalPanel({
           const { data } = await api.getTerminalBuffer(terminalId)
           if (data && term && !disposed) {
             term.write(data)
+            if (isCli) {
+              gotPrompt = true
+              setReady(true)
+            }
           }
         }
 
@@ -185,21 +215,91 @@ export default function TerminalPanel({
         dataHandlers.delete(ptyId)
         exitHandlers.delete(ptyId)
       }
+      termRef.current = null
       term?.dispose()
       // NOTE: intentionally do NOT close the PTY here.
       // The PTY persists in the main process until the agent is closed.
     }
   }, [agentId, cwd, mode, resume]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Live theme update — patches xterm colors without reinitializing the terminal
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    term.options.theme = {
+      background: colors.bgOverlay,
+      foreground: colors.text,
+      cursor: colors.blue,
+      selectionBackground: `${colors.blue}40`,
+      black: colors.bgOverlay,
+      red: colors.red,
+      green: colors.green,
+      yellow: colors.amber,
+      blue: colors.blue,
+      magenta: colors.purple,
+      cyan: '#56d4dd',
+      white: colors.text,
+      brightBlack: colors.textMuted,
+      brightRed: colors.red,
+      brightGreen: colors.green,
+      brightYellow: colors.amber,
+      brightBlue: colors.blue,
+      brightMagenta: colors.purple,
+      brightCyan: '#56d4dd',
+      brightWhite: '#ffffff',
+    }
+  }, [colors])
+
   return (
-    <div
-      ref={containerRef}
-      style={{
-        width: '100%',
-        height: '100%',
-        background: colors.bgOverlay,
-        overflow: 'hidden',
-      }}
-    />
+    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+      <div
+        ref={containerRef}
+        style={{
+          width: '100%',
+          height: '100%',
+          background: colors.bgOverlay,
+          overflow: 'hidden',
+        }}
+      />
+      {/* Loading overlay — shown while CLI initializes */}
+      {!ready && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: colors.bgOverlay,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 14,
+            zIndex: 10,
+            animation: 'fadeIn 0.15s ease',
+          }}
+        >
+          {/* Spinner */}
+          <div style={{
+            width: 28,
+            height: 28,
+            border: `2px solid ${colors.border}`,
+            borderTopColor: colors.blue,
+            borderRadius: '50%',
+            animation: 'spin 0.8s linear infinite',
+          }} />
+          <span style={{
+            fontSize: 12,
+            color: colors.textMuted,
+            fontWeight: 500,
+            letterSpacing: 0.3,
+          }}>
+            Initializing {mode === 'codex' ? 'Codex' : 'Claude'}...
+          </span>
+          <style>{`
+            @keyframes spin { to { transform: rotate(360deg) } }
+            @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+          `}</style>
+        </div>
+      )}
+    </div>
   )
 }

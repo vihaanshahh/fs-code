@@ -4,15 +4,15 @@ import type { ProviderId } from '../../shared/types'
 const STORAGE_KEY = 'fs-code-settings'
 
 export interface AppSettings {
-  /** Enable @ file mentions in the chat input */
-  atMentionsEnabled: boolean
   /** Default provider for new agents */
   defaultProvider: ProviderId
+  /** Layout mode: grid (split panes) or tabs (single agent with tab bar) */
+  layoutMode: 'grid' | 'tabs'
 }
 
 const DEFAULTS: AppSettings = {
-  atMentionsEnabled: true,
   defaultProvider: 'claude',
+  layoutMode: 'tabs',
 }
 
 function loadSettings(): AppSettings {

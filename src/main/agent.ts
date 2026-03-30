@@ -27,6 +27,8 @@ interface AgentState {
   hasShownInit: boolean
   /** Code intelligence manager — indexes, MCP tools, hooks (null if init failed) */
   codex: CodexManager | null
+  /** Promise that resolves when codex is ready (so sendPrompt can await it) */
+  codexPromise: Promise<CodexManager | null>
 }
 
 const agents = new Map<string, AgentState>()
@@ -208,6 +210,7 @@ export function createAgent(name: string, cwd: string, providerId: ProviderId = 
     pendingContinue: false,
     hasShownInit: false,
     codex: null,
+    codexPromise: Promise.resolve(null),
   }
 
   // NOTE: Permission handler is NOT set — the claude CLI running in the terminal
@@ -215,18 +218,25 @@ export function createAgent(name: string, cwd: string, providerId: ProviderId = 
 
   agents.set(id, state)
 
-  // Initialize code intelligence in background (non-blocking)
-  acquireManager(cwd).then((codex) => {
+  // Initialize code intelligence in background — store promise so sendPrompt can await it
+  state.codexPromise = acquireManager(cwd).then((codex) => {
     const currentState = agents.get(id)
     if (currentState) {
       currentState.codex = codex
+      codex.onStatus((status) => {
+        send(IPC.CODEX_STATUS, { agentId: id, ...status })
+      })
       log.info(`agent:${id}`, `codex ready for ${cwd}`)
+      return codex
     } else {
       // Agent was closed before codex finished
       releaseManager(cwd)
+      return null
     }
   }).catch((err) => {
     log.error(`agent:${id}`, 'codex init failed', err)
+    send(IPC.CODEX_STATUS, { agentId: id, state: 'error', error: String(err) })
+    return null
   })
 
   return { id, name, cwd, isActive: false, provider: providerId }
@@ -261,6 +271,9 @@ export function listAgents(): AgentDescriptor[] {
     cwd: s.cwd,
     isActive: s.activeSessionId !== null,
     provider: s.providerId,
+    codexStatus: s.codex
+      ? { state: s.codex.isReady ? 'ready' as const : 'indexing' as const }
+      : undefined,
   }))
 }
 
@@ -330,7 +343,10 @@ export async function sendPrompt(agentId: string, message: string): Promise<stri
   state.activeSessionId = sessionId
   log.session(`agent:${agentId}`, agentId, state.providerId)
 
-  // Build options for the provider (include codex intelligence for Claude)
+  // Wait for codex to be ready before building options (ensures MCP tools + hooks are passed)
+  if (state.providerId === 'claude' && !state.codex) {
+    await state.codexPromise
+  }
   const codexMcp = state.providerId === 'claude' && state.codex ? state.codex.getMcpServers() : undefined
   const codexHooks = state.providerId === 'claude' && state.codex ? state.codex.getHooks() : undefined
 
@@ -666,7 +682,10 @@ export async function sendPromptWithOptions(
   const sessionId = randomUUID()
   state.activeSessionId = sessionId
 
-  // Include codex intelligence for Claude
+  // Wait for codex to be ready before building options (ensures MCP tools + hooks are passed)
+  if (state.providerId === 'claude' && !state.codex) {
+    await state.codexPromise
+  }
   const codexMcp = state.providerId === 'claude' && state.codex ? state.codex.getMcpServers() : undefined
   const codexHooks = state.providerId === 'claude' && state.codex ? state.codex.getHooks() : undefined
 

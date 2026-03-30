@@ -67,6 +67,7 @@ export interface AgentDescriptor {
   cwd: string
   isActive: boolean
   provider: ProviderId
+  codexStatus?: CodexStatus
 }
 
 // Slash command definition
@@ -105,6 +106,26 @@ export interface PhaseInfo {
   detail: string // e.g. "Reading package.json..."
   color: string
   startedAt: number
+  activeTool?: ActiveToolInfo
+}
+
+// Codex indexing status
+export type CodexStatusState = 'loading' | 'indexing' | 'ready' | 'error'
+
+export interface CodexStatus {
+  state: CodexStatusState
+  filesProcessed?: number
+  totalFiles?: number
+  symbols?: number
+  error?: string
+}
+
+// Active tool tracking (for progress display)
+export interface ActiveToolInfo {
+  toolUseId: string
+  toolName: string
+  startTs: number
+  elapsed: number
 }
 
 // File activity tracking
@@ -272,6 +293,7 @@ export const IPC = {
   // Terminal
   TERM_CREATE: 'term:create',
   TERM_CREATE_CLAUDE: 'term:create-claude',
+  TERM_CREATE_CODEX: 'term:create-codex',
   TERM_WRITE_AGENT: 'term:write-agent',
   TERM_BUFFER: 'term:buffer',
   TERM_WRITE: 'term:write',
@@ -301,6 +323,8 @@ export const IPC = {
   // Logging
   LOG_GET_USAGE: 'log:get-usage',
   LOG_GET_PATH: 'log:get-path',
+  // Codex status (main -> renderer)
+  CODEX_STATUS: 'codex:status',
   // Resource stats (observability)
   RESOURCE_STATS: 'resource:stats',
 } as const

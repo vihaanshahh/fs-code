@@ -51,6 +51,7 @@ export default function FluidBackground() {
 
   return (
     <div
+      key={theme}
       ref={containerRef}
       style={{
         position: 'absolute',

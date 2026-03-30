@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react'
 import {
-  lightTheme,
-  darkTheme,
+  themes,
+  themeList,
   fonts,
   spacing,
   type ThemeMode,
@@ -21,36 +21,48 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null)
 
+const themeIds = themeList.map(t => t.id)
+
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeRaw] = useState<ThemeMode>(() => {
     try {
-      return (localStorage.getItem('fs-code-theme') as ThemeMode) || 'dark'
+      const stored = localStorage.getItem('fs-code-theme') as ThemeMode
+      return stored && themes[stored] ? stored : 'dark'
     } catch {
       return 'dark'
     }
   })
 
   const setTheme = useCallback((mode: ThemeMode) => {
-    setThemeRaw(mode)
+    if (themes[mode]) setThemeRaw(mode)
   }, [])
 
   const toggleTheme = useCallback(() => {
-    setThemeRaw(prev => (prev === 'light' ? 'dark' : 'light'))
+    setThemeRaw(prev => {
+      const idx = themeIds.indexOf(prev)
+      return themeIds[(idx + 1) % themeIds.length]
+    })
   }, [])
 
   // Persist + apply class to html
   useEffect(() => {
     localStorage.setItem('fs-code-theme', theme)
     const html = document.documentElement
-    html.classList.toggle('light', theme === 'light')
-    html.classList.toggle('dark', theme === 'dark')
-    // Update base styles for pre-React content (scrollbars, body)
-    document.body.style.background = theme === 'light' ? '#ffffff' : '#1a1a1a'
-    document.body.style.color = theme === 'light' ? '#1b1b1b' : '#f9f9f9'
+    // Remove all theme classes, add current
+    for (const id of themeIds) html.classList.remove(id)
+    html.classList.add(theme)
+    // Also set light/dark for any CSS that checks those
+    const isDark = theme !== 'light'
+    html.classList.toggle('light', !isDark)
+    html.classList.toggle('dark', isDark)
+    // Update base styles for pre-React content
+    const t = themes[theme]
+    document.body.style.background = t.colors.bg
+    document.body.style.color = t.colors.text
   }, [theme])
 
   const value = useMemo<ThemeContextValue>(() => {
-    const t = theme === 'light' ? lightTheme : darkTheme
+    const t = themes[theme]
     return {
       colors: t.colors,
       fonts: t.fonts,

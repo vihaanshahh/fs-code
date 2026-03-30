@@ -29,6 +29,12 @@ export interface IndexStats {
   timeMs: number
 }
 
+export interface IndexProgress {
+  filesProcessed: number
+  totalFiles: number
+  symbols: number
+}
+
 /** Cache import resolutions to avoid repeated fs.existsSync calls (up to 10 per import).
  *  Capped to prevent unbounded growth from watcher-triggered reindexFile calls. */
 const MAX_IMPORT_CACHE = 10_000
@@ -92,7 +98,7 @@ const MAX_FILE_SIZE = 512 * 1024 // 512KB
  * Called directly in the worker thread (or in tests). Do NOT call this
  * from the Electron main process — use `runIndexInWorker()` instead.
  */
-export function indexProjectSync(rootDir: string, db: Database.Database, options?: { verbose?: boolean }): IndexStats {
+export function indexProjectSync(rootDir: string, db: Database.Database, options?: { verbose?: boolean; onProgress?: (p: IndexProgress) => void }): IndexStats {
   const start = performance.now()
   const files = collectFiles(rootDir)
   const verbose = options?.verbose ?? false
@@ -267,6 +273,9 @@ export function indexProjectSync(rootDir: string, db: Database.Database, options
       if (verbose && indexedFiles % 100 === 0) {
         console.log(`[codex] Indexed ${indexedFiles} files...`)
       }
+      if (options?.onProgress && (indexedFiles + skippedFiles) % 50 === 0) {
+        options.onProgress({ filesProcessed: indexedFiles + skippedFiles, totalFiles: files.length, symbols: totalSymbols })
+      }
     }
 
     // Remove stale files
@@ -356,7 +365,7 @@ function releaseWorkerSlot(): void {
  * @param dbPathOverride — pass a direct DB path (for tests).
  *   If omitted, uses the standard app-data location.
  */
-export async function runIndexInWorker(cwd: string, dbPathOverride?: string): Promise<IndexStats> {
+export async function runIndexInWorker(cwd: string, dbPathOverride?: string, onProgress?: (p: IndexProgress) => void): Promise<IndexStats> {
   await acquireWorkerSlot()
   try {
     return await new Promise<IndexStats>((resolve, reject) => {
@@ -379,10 +388,14 @@ export async function runIndexInWorker(cwd: string, dbPathOverride?: string): Pr
       })
 
       worker.on('message', (msg) => {
-        if (msg && typeof msg === 'object' && 'error' in msg) {
-          reject(new Error(msg.error))
-        } else {
-          resolve(msg as IndexStats)
+        if (msg && typeof msg === 'object') {
+          if ('error' in msg) {
+            reject(new Error(msg.error))
+          } else if (msg.type === 'progress' && onProgress) {
+            onProgress(msg as IndexProgress)
+          } else if (msg.type === 'complete' || !('type' in msg)) {
+            resolve(msg as IndexStats)
+          }
         }
       })
 

@@ -94,6 +94,8 @@ const api = {
     ipcRenderer.invoke(IPC.TERM_CREATE, { agentId, cwd }),
   createClaudeTerminal: (agentId: string, cwd: string, resume?: string): Promise<{ terminalId: string; isNew: boolean }> =>
     ipcRenderer.invoke(IPC.TERM_CREATE_CLAUDE, { agentId, cwd, resume }),
+  createCodexTerminal: (agentId: string, cwd: string): Promise<{ terminalId: string; isNew: boolean }> =>
+    ipcRenderer.invoke(IPC.TERM_CREATE_CODEX, { agentId, cwd }),
   getTerminalBuffer: (terminalId: string): Promise<{ data: string }> =>
     ipcRenderer.invoke(IPC.TERM_BUFFER, { terminalId }),
   writeTerminal: (terminalId: string, data: string) =>
@@ -190,6 +192,13 @@ const api = {
     const handler = (_: any, data: any) => cb(data)
     ipcRenderer.on(IPC.RESOURCE_STATS, handler)
     return () => ipcRenderer.removeListener(IPC.RESOURCE_STATS, handler)
+  },
+
+  // Codex status (indexing progress)
+  onCodexStatus: (cb: (data: any) => void) => {
+    const handler = (_: any, data: any) => cb(data)
+    ipcRenderer.on(IPC.CODEX_STATUS, handler)
+    return () => ipcRenderer.removeListener(IPC.CODEX_STATUS, handler)
   },
 }
 

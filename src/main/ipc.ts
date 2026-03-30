@@ -228,6 +228,10 @@ export function registerIpcHandlers() {
     return terminal.createClaudeTerminal(agentId, cwd, { resume })
   })
 
+  ipcMain.handle(IPC.TERM_CREATE_CODEX, async (_, { agentId, cwd }: { agentId: string; cwd: string }) => {
+    return terminal.createCodexTerminal(agentId, cwd)
+  })
+
   ipcMain.handle(IPC.TERM_WRITE_AGENT, async (_, { agentId, data }: { agentId: string; data: string }) => {
     terminal.writeToAgentTerminal(agentId, data)
   })

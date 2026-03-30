@@ -14,6 +14,7 @@
 
 import type Database from 'better-sqlite3'
 import type { McpSdkServerConfigWithInstance, HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk'
+import type { CodexStatus } from '../../shared/types'
 import { openDatabase } from './db'
 import { runIndexInWorker } from './indexer'
 import { createCodexMcpServer } from './mcp-server'
@@ -28,8 +29,22 @@ export class CodexManager {
   private indexReady = false
   private indexPromise: Promise<void> | null = null
   private disposed = false
+  private statusCallback: ((status: CodexStatus) => void) | null = null
 
   constructor(private readonly cwd: string) {}
+
+  /** Register a callback for status changes (loading, indexing, ready, error) */
+  onStatus(cb: (status: CodexStatus) => void): void {
+    this.statusCallback = cb
+    // Emit current state immediately if already known
+    if (this.indexReady) {
+      cb({ state: 'ready' })
+    }
+  }
+
+  private emitStatus(status: CodexStatus): void {
+    if (!this.disposed) this.statusCallback?.(status)
+  }
 
   /**
    * Initialize the code intelligence engine.
@@ -40,6 +55,8 @@ export class CodexManager {
    */
   async initialize(): Promise<void> {
     try {
+      this.emitStatus({ state: 'loading' })
+
       // 1. Open/create DB in app data (main-thread connection for queries)
       this.db = openDatabase(this.cwd)
       console.log(`[codex] opened database for ${this.cwd}`)
@@ -73,17 +90,24 @@ export class CodexManager {
   private async runInitialIndex(): Promise<void> {
     if (!this.db) return
     try {
+      this.emitStatus({ state: 'indexing', filesProcessed: 0, totalFiles: 0, symbols: 0 })
       const start = performance.now()
       // Run indexing in a worker thread — completely off the main thread
-      const stats = await runIndexInWorker(this.cwd)
+      const stats = await runIndexInWorker(this.cwd, undefined, (p) => {
+        if (!this.disposed) {
+          this.emitStatus({ state: 'indexing', filesProcessed: p.filesProcessed, totalFiles: p.totalFiles, symbols: p.symbols })
+        }
+      })
       // Guard: if manager was disposed while worker was running, don't update state
       if (this.disposed) return
       const elapsed = (performance.now() - start).toFixed(0)
       console.log(`[codex] indexed ${stats.totalFiles} files (${stats.indexedFiles} new, ${stats.skippedFiles} cached) in ${elapsed}ms — ${stats.symbols} symbols, ${stats.edges} edges`)
       this.indexReady = true
+      this.emitStatus({ state: 'ready', filesProcessed: stats.totalFiles, totalFiles: stats.totalFiles, symbols: stats.symbols })
     } catch (err) {
       if (this.disposed) return
       console.error('[codex] initial index failed:', err)
+      this.emitStatus({ state: 'error', error: String(err) })
     }
   }
 

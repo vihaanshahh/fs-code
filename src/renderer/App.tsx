@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import JourneyBar from './components/journey/JourneyBar'
 import AgentGrid from './components/grid/AgentGrid'
+import AgentTabs from './components/grid/AgentTabs'
 import MinimizedAgentsPill from './components/grid/MinimizedAgentsPill'
-import FileActivitySidebar from './components/activity/FileActivitySidebar'
-import FileDetailModal from './components/activity/FileDetailModal'
+import FileExplorer from './components/activity/FileExplorer'
 import SourceControlSidebar from './components/scm/SourceControlSidebar'
 // TerminalDrawer removed — agent cells now run claude CLI directly in a terminal
 import CommandPalette from './components/palette/CommandPalette'
@@ -13,7 +13,6 @@ import HelpOverlay from './components/palette/HelpOverlay'
 import { useAgentManager, saveSession } from './hooks/useAgentManager'
 import { useAgent } from './hooks/useAgent'
 import { useJourneyPhase } from './hooks/useJourneyPhase'
-import { useFileActivity } from './hooks/useFileActivity'
 import { useContextUsage } from './hooks/useContextUsage'
 import { useApiUsage } from './hooks/useApiUsage'
 import { useAuth } from './hooks/useAuth'
@@ -22,9 +21,10 @@ import { getRecentFolders } from './hooks/useRecentFolders'
 import { resolveAlias } from './components/palette/commands'
 import { api } from './lib/api'
 import SettingsPanel from './components/settings/SettingsPanel'
+import ThemePicker from './components/settings/ThemePicker'
 import { useSettings } from './hooks/useSettings'
 import { useUpdateStatus } from './hooks/useUpdateStatus'
-import type { TrackedFile, UIMessage } from '../shared/types'
+import type { UIMessage } from '../shared/types'
 
 /** Copy text to clipboard (works in Electron renderer) */
 function copyToClipboard(text: string) {
@@ -69,7 +69,6 @@ export default function App() {
   const { colors, spacing, agentColors, fonts, toggleTheme } = useTheme()
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [selectedFile, setSelectedFile] = useState<TrackedFile | null>(null)
   const [showCommandPalette, setShowCommandPalette] = useState(false)
   const [showShortcutOverlay, setShowShortcutOverlay] = useState(false)
   const [showSessionPicker, setShowSessionPicker] = useState(false)
@@ -109,15 +108,9 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handler)
   }, [manager.agents, manager.focusedId])
 
-  // Track focused agent's state for JourneyBar / FileActivity / StatusBar
+  // Track focused agent's state for JourneyBar / StatusBar
   const focusedAgent = useAgent(manager.focusedId || '__none__')
   const phaseInfo = useJourneyPhase(focusedAgent.messages, focusedAgent.isActive, null)
-  const { files, totalFiles, loading: filesLoading } = useFileActivity(
-    focusedAgent.messages,
-    manager.focusedAgent?.id,
-    manager.focusedAgent?.name,
-    manager.focusedAgent?.cwd,
-  )
   const contextUsage = useContextUsage()
   const apiUsage = useApiUsage()
   const updateStatus = useUpdateStatus()
@@ -635,31 +628,14 @@ export default function App() {
           )}
         </div>
 
-        {/* Center: phase pill — absolutely positioned for true centering */}
-        {phaseInfo.phase !== 'idle' && phaseInfo.phase !== 'done' && (
-          <div style={{
-            position: 'absolute',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            pointerEvents: 'none',
-          }}>
-            <div style={{
-              padding: '3px 10px',
-              borderRadius: 12,
-              fontSize: 11,
-              fontWeight: 600,
-              background: `${phaseInfo.color}15`,
-              color: phaseInfo.color,
-              border: `1px solid ${phaseInfo.color}30`,
-              transition: 'all 0.3s ease',
-            }}>
-              {phaseInfo.label}
-            </div>
-          </div>
-        )}
+        {/* Center: journey phases — absolutely positioned for true centering */}
+        <div style={{
+          position: 'absolute',
+          left: '50%',
+          transform: 'translateX(-50%)',
+        }}>
+          <JourneyBar agents={manager.agents} agentColors={agentColors} focusedId={manager.focusedId} onAnyAwaiting={setAnyAwaiting} />
+        </div>
 
         {/* Right: new agent + theme toggle + terminal toggle */}
         <div style={{ WebkitAppRegion: 'no-drag' as any, display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -672,13 +648,7 @@ export default function App() {
               +
             </span>
           )}
-          <span
-            style={{ cursor: 'pointer', fontSize: 13, color: colors.textMuted }}
-            onClick={toggleTheme}
-            title="Toggle Theme"
-          >
-            {'\u25D0'}
-          </span>
+          <ThemePicker />
           <span
             style={{ cursor: 'pointer', fontSize: 14, color: showSettings ? colors.text : colors.textMuted, position: 'relative' }}
             onClick={() => setShowSettings(v => !v)}
@@ -693,9 +663,6 @@ export default function App() {
           <SettingsPanel onClose={() => setShowSettings(false)} />
         )}
       </div>
-
-      {/* Journey bar */}
-      <JourneyBar agents={manager.agents} agentColors={agentColors} focusedId={manager.focusedId} onAnyAwaiting={setAnyAwaiting} />
 
       {/* Update banner */}
       {updateStatus.status?.state === 'downloaded' && (
@@ -744,7 +711,8 @@ export default function App() {
       {/* Main content */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         <div style={{ flex: 1, overflow: 'hidden', minWidth: 0 }}>
-          <AgentGrid
+          {/* Grid mode commented out for now */}
+          <AgentTabs
             agents={manager.agents}
             focusedId={manager.focusedId}
             canAddAgent={manager.canAddAgent}
@@ -778,7 +746,7 @@ export default function App() {
               userSelect: 'none',
             }}
           >
-            {activePanel === 'scm' ? 'Source Control' : `Files (${files.length})`}
+            {activePanel === 'scm' ? 'Source Control' : 'Explorer'}
           </div>
         ) : (
           <div style={{
@@ -826,13 +794,10 @@ export default function App() {
                   onToggle={() => setSidebarCollapsed(true)}
                 />
               ) : (
-                <FileActivitySidebar
-                  files={files}
+                <FileExplorer
+                  cwd={manager.focusedAgent?.cwd}
                   collapsed={false}
-                  loading={filesLoading}
                   onToggle={() => setSidebarCollapsed(true)}
-                  onFileClick={(file) => setSelectedFile(file)}
-                  agentName={manager.agents.length > 1 ? manager.focusedAgent?.name : undefined}
                 />
               )}
             </div>
@@ -873,7 +838,7 @@ export default function App() {
               {apiUsage.sessionPct}%{apiUsage.sessionReset ? ` · ${apiUsage.sessionReset}` : ''}
             </span>
           )}
-          <span>{totalFiles} files</span>
+          <span>{manager.agents.length} agent{manager.agents.length !== 1 ? 's' : ''}</span>
           {focusedAgent.isActive && (
             <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <span style={{
@@ -906,9 +871,6 @@ export default function App() {
         </div>
       </div>
 
-      {selectedFile && (
-        <FileDetailModal file={selectedFile} cwd={manager.focusedAgent?.cwd} onClose={() => setSelectedFile(null)} />
-      )}
       {showCommandPalette && (
         <CommandPalette onAction={handlePaletteAction} onClose={() => setShowCommandPalette(false)} />
       )}

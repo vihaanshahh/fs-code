@@ -4,37 +4,6 @@ import { useSettings } from '../../hooks/useSettings'
 import ProviderSection from './ProviderSection'
 import UpdateSection from './UpdateSection'
 
-function ToggleSwitch({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
-  const { colors } = useTheme()
-  return (
-    <div
-      onClick={() => onChange(!value)}
-      style={{
-        width: 36,
-        height: 20,
-        borderRadius: 10,
-        background: value ? colors.blue : `${colors.textMuted}30`,
-        cursor: 'pointer',
-        position: 'relative',
-        transition: 'background 0.2s ease',
-        flexShrink: 0,
-      }}
-    >
-      <div style={{
-        width: 16,
-        height: 16,
-        borderRadius: 8,
-        background: '#fff',
-        position: 'absolute',
-        top: 2,
-        left: value ? 18 : 2,
-        transition: 'left 0.2s ease',
-        boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-      }} />
-    </div>
-  )
-}
-
 export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const { colors, fonts } = useTheme()
   const [settings, update] = useSettings()
@@ -109,56 +78,6 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
         </span>
       </div>
 
-      {/* Settings items */}
-      <div style={{ padding: '8px 0' }}>
-        {/* Section header */}
-        <div style={{
-          padding: '8px 16px 4px',
-          fontSize: 10,
-          fontWeight: 600,
-          color: colors.textMuted,
-          textTransform: 'uppercase',
-          letterSpacing: '0.5px',
-        }}>
-          Input
-        </div>
-
-        {/* @ File Mentions toggle */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 12,
-            padding: '10px 16px',
-            cursor: 'pointer',
-          }}
-          onClick={() => update({ atMentionsEnabled: !settings.atMentionsEnabled })}
-        >
-          <div style={{ flex: 1 }}>
-            <div style={{
-              fontSize: 13,
-              fontWeight: 500,
-              color: colors.text,
-              marginBottom: 2,
-            }}>
-              @ File Mentions
-            </div>
-            <div style={{
-              fontSize: 11,
-              color: colors.textMuted,
-              lineHeight: 1.4,
-            }}>
-              Type @ to search and attach files as context.
-              Disable if causing issues.
-            </div>
-          </div>
-          <ToggleSwitch
-            value={settings.atMentionsEnabled}
-            onChange={v => update({ atMentionsEnabled: v })}
-          />
-        </div>
-      </div>
-
       {/* Providers section */}
       <div style={{ borderTop: `1px solid ${colors.border}` }}>
         <div style={{
@@ -176,6 +95,46 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           onDefaultChange={(id) => update({ defaultProvider: id })}
         />
       </div>
+
+      {/* Layout section */}
+      {/* Layout picker commented out — grid mode disabled for now */}
+      {/*
+      <div style={{ borderTop: `1px solid ${colors.border}` }}>
+        <div style={{
+          padding: '8px 16px 4px',
+          fontSize: 10,
+          fontWeight: 600,
+          color: colors.textMuted,
+          textTransform: 'uppercase',
+          letterSpacing: '0.5px',
+        }}>
+          Layout
+        </div>
+        <div style={{ padding: '6px 16px 10px', display: 'flex', gap: 6 }}>
+          {(['grid', 'tabs'] as const).map(mode => (
+            <div
+              key={mode}
+              onClick={() => update({ layoutMode: mode })}
+              style={{
+                flex: 1,
+                padding: '6px 0',
+                textAlign: 'center',
+                fontSize: 11,
+                fontWeight: settings.layoutMode === mode ? 600 : 400,
+                color: settings.layoutMode === mode ? colors.text : colors.textMuted,
+                background: settings.layoutMode === mode ? `${colors.blue}12` : 'transparent',
+                border: `1px solid ${settings.layoutMode === mode ? colors.blue + '40' : colors.border}`,
+                borderRadius: 6,
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              {mode === 'grid' ? 'Grid' : 'Tabs'}
+            </div>
+          ))}
+        </div>
+      </div>
+      */}
 
       {/* Updates section */}
       <div style={{ borderTop: `1px solid ${colors.border}` }}>

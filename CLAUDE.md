@@ -2,52 +2,79 @@
 # Project: fs-code
 
 ## Architecture
-- **Languages**: tsx (25 files), typescript (24 files), json (5 files), html (1 files)
-- **Size**: 55 files, 242 symbols, 1001 relationships
+- **Languages**: typescript (56 files), tsx (28 files), json (6 files), javascript (1 files), html (1 files)
+- **Size**: 92 files, 510 symbols, 2309 relationships
 
 ## Key Symbols (by structural importance)
-1. `useTheme` [function] in src/renderer/ThemeContext.tsx
-2. `API` [type] in src/preload/index.ts
-3. `UIMessage` [type] in src/shared/types.ts
-4. `PermissionRequest` [interface] in src/shared/types.ts
-5. `ThemeColors` [type] in src/renderer/theme.ts
-6. `buildPhaseColorMap` [function] in src/renderer/theme.ts
-7. `AuthStatus` [interface] in src/shared/types.ts
-8. `PermissionResponse` [interface] in src/shared/types.ts
-9. `AgentDescriptor` [interface] in src/shared/types.ts
+1. `UIMessage` [type] in src/shared/types.ts
+2. `useTheme` [function] in src/renderer/ThemeContext.tsx
+3. `API` [type] in src/preload/index.ts
+4. `ProviderId` [type] in src/shared/types.ts
+5. `PermissionMode` [type] in src/shared/types.ts
+6. `AuthStatus` [interface] in src/shared/types.ts
+7. `PermissionRequest` [interface] in src/shared/types.ts
+8. `getOrPrepare` [function] in src/main/codex/db.ts
+9. `FileEntry` [interface] in src/shared/types.ts
 10. `GitFileStatus` [interface] in src/shared/types.ts
-11. `FileEntry` [interface] in src/shared/types.ts
-12. `PermissionMode` [type] in src/shared/types.ts
-13. `SlashCommand` [interface] in src/shared/types.ts
-14. `KeyboardShortcut` [interface] in src/shared/types.ts
-15. `ThemeMode` [type] in src/renderer/theme.ts
+11. `JsonlProvider` [class] in src/main/providers/jsonl-provider.ts
+12. `ThemeColors` [type] in src/renderer/theme.ts
+13. `ModelInfo` [interface] in src/main/providers/provider.ts
+14. `getLanguage` [function] in src/main/codex/parser.ts
+15. `reindexFile` [function] in src/main/codex/indexer.ts
 
 ## Module Map
-src/ (49 files, 242 symbols) → imports from: (none — leaf dependency)
-./ (6 files, 0 symbols) → imports from: (none — leaf dependency)
+src/ (84 files, 510 symbols) → imports from: (none — leaf dependency)
+./ (8 files, 0 symbols) → imports from: (none — leaf dependency)
 
 ## File Map (file → key exports)
 
+- `.mcp.json`
 - `electron.vite.config.ts`
 - `package-lock.json`
 - `package.json`
-- `src/main/agent.ts` — setMainWindow, createAgent, closeAgent, listAgents, sendPrompt, stopSession, setPermissionMode, getPermissionMode +10 more
-- `src/main/agent-env.ts` — buildCleanEnv, getCliAccessFlag, getCliAccessError (cross-platform env sanitization, extracted for testability)
-- `src/main/agent-env.test.ts` — Tests for Windows/Unix environment handling (vitest)
-- `src/main/auth.ts` — getAuthStatus, getClaudePath, ensureClaudeBin, login, logout, fetchUsage
-- `src/main/cli-install.ts` — installCLI, uninstallCLI, isCLIInstalled
-- `src/main/file-system.ts` — readDirectory, readFileContent, writeFileContent, getGitStatus, getGitDiff, getGitStatusDetailed, gitStage, gitUnstage +2 more
+- `src/main/agent-env.test.ts`
+- `src/main/agent-env.ts` — buildCleanEnv, getCliAccessFlag, getCliAccessError
+- `src/main/agent.ts` — setMainWindow, getResourceStats, startMemoryMonitor, createAgent, closeAgent, listAgents, sendPrompt, stopSession +12 more
+- `src/main/auth.ts` — getClaudePath, getAuthStatus, ensureClaudeBin, login, logout, fetchUsage
+- `src/main/cli-install.ts` — isCLIInstalled, installCLI, uninstallCLI, autoInstallCLI
+- `src/main/codex/codex-await.test.ts`
+- `src/main/codex/codex.test.ts`
+- `src/main/codex/collector.test.ts`
+- `src/main/codex/collector.ts` — collectFiles
+- `src/main/codex/db.test.ts`
+- `src/main/codex/db.ts` — getOrPrepare, clearFileData, openDatabase, getIndexDir, isFileUnchangedByMtime, getOrCreateFile, insertSymbol, insertEdge +7 more
+- `src/main/codex/hooks.ts` — createCodexHooks
+- `src/main/codex/index.ts` — CodexManager, acquireManager, releaseManager
+- `src/main/codex/indexer-worker.ts`
+- `src/main/codex/indexer.ts` — reindexFile, runIndexInWorker, IndexStats, IndexProgress, indexProjectSync
+- `src/main/codex/manager.ts` — CodexManager, acquireManager, releaseManager
+- `src/main/codex/mcp-server.ts` — createCodexMcpServer
+- `src/main/codex/parser.ts` — getLanguage, isSupportedFile, hashFile, parseFile, ExtractedParam, ExtractedSymbol, ExtractedImport, ExtractedCall +2 more
+- `src/main/codex/query.ts` — brief, preEditContext, search, getCallers, getContext, getImpact, getDeps, getRank +21 more
+- `src/main/codex/watcher.ts` — CodexWatcher, startWatcher
+- `src/main/file-system.ts` — readDirectory, readFileContent, writeFileContent, getGitStatus, getGitDiff, getGitStatusDetailed, gitStage, gitUnstage +3 more
 - `src/main/index.ts`
 - `src/main/ipc.ts` — registerIpcHandlers
-- `src/main/terminal.ts` — closeTerminal, setMainWindow, getOrCreateTerminal, getBuffer, writeToTerminal, resizeTerminal, closeAgentTerminal, closeAll
+- `src/main/keystore.ts` — setApiKey, getApiKey, removeApiKey, hasApiKey
+- `src/main/logger.ts` — log
+- `src/main/providers/claude-provider.ts` — ClaudeProvider
+- `src/main/providers/copilot-provider.ts` — createCopilotProvider
+- `src/main/providers/gemini-provider.ts` — createGeminiProvider
+- `src/main/providers/index.ts` — createProvider, ProviderDriver, ClaudeProvider, detectProviders, setApiKeyGetter, ProviderHandle, ModelInfo, PermissionHandler +1 more
+- `src/main/providers/jsonl-provider.test.ts`
+- `src/main/providers/jsonl-provider.ts` — JsonlProvider, JsonlProviderConfig, extractTextFromJson
+- `src/main/providers/openai-provider.ts` — createOpenAIProvider
+- `src/main/providers/provider.ts` — ModelInfo, ProviderHandle, PermissionHandler, SendPromptOptions, ProviderDriver
+- `src/main/terminal.ts` — writeToTerminal, closeTerminal, ensureClaudeExConfig, setMainWindow, getOrCreateTerminal, getBuffer, writeToAgentTerminal, resizeTerminal +3 more
+- `src/main/updater.ts` — checkForUpdates, setMainWindow, initAutoUpdater, downloadUpdate, installUpdate
 - `src/preload/index.ts` — API
 - `src/renderer/App.tsx` — App
 - `src/renderer/ThemeContext.tsx` — useTheme, ThemeProvider
 - `src/renderer/components/activity/FileActivitySidebar.tsx` — FileActivitySidebar
 - `src/renderer/components/activity/FileDetailModal.tsx` — FileDetailModal
+- `src/renderer/components/activity/FileExplorer.tsx` — FileExplorer
 - `src/renderer/components/chat/ConversationPanel.tsx` — ConversationPanel
-- `src/renderer/components/chat/MarkdownRenderer.tsx` — MarkdownRenderer
-- `src/renderer/components/grid/AddAgentButton.tsx` — AddAgentButton
+- `src/renderer/components/chat/MarkdownRenderer.tsx`
 - `src/renderer/components/grid/AgentCell.tsx` — AgentCell
 - `src/renderer/components/grid/AgentGrid.tsx` — AgentGrid
 - `src/renderer/components/grid/FluidBackground.tsx` — FluidBackground
@@ -57,74 +84,113 @@ src/ (49 files, 242 symbols) → imports from: (none — leaf dependency)
 - `src/renderer/components/palette/HelpOverlay.tsx` — HelpOverlay
 - `src/renderer/components/palette/SessionPicker.tsx` — SessionPicker
 - `src/renderer/components/palette/ShortcutOverlay.tsx` — ShortcutOverlay
-- `src/renderer/components/palette/SlashDropdown.tsx` — SlashDropdown
-- `src/renderer/components/palette/commands.ts` — slashCommands, keyboardShortcuts, paletteCommands, resolveAlias, aliasMap, PaletteCommand
+- `src/renderer/components/palette/commands.ts` — slashCommands, keyboardShortcuts, paletteCommands, resolveAlias
 - `src/renderer/components/scm/ContextMenu.tsx` — ContextMenuItem, ContextMenu
 - `src/renderer/components/scm/DiffView.tsx` — DiffView
 - `src/renderer/components/scm/SourceControlSidebar.tsx` — SourceControlSidebar
+- `src/renderer/components/settings/ProviderSection.tsx` — ProviderSection
+- `src/renderer/components/settings/SettingsPanel.tsx` — SettingsPanel
+- `src/renderer/components/settings/ThemePicker.tsx` — ThemePicker
+- `src/renderer/components/settings/UpdateSection.tsx` — UpdateSection
 - `src/renderer/components/shared/ConfirmDialog.tsx` — ConfirmDialog
 - `src/renderer/components/shared/DiffDisplay.tsx` — DiffHunkHeader, DiffLineRow, CollapsedContext
-- `src/renderer/components/shared/diff-utils.ts` — DiffLine, computeLineDiff, splitIntoHunks, newFileDiffLines, deletedFileDiffLines, countDiffLines, DiffHunk
+- `src/renderer/components/shared/diff-utils.test.ts`
+- `src/renderer/components/shared/diff-utils.ts` — DiffLine, computeLineDiff, splitIntoHunks, newFileDiffLines, deletedFileDiffLines, countDiffLines
 - `src/renderer/components/terminal/Terminal.tsx` — TerminalPanel
 - `src/renderer/components/terminal/TerminalDrawer.tsx` — TerminalDrawer
 - `src/renderer/hooks/useAgent.ts` — useAgent, clearAgentCache
 - `src/renderer/hooks/useAgentManager.ts` — saveSession, useAgentManager
 - `src/renderer/hooks/useApiUsage.ts` — useApiUsage, UsageAPIData
 - `src/renderer/hooks/useAuth.ts` — useAuth
-- `src/renderer/hooks/useContextUsage.ts` — useContextUsage, ContextUsage
+- `src/renderer/hooks/useContextUsage.ts` — useContextUsage
 - `src/renderer/hooks/useFileActivity.ts` — useFileActivity
 - `src/renderer/hooks/useJourneyPhase.ts` — useJourneyPhase
-- `src/renderer/hooks/useRecentFolders.ts` — addRecentFolder, getRecentFolders, RecentFolder
-- `src/renderer/hooks/useSourceControl.ts` — useSourceControl
-- `src/renderer/hooks/useTotalCost.ts` — useTotalCost
-- `src/renderer/index.html`
-- `src/renderer/lib/api.ts` — api
-- `src/renderer/main.tsx`
-- `src/renderer/theme.ts` — ThemeColors, ThemeMode, fonts, spacing, lightTheme, darkTheme, phaseLabelMap
-- `src/shared/types.ts` — IPC, UIMessage, PermissionRequest, AuthStatus, PermissionResponse, AgentDescriptor, GitFileStatus, FileEntry +13 more
-- `tsconfig.json`
-- `tsconfig.node.json`
-- `tsconfig.web.json`
-
-## Testing
-- **Runner**: Vitest (`npm test` or `vitest run`)
-- Tests live next to source files as `*.test.ts`
-- `src/main/agent-env.test.ts` — 25 tests covering Windows & Unix env sanitization, case-insensitive matching, dangerous var blocking, CLI access flags
-
-## Cross-Platform (Windows) Notes
-- `agent-env.ts` handles env sanitization for both Windows and Unix — Windows requires `SYSTEMROOT`, `WINDIR`, `COMSPEC`, `PATHEXT`, `USERPROFILE`, `APPDATA`, etc. to be passed through or subprocess spawning breaks
-- Windows env var names are case-insensitive (`Path` vs `PATH`) — matching is normalized to uppercase
-- `fs.constants.X_OK` does not work on Windows (always fails) — use `R_OK` instead for CLI accessibility checks
-- `XDG_` prefixes are Linux-only; not passed through on Windows
-- All path construction uses `path.join()` (never hardcoded `/` or `\`)
+- `src/renderer/hooks/useRecentFolders.ts` — addRecentFolder, getRecentFolders
+- `src/renderer/hooks/useResourceStats.ts` — useResourceStats
+- `src/renderer/hooks/useSettings.ts` — useSettings, AppSettings
+- ... and 12 more files
 
 ## Codex MCP Tools — USE THESE
 
 This project has a live code index via MCP. **Always prefer these over grep/ripgrep for structural queries.** They are faster, rank-aware, and understand code relationships.
 
-| Tool | Use for |
-|------|---------|
-| `search_code` | Finding symbols by name or description (PageRank-weighted) |
-| `find_files` | Finding files by name/path pattern (glob-style, e.g. `**/*.test.ts`) |
-| `get_file_map` | Complete project map — every file and its exports (the "memory") |
-| `get_symbol` | Full context for a symbol before modifying it |
-| `get_callers` | Who calls a function — use before renaming/removing |
-| `get_dependents` | What files break if a file changes |
-| `get_dependencies` | What a symbol imports/uses |
-| `get_file_symbols` | All symbols in a file (not just exports) |
-| `find_by_kind` | Find all classes, interfaces, enums, etc. |
-| `get_type_hierarchy` | Who extends/implements a class or interface |
-| `find_dead_exports` | Exported symbols nothing imports (dead code) |
-| `get_pkg_usages` | What files import from a given npm/pip package |
-| `get_architecture` | Project overview, top symbols, module map |
-| `reindex_file` | Re-index a file after major changes |
+### When to use which tool
 
-**Workflow tips:**
-- Before editing a function: `get_symbol` + `get_callers` to understand impact
-- Before refactoring a file: `get_dependents` to know what breaks
-- To find code: `search_code` first (structural), fall back to grep only for literal strings/regex
-- To find files: `find_files` with glob patterns (faster than shell find/ls)
-- After large changes: `reindex_file` to keep the index fresh
+**Finding code** — use instead of Grep/Glob:
+- `search_code` — find symbols by name or description (PageRank-ranked). Use this FIRST for any "where is X" or "find X" query.
+- `find_files` — find files by glob pattern (e.g. `**/*.test.ts`). Use instead of shell find/ls.
+- `get_file_map` — full project map with every file and its exports. Use to orient yourself in an unfamiliar codebase.
+
+**Before modifying code** — always check impact:
+- `get_symbol` — full context for a symbol (code, deps, dependents, co-located symbols). Read this before editing any function/class.
+- `get_callers` — all callers of a function. Check before renaming, changing signatures, or deleting.
+- `get_dependents` — all files transitively affected if a file changes. Check before refactoring exports.
+- `get_dependencies` — what a symbol imports/uses.
+
+**Understanding structure:**
+- `get_file_symbols` — all symbols in a file (not just exports).
+- `find_by_kind` — find all classes, interfaces, enums, etc. across the project.
+- `get_type_hierarchy` — subclasses/implementors of a class or interface.
+- `get_pkg_usages` — files that import a given npm package (use before swapping libraries).
+- `get_architecture` — project overview with top symbols and module dependency map.
+
+**Maintenance:**
+- `find_dead_exports` — exported symbols nothing imports (dead code candidates).
+- `reindex_file` — re-index a file after major edits to keep results fresh.
+- `review_diff` — graph-aware diff review: changed symbols, callers, blast radius, risks.
+
+### Decision guide
+
+| You want to... | Use this | Not this |
+|---|---|---|
+| Find a function/class | `search_code` | Grep/ripgrep |
+| Find files by name | `find_files` | shell find/ls/Glob |
+| See what a file exports | `get_file_symbols` | Read entire file |
+| Check who calls X | `get_callers` | Grep for function name |
+| Understand blast radius | `get_dependents` | Manual file tracing |
+| Find a literal string/regex | Grep (built-in) | — |
+
+## Development Cycle — FOLLOW THIS
+
+For every code change, follow this cycle. Do not skip steps.
+
+### 1. Understand (before touching anything)
+- Run `search_code` or `get_file_map` to locate the relevant code.
+- Run `get_symbol` on every function/class you plan to modify — read its full context, dependencies, and dependents.
+- Run `get_callers` on any function whose signature, behavior, or name will change. Know who depends on it.
+- Run `get_dependents` on any file whose exports will change. Know the blast radius.
+- If unfamiliar with the area, run `get_architecture` to see how modules connect.
+
+### 2. Plan (decide what to change)
+- From step 1, you now know: what the code does, who calls it, and what breaks if it changes.
+- Identify all files and symbols that need updating (not just the primary target — include callers/dependents that must adapt).
+- If the change affects >3 files or an exported API, state the plan before writing code.
+
+### 3. Implement (make the change)
+- Edit the code. Prefer minimal, targeted changes.
+- Update all callers/dependents identified in step 2 — do not leave broken references.
+- After major edits to a file, run `reindex_file` so subsequent queries reflect your changes.
+
+### 4. Verify (confirm nothing broke)
+- Run `get_callers` again on modified symbols — verify every caller still works with the new signature/behavior.
+- Run `get_dependents` on modified files — verify no import is left broken.
+- Run tests if they exist (`npm test`, `pytest`, etc.).
+- If the project has a build step, run it (`npm run build`, `tsc --noEmit`, etc.).
+
+### 5. Review (before committing)
+- Run `review_diff` with target "staged" or "last_commit" to get a graph-aware review of your changes.
+- Check the risk assessment: high-importance symbols modified, cascade risks, broken imports.
+- If risks are flagged, go back to step 4 and address them.
+
+### Quick reference
+
+| Step | Tools | Gate |
+|---|---|---|
+| Understand | `search_code`, `get_symbol`, `get_callers`, `get_dependents` | Know the blast radius |
+| Plan | (your reasoning) | All affected files identified |
+| Implement | Edit + `reindex_file` | Code written |
+| Verify | `get_callers`, `get_dependents`, tests, build | No broken refs, tests pass |
+| Review | `review_diff` | No unaddressed risks |
 
 *Auto-generated by claude-ex. Run `claude-ex generate-docs` to regenerate.*
 <!-- claude-ex:end -->

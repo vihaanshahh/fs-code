@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { useTheme } from '../../ThemeContext'
 import type { DiffLine } from './diff-utils'
 
@@ -82,6 +82,48 @@ export function CollapsedContext({ count }: { count: number }) {
       userSelect: 'none',
     }}>
       ··· {count} unchanged lines hidden ···
+    </div>
+  )
+}
+
+/**
+ * Expandable collapsed context — click to reveal the hidden lines between hunks.
+ * `hiddenLines` are the actual DiffLine[] that were omitted between two hunks.
+ */
+export function ExpandableContext({ count, hiddenLines }: { count: number; hiddenLines: DiffLine[] }) {
+  const { colors, fonts } = useTheme()
+  const [expanded, setExpanded] = useState(false)
+
+  if (count <= 0) return null
+
+  if (expanded) {
+    return (
+      <>
+        {hiddenLines.map((line, i) => <DiffLineRow key={i} line={line} />)}
+      </>
+    )
+  }
+
+  return (
+    <div
+      onClick={() => setExpanded(true)}
+      style={{
+        background: colors.bgSurface,
+        borderTop: `1px solid ${colors.border}`,
+        borderBottom: `1px solid ${colors.border}`,
+        padding: '3px 12px',
+        fontSize: 11,
+        color: colors.textMuted,
+        fontFamily: fonts.mono,
+        textAlign: 'center',
+        userSelect: 'none',
+        cursor: 'pointer',
+        transition: 'background 0.1s ease',
+      }}
+      onMouseEnter={e => { e.currentTarget.style.background = `${colors.blue}12`; e.currentTarget.style.color = colors.blue }}
+      onMouseLeave={e => { e.currentTarget.style.background = colors.bgSurface; e.currentTarget.style.color = colors.textMuted }}
+    >
+      ↕ {count} unchanged lines — click to expand
     </div>
   )
 }

@@ -7,7 +7,7 @@ import {
   computeLineDiff, splitIntoHunks, newFileDiffLines, deletedFileDiffLines, countDiffLines,
   type DiffLine,
 } from '../shared/diff-utils'
-import { DiffHunkHeader, DiffLineRow, CollapsedContext } from '../shared/DiffDisplay'
+import { DiffHunkHeader, DiffLineRow, CollapsedContext, ExpandableContext } from '../shared/DiffDisplay'
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -234,8 +234,35 @@ function TotalDiffView({ filePath, cwd }: { filePath: string; cwd?: string }) {
   })()
 
   const { add, remove } = countDiffLines(diffLines)
-  const hunks = splitIntoHunks(diffLines)
+  const hunks = splitIntoHunks(diffLines, 8)
   const statusInfo = statusLabels[gitData.status] || statusLabels['modified']
+
+  // Pre-compute hidden lines between hunks for expandable gaps
+  const gapsBetweenHunks: { count: number; lines: DiffLine[] }[] = []
+  for (let hi = 1; hi < hunks.length; hi++) {
+    const prevHunk = hunks[hi - 1]
+    const currHunk = hunks[hi]
+    const prevEnd = prevHunk.lines[prevHunk.lines.length - 1]
+    const currStart = currHunk.lines[0]
+
+    const prevEndIdx = diffLines.findIndex(l =>
+      l.oldNum === prevEnd?.oldNum && l.newNum === prevEnd?.newNum && l.content === prevEnd?.content
+    )
+    const currStartIdx = diffLines.findIndex(l =>
+      l.oldNum === currStart?.oldNum && l.newNum === currStart?.newNum && l.content === currStart?.content
+    )
+
+    if (prevEndIdx >= 0 && currStartIdx > prevEndIdx + 1) {
+      gapsBetweenHunks.push({
+        count: currStartIdx - prevEndIdx - 1,
+        lines: diffLines.slice(prevEndIdx + 1, currStartIdx),
+      })
+    } else {
+      const count = (currStart?.oldNum ?? currHunk.oldStart) -
+        (prevEnd?.oldNum ?? 0) - 1
+      gapsBetweenHunks.push({ count: Math.max(0, count), lines: [] })
+    }
+  }
 
   return (
     <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 0 }}>
@@ -282,11 +309,11 @@ function TotalDiffView({ filePath, cwd }: { filePath: string; cwd?: string }) {
         ) : (
           hunks.map((hunk, hi) => (
             <div key={hi}>
-              {hi > 0 && (
-                <CollapsedContext count={
-                  (hunk.lines[0]?.oldNum ?? hunk.oldStart) -
-                  (hunks[hi - 1].lines[hunks[hi - 1].lines.length - 1]?.oldNum ?? 0) - 1
-                } />
+              {hi > 0 && gapsBetweenHunks[hi - 1] && (
+                <ExpandableContext
+                  count={gapsBetweenHunks[hi - 1].count}
+                  hiddenLines={gapsBetweenHunks[hi - 1].lines}
+                />
               )}
               <DiffHunkHeader
                 text={`@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@`}

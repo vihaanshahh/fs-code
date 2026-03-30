@@ -19,8 +19,10 @@ const { cwd, dbPath } = workerData as { cwd: string; dbPath: string }
 let db: ReturnType<typeof openDatabase> | null = null
 try {
   db = openDatabase(cwd, dbPath)
-  const stats = indexProjectSync(cwd, db)
-  parentPort?.postMessage(stats)
+  const stats = indexProjectSync(cwd, db, {
+    onProgress: (p) => parentPort?.postMessage({ type: 'progress', ...p }),
+  })
+  parentPort?.postMessage({ type: 'complete', ...stats })
 } catch (err: any) {
   parentPort?.postMessage({ error: err?.message || String(err) })
 } finally {

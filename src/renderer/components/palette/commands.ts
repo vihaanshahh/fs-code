@@ -39,7 +39,7 @@ export const slashCommands: SlashCommand[] = [
   // === View ===
   { command: '/terminal', description: 'Toggle terminal drawer', category: 'view' },
   { command: '/files', description: 'Toggle file activity sidebar', category: 'view' },
-  { command: '/theme', description: 'Toggle light/dark theme', category: 'view' },
+  { command: '/theme', description: 'Cycle through themes', category: 'view' },
   { command: '/minimize', description: 'Minimize agents to floating pill', category: 'view' },
 
   // === Config ===
@@ -138,7 +138,7 @@ export const paletteCommands: PaletteCommand[] = [
   { id: 'shortcuts', label: 'Keyboard Shortcuts', description: 'View all shortcuts', shortcut: 'Cmd+?' },
   { id: 'login', label: 'Log In', description: 'Log in to Claude (opens browser)' },
   { id: 'logout', label: 'Log Out', description: 'Log out of Claude' },
-  { id: 'toggle-theme', label: 'Toggle Theme', description: 'Switch between light and dark mode' },
+  { id: 'toggle-theme', label: 'Cycle Theme', description: 'Cycle to the next theme' },
   { id: 'resume', label: 'Resume Session', description: 'Pick and resume a previous conversation' },
   { id: 'continue', label: 'Continue Session', description: 'Continue the most recent session' },
   { id: 'compact', label: 'Compact Context', description: 'Compact conversation to save context' },

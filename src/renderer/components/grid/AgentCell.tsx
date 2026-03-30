@@ -212,7 +212,8 @@ export default function AgentCell({
         <TerminalPanel
           agentId={descriptor.id}
           cwd={descriptor.cwd}
-          mode="claude"
+          mode={descriptor.provider === 'openai' ? 'codex' : 'claude'}
+          provider={descriptor.provider}
         />
       </div>
     </div>

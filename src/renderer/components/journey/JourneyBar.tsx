@@ -3,7 +3,6 @@ import type { PhaseInfo, AgentPhase, AgentDescriptor } from '../../../shared/typ
 import { useTheme } from '../../ThemeContext'
 import { useAgent } from '../../hooks/useAgent'
 import { useJourneyPhase } from '../../hooks/useJourneyPhase'
-import { useResourceStats } from '../../hooks/useResourceStats'
 
 // Main journey steps shown in the bar
 const JOURNEY_PHASES: { key: AgentPhase; label: string }[] = [
@@ -11,6 +10,7 @@ const JOURNEY_PHASES: { key: AgentPhase; label: string }[] = [
   { key: 'searching', label: 'Searching' },
   { key: 'planning', label: 'Planning' },
   { key: 'coding', label: 'Coding' },
+  { key: 'testing', label: 'Testing' },
 ]
 
 // Map sub-phases to their nearest journey step
@@ -22,9 +22,9 @@ function journeyIndex(phase: AgentPhase): number {
     case 'searching': return 1
     case 'planning': return 2
     case 'coding': return 3
-    case 'testing': return 3
     case 'debugging': return 3
     case 'reviewing': return 3
+    case 'testing': return 4
     case 'done': return -1
     case 'stuck': return -1
     case 'awaiting': return -1
@@ -59,8 +59,7 @@ export default function JourneyBar({
   focusedId: string | null
   onAnyAwaiting?: (awaiting: boolean) => void
 }) {
-  const { colors, spacing } = useTheme()
-  const stats = useResourceStats()
+  const { colors } = useTheme()
   const [phases, setPhases] = useState<Record<string, PhaseInfo>>({})
 
   const reportRef = useRef((id: string, phase: PhaseInfo) => {
@@ -82,54 +81,26 @@ export default function JourneyBar({
     phase: phases[a.id] as PhaseInfo | undefined,
   }))
 
-  const awaitingAgents = agentEntries.filter(e => e.phase?.phase === 'awaiting')
+  const needsAttentionAgents = agentEntries.filter(
+    e => e.phase?.phase === 'awaiting' || e.phase?.phase === 'stuck'
+  )
+  const doneAgents = agentEntries.filter(e => e.phase?.phase === 'done')
 
-  // Notify parent when any agent is awaiting
+  // Notify parent when any agent needs attention
   useEffect(() => {
-    onAnyAwaiting?.(awaitingAgents.length > 0)
-  }, [awaitingAgents.length > 0]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Memory pressure level for color coding
-  const memLevel = !stats ? 'ok' : stats.memoryMB > 2000 ? 'critical' : stats.memoryMB > 1200 ? 'warn' : 'ok'
-  const memColor = memLevel === 'critical' ? colors.red : memLevel === 'warn' ? '#e5a100' : colors.textMuted
+    onAnyAwaiting?.(needsAttentionAgents.length > 0)
+  }, [needsAttentionAgents.length > 0]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div style={{
-      height: spacing.journeyBarHeight,
-      background: colors.bgOverlay,
-      borderBottom: `1px solid ${colors.border}`,
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 2,
+      gap: 0,
       userSelect: 'none',
-      position: 'relative',
+      pointerEvents: 'none',
     }}>
-      {/* Resource stats — right side */}
-      {stats && (
-        <div
-          title={`Heap: ${stats.heapUsedMB}/${stats.heapTotalMB}MB | External: ${stats.externalMB}MB | Agents: ${stats.agentCount} (${stats.activeAgentCount} active) | Codex: ${stats.codexReadyCount} ready | Uptime: ${Math.round(stats.uptimeSeconds / 60)}m`}
-          style={{
-            position: 'absolute',
-            right: 12,
-            top: '50%',
-            transform: 'translateY(-50%)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            fontSize: 10,
-            fontFamily: 'monospace',
-            color: memColor,
-            opacity: memLevel === 'ok' ? 0.5 : 1,
-            transition: 'opacity 0.3s, color 0.3s',
-          }}
-        >
-          <span>{stats.memoryMB}MB</span>
-          <span style={{ opacity: 0.5 }}>|</span>
-          <span>{stats.agentCount}A{stats.activeAgentCount > 0 ? ` ${stats.activeAgentCount} active` : ''}</span>
-        </div>
-      )}
       {/* Invisible phase reporters */}
       {agents.map(a => (
         <AgentPhaseReporter key={a.id} agentId={a.id} reportRef={reportRef} />
@@ -153,8 +124,8 @@ export default function JourneyBar({
             <React.Fragment key={p.key}>
               {stageIdx > 0 && (
                 <div style={{
-                  width: 24,
-                  height: 2,
+                  width: 14,
+                  height: 1.5,
                   background: maxStage >= stageIdx ? colors.textSecondary : colors.borderMuted,
                   borderRadius: 1,
                   transition: 'background 0.3s ease',
@@ -163,10 +134,10 @@ export default function JourneyBar({
               <div style={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: 5,
-                padding: '4px 10px',
+                gap: 4,
+                padding: '2px 6px',
                 borderRadius: 20,
-                fontSize: 12,
+                fontSize: 10,
                 fontWeight: focusedHere ? 600 : 400,
                 color: focusedHere
                   ? focusedPhase!.color
@@ -178,8 +149,8 @@ export default function JourneyBar({
                 {/* Agent dots at this stage */}
                 {stageAgents.map(({ agent, color }) => (
                   <span key={agent.id} title={`${agent.name}: ${phases[agent.id]?.label}`} style={{
-                    width: 7,
-                    height: 7,
+                    width: 5,
+                    height: 5,
                     borderRadius: '50%',
                     background: color,
                     boxShadow: focusedId === agent.id ? `0 0 6px ${color}60` : 'none',
@@ -191,8 +162,8 @@ export default function JourneyBar({
                 {/* If no agents here, show a muted dot */}
                 {stageAgents.length === 0 && (
                   <span style={{
-                    width: 8,
-                    height: 8,
+                    width: 5,
+                    height: 5,
                     borderRadius: '50%',
                     background: colors.textMuted,
                     transition: 'all 0.3s ease',
@@ -205,31 +176,67 @@ export default function JourneyBar({
           )
         })}
 
-        {/* Awaiting section — only shows when agents need approval */}
-        {awaitingAgents.length > 0 && (
+        {/* Done indicator */}
+        {doneAgents.length > 0 && (
           <>
             <div style={{
-              width: 16,
-              height: 2,
-              background: `${colors.red}60`,
+              width: 10,
+              height: 1.5,
+              background: `${colors.green}50`,
               borderRadius: 1,
-              marginLeft: 4,
+              marginLeft: 2,
             }} />
             <div style={{
               display: 'flex',
               alignItems: 'center',
-              gap: 5,
-              padding: '4px 10px',
+              gap: 4,
+              padding: '2px 6px',
               borderRadius: 20,
-              fontSize: 12,
+              fontSize: 10,
+              fontWeight: 500,
+              color: colors.green,
+              opacity: 0.8,
+            }}>
+              {doneAgents.map(({ agent, color }) => (
+                <span key={agent.id} title={`${agent.name}: Done`} style={{
+                  width: 5,
+                  height: 5,
+                  borderRadius: '50%',
+                  background: colors.green,
+                  border: `1.5px solid ${color}`,
+                  flexShrink: 0,
+                }} />
+              ))}
+              Done
+            </div>
+          </>
+        )}
+
+        {/* Needs Attention — awaiting approval, stuck, or errors */}
+        {needsAttentionAgents.length > 0 && (
+          <>
+            <div style={{
+              width: 10,
+              height: 1.5,
+              background: `${colors.red}60`,
+              borderRadius: 1,
+              marginLeft: 2,
+            }} />
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              padding: '2px 6px',
+              borderRadius: 20,
+              fontSize: 10,
               fontWeight: 600,
               color: colors.red,
               animation: 'pulse 1s infinite',
             }}>
-              {awaitingAgents.map(({ agent, color }) => (
-                <span key={agent.id} title={`${agent.name}: Awaiting approval`} style={{
-                  width: 7,
-                  height: 7,
+              {needsAttentionAgents.map(({ agent, color, phase }) => (
+                <span key={agent.id} title={`${agent.name}: ${phase?.label || 'Needs attention'}`} style={{
+                  width: 5,
+                  height: 5,
                   borderRadius: '50%',
                   background: colors.red,
                   border: `1.5px solid ${color}`,
@@ -237,23 +244,12 @@ export default function JourneyBar({
                   flexShrink: 0,
                 }} />
               ))}
-              Awaiting
+              Needs Attention
             </div>
           </>
         )}
       </div>
 
-      {/* Detail text for focused agent */}
-      {focusedPhase?.detail && (
-        <div style={{
-          fontSize: 11,
-          color: focusedPhase.color,
-          opacity: 0.8,
-          animation: 'fadeSlideIn 0.2s ease',
-        }}>
-          {focusedPhase.detail}
-        </div>
-      )}
     </div>
   )
 }

@@ -76,6 +76,13 @@ before swapping a library to find every usage point.
 ### reindex_file
 Re-index a single file immediately after making major changes.
 
+### review_diff
+Gather graph-aware context for reviewing a git diff. Analyzes changed symbols,
+their callers and dependents, cross-file impact, and risk assessment. Use when
+reviewing commits, staged changes, or branch diffs. Returns structured context
+so you can write an informed code review. Targets: "last_commit", "staged",
+"branch", or a commit SHA.
+
 ## When to prefer MCP tools over grep
 - "What calls processPayment?" → get_callers (not grep — grep misses indirect references)
 - "What breaks if I change auth.ts?" → get_dependents (not grep — grep can't trace transitive deps)
@@ -90,6 +97,9 @@ Re-index a single file immediately after making major changes.
 - "What extends BaseService?" → get_type_hierarchy
 - "Any dead exports?" → find_dead_exports
 - "What uses lodash?" → get_pkg_usages with "lodash"
+- "Review this commit" → review_diff with "last_commit"
+- "Review my staged changes" → review_diff with "staged"
+- "Review this branch/PR" → review_diff with "branch"
 
 ## When to use grep instead
 - Simple string search: "find all TODOs" → grep
