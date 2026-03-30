@@ -2,7 +2,11 @@ import * as pty from 'node-pty'
 import type { IPty } from 'node-pty'
 import type { BrowserWindow } from 'electron'
 import { randomUUID } from 'node:crypto'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { IPC } from '../shared/types'
+import { getClaudePath } from './auth'
+import { log } from './logger'
 
 interface TerminalEntry {
   id: string
@@ -123,6 +127,12 @@ export function writeToTerminal(terminalId: string, data: string) {
   entry?.proc.write(data)
 }
 
+/** Write data to the terminal belonging to an agent (by agentId). */
+export function writeToAgentTerminal(agentId: string, data: string) {
+  const terminalId = agentTerminals.get(agentId)
+  if (terminalId) writeToTerminal(terminalId, data)
+}
+
 export function resizeTerminal(terminalId: string, cols: number, rows: number) {
   const entry = terminals.get(terminalId)
   if (entry && cols > 0 && rows > 0) {
@@ -161,4 +171,132 @@ export function closeAll() {
   }
   terminals.clear()
   agentTerminals.clear()
+}
+
+// ── Claude-ex MCP config ──
+
+const CODEX_MCP_CONFIG = {
+  codex: {
+    type: 'stdio' as const,
+    command: 'claude-ex',
+    args: ['mcp'],
+  },
+}
+
+const CODEX_HOOKS_CONFIG = {
+  permissions: {
+    allow: ['mcp__codex__*'],
+  },
+  hooks: {
+    SessionStart: [
+      { matcher: '', hooks: [{ type: 'command', command: 'claude-ex brief', timeout: 5000 }] },
+    ],
+    PreToolUse: [
+      { matcher: 'Write', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+      { matcher: 'Edit', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+      { matcher: 'MultiEdit', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+      { matcher: 'Read', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+    ],
+    PostToolUse: [
+      { matcher: 'Write', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
+      { matcher: 'Edit', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
+      { matcher: 'MultiEdit', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
+    ],
+  },
+}
+
+/**
+ * Ensure the project has .mcp.json and .claude/settings.json configured
+ * for claude-ex code intelligence. Non-destructive — merges into existing files.
+ */
+export function ensureClaudeExConfig(cwd: string): void {
+  try {
+    // .mcp.json
+    const mcpPath = join(cwd, '.mcp.json')
+    let mcpConfig: any = {}
+    if (existsSync(mcpPath)) {
+      try { mcpConfig = JSON.parse(readFileSync(mcpPath, 'utf-8')) } catch { /* corrupt — overwrite */ }
+    }
+    if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {}
+    if (!mcpConfig.mcpServers.codex) {
+      mcpConfig.mcpServers.codex = CODEX_MCP_CONFIG.codex
+      writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2) + '\n')
+      log.info('terminal', `wrote codex MCP config to ${mcpPath}`)
+    }
+
+    // .claude/settings.json
+    const claudeDir = join(cwd, '.claude')
+    const settingsPath = join(claudeDir, 'settings.json')
+    let settings: any = {}
+    if (existsSync(settingsPath)) {
+      try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* corrupt — overwrite */ }
+    } else {
+      mkdirSync(claudeDir, { recursive: true })
+    }
+    // Merge permissions
+    if (!settings.permissions) settings.permissions = {}
+    if (!settings.permissions.allow) settings.permissions.allow = []
+    if (!settings.permissions.allow.includes('mcp__codex__*')) {
+      settings.permissions.allow.push('mcp__codex__*')
+    }
+    // Merge hooks (only if not already present)
+    if (!settings.hooks) {
+      settings.hooks = CODEX_HOOKS_CONFIG.hooks
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+      log.info('terminal', `wrote codex hooks to ${settingsPath}`)
+    } else {
+      // Just ensure permissions were written
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+    }
+  } catch (err) {
+    log.warn('terminal', `ensureClaudeExConfig failed for ${cwd}: ${err}`)
+  }
+}
+
+/**
+ * Create a terminal that launches `claude` CLI directly.
+ * The shell stays alive after claude exits (ctrl+C) so the user can re-run it.
+ * Returns { terminalId, isNew } same as getOrCreateTerminal.
+ */
+export function createClaudeTerminal(
+  agentId: string,
+  cwd: string,
+  opts?: { resume?: string },
+): { terminalId: string; isNew: boolean } {
+  // Ensure claude-ex MCP config exists in the project
+  ensureClaudeExConfig(cwd)
+
+  // If agent already has a live terminal, return it
+  const existingId = agentTerminals.get(agentId)
+  if (existingId) {
+    const entry = terminals.get(existingId)
+    if (entry) {
+      return { terminalId: existingId, isNew: false }
+    }
+    agentTerminals.delete(agentId)
+  }
+
+  // Create a shell terminal first
+  const result = getOrCreateTerminal(agentId, cwd)
+
+  // Build the claude command to inject
+  const claudePath = getClaudePath()
+  const bin = claudePath || 'claude'
+
+  let cmd = bin
+  if (opts?.resume) {
+    cmd += ` --resume ${opts.resume}`
+  }
+  cmd += '\n'
+
+  // Write the claude command into the shell after a brief delay
+  // (allows the shell to initialize)
+  const entry = terminals.get(result.terminalId)
+  if (entry) {
+    setTimeout(() => {
+      entry.proc.write(cmd)
+    }, 300)
+  }
+
+  return result
 }

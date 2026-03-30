@@ -6,7 +6,19 @@ import '@xterm/xterm/css/xterm.css'
 import { api } from '../../lib/api'
 import { useTheme } from '../../ThemeContext'
 
-export default function TerminalPanel({ agentId, cwd }: { agentId: string; cwd: string }) {
+export default function TerminalPanel({
+  agentId,
+  cwd,
+  mode = 'shell',
+  resume,
+}: {
+  agentId: string
+  cwd: string
+  /** 'claude' launches `claude` CLI in the terminal; 'shell' is a plain shell */
+  mode?: 'shell' | 'claude'
+  /** Session ID to resume (only used in claude mode) */
+  resume?: string
+}) {
   const { colors } = useTheme()
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -76,8 +88,12 @@ export default function TerminalPanel({ agentId, cwd }: { agentId: string; cwd: 
       term.open(container)
       try { fitAddon.fit() } catch { /* ignore */ }
 
-      // Get or create PTY (idempotent — reuses existing if alive)
-      api.createTerminal(agentId, cwd).then(async ({ terminalId, isNew }) => {
+      // Get or create PTY — use claude terminal or plain shell based on mode
+      const createFn = mode === 'claude'
+        ? api.createClaudeTerminal(agentId, cwd, resume)
+        : api.createTerminal(agentId, cwd)
+
+      createFn.then(async ({ terminalId, isNew }) => {
         if (disposed) return
         ptyId = terminalId
 
@@ -147,7 +163,7 @@ export default function TerminalPanel({ agentId, cwd }: { agentId: string; cwd: 
       // NOTE: intentionally do NOT close the PTY here.
       // The PTY persists in the main process until the agent is closed.
     }
-  }, [agentId, cwd]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [agentId, cwd, mode, resume]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div
