@@ -17,9 +17,10 @@ import { log } from './logger'
 // (⏺, ●, ◆, ▶) to avoid false positives from assistant prose.
 // Debounce all emissions so the bar never flickers.
 
-const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][0-9A-Z])/g
+// Strip ANSI escape sequences, OSC sequences, hyperlinks, and Kitty/iTerm private modes
+const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|\][^\n]*|[()][0-9A-Z]|\][^\x07]*\x07|P[^\x1b]*\x1b\\|\][^\x1b]*\x1b)/g
 function stripAnsi(s: string): string {
-  return s.replace(ANSI_RE, '')
+  return s.replace(ANSI_RE, '').replace(/\x0f|\x0e/g, '')
 }
 
 function uid(): string {
@@ -47,10 +48,10 @@ class TerminalPhaseParser {
 
   // ── Detection patterns ──
 
-  // Only match tool lines that begin with a CLI bullet marker.
-  // The Claude CLI always prefixes tool calls with one of these characters.
-  // This prevents "I'll Read the file" in prose from triggering.
-  private static readonly TOOL_RE = /^[\s]*[⏺●◆▶]\s*(Read|Edit|Write|MultiEdit|Bash|Grep|Glob|Agent|WebSearch|WebFetch|Skill|NotebookEdit|TodoRead|TodoWrite|AskUserQuestion|Task|Search|ListFiles|LS)\b/
+  // Match tool lines that begin with a CLI bullet marker.
+  // The Claude CLI prefixes tool calls with one of these characters.
+  // Includes broader set of possible bullet/box-drawing chars used across CLI versions.
+  private static readonly TOOL_RE = /^[\s]*[⏺●◆▶╭─•→›»☐✦⬤]\s*(Read|Edit|Write|MultiEdit|Bash|Grep|Glob|Agent|WebSearch|WebFetch|Skill|NotebookEdit|TodoRead|TodoWrite|AskUserQuestion|Task|Search|ListFiles|LS)\b/
 
   // Claude input prompt — the ❯ character (U+276F) optionally followed by
   // non-breaking space (U+00A0) and/or regular whitespace.
@@ -97,6 +98,11 @@ class TerminalPhaseParser {
   private processLine(line: string) {
     const trimmed = line.replace(/\u00A0/g, ' ').trim()
     if (!trimmed) return
+
+    // Debug: log lines that contain tool-like words to help diagnose detection failures
+    if (/(Read|Edit|Write|Bash|Grep|Glob|Agent)\b/.test(trimmed) && trimmed.length < 200) {
+      log.info('phase-parser', `line: ${JSON.stringify(trimmed.slice(0, 120))} | tool_match=${TerminalPhaseParser.TOOL_RE.test(trimmed)}`)
+    }
 
     // ── Tool use (requires bullet marker prefix) ──
     const toolMatch = trimmed.match(TerminalPhaseParser.TOOL_RE)

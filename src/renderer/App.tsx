@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import JourneyBar from './components/journey/JourneyBar'
 import AgentGrid from './components/grid/AgentGrid'
-import AgentTabs from './components/grid/AgentTabs'
 import MinimizedAgentsPill from './components/grid/MinimizedAgentsPill'
 import FileExplorer from './components/activity/FileExplorer'
 import SourceControlSidebar from './components/scm/SourceControlSidebar'
@@ -711,8 +710,7 @@ export default function App() {
       {/* Main content */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         <div style={{ flex: 1, overflow: 'hidden', minWidth: 0 }}>
-          {/* Grid mode commented out for now */}
-          <AgentTabs
+          <AgentGrid
             agents={manager.agents}
             focusedId={manager.focusedId}
             canAddAgent={manager.canAddAgent}
