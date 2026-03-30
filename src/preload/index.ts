@@ -92,6 +92,8 @@ const api = {
   // Terminal
   createTerminal: (agentId: string, cwd: string): Promise<{ terminalId: string; isNew: boolean }> =>
     ipcRenderer.invoke(IPC.TERM_CREATE, { agentId, cwd }),
+  createClaudeTerminal: (agentId: string, cwd: string, resume?: string): Promise<{ terminalId: string; isNew: boolean }> =>
+    ipcRenderer.invoke(IPC.TERM_CREATE_CLAUDE, { agentId, cwd, resume }),
   getTerminalBuffer: (terminalId: string): Promise<{ data: string }> =>
     ipcRenderer.invoke(IPC.TERM_BUFFER, { terminalId }),
   writeTerminal: (terminalId: string, data: string) =>
@@ -100,6 +102,8 @@ const api = {
     ipcRenderer.invoke(IPC.TERM_RESIZE, { terminalId, cols, rows }),
   closeTerminal: (terminalId: string) =>
     ipcRenderer.invoke(IPC.TERM_CLOSE, { terminalId }),
+  writeToAgentTerminal: (agentId: string, data: string) =>
+    ipcRenderer.invoke(IPC.TERM_WRITE_AGENT, { agentId, data }),
 
   // Providers
   listProviders: (): Promise<Record<ProviderId, ProviderConfig>> =>

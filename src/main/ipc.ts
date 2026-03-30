@@ -224,6 +224,14 @@ export function registerIpcHandlers() {
     return terminal.getOrCreateTerminal(agentId, cwd)
   })
 
+  ipcMain.handle(IPC.TERM_CREATE_CLAUDE, async (_, { agentId, cwd, resume }: { agentId: string; cwd: string; resume?: string }) => {
+    return terminal.createClaudeTerminal(agentId, cwd, { resume })
+  })
+
+  ipcMain.handle(IPC.TERM_WRITE_AGENT, async (_, { agentId, data }: { agentId: string; data: string }) => {
+    terminal.writeToAgentTerminal(agentId, data)
+  })
+
   ipcMain.handle(IPC.TERM_BUFFER, async (_, { terminalId }: { terminalId: string }) => {
     return { data: terminal.getBuffer(terminalId) }
   })

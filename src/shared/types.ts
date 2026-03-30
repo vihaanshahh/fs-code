@@ -271,6 +271,8 @@ export const IPC = {
   APP_INITIAL_CWD: 'app:initial-cwd',
   // Terminal
   TERM_CREATE: 'term:create',
+  TERM_CREATE_CLAUDE: 'term:create-claude',
+  TERM_WRITE_AGENT: 'term:write-agent',
   TERM_BUFFER: 'term:buffer',
   TERM_WRITE: 'term:write',
   TERM_RESIZE: 'term:resize',

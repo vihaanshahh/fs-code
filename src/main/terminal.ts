@@ -2,12 +2,22 @@ import * as pty from 'node-pty'
 import type { IPty } from 'node-pty'
 import type { BrowserWindow } from 'electron'
 import { randomUUID } from 'node:crypto'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { IPC } from '../shared/types'
+import { getClaudePath } from './auth'
+import { log } from './logger'
 
 interface TerminalEntry {
   id: string
   proc: IPty
   buffer: string
+  /** Queue of data to write once shell is ready (first prompt seen) */
+  pendingWrites: string[]
+  /** Whether the shell has printed its first prompt (ready to accept input) */
+  shellReady: boolean
+  /** Timer ID for shell-ready timeout fallback */
+  readyTimeoutId: ReturnType<typeof setTimeout> | null
 }
 
 const terminals = new Map<string, TerminalEntry>()
@@ -65,7 +75,12 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
     env: process.env as Record<string, string>,
   })
 
-  const entry: TerminalEntry = { id, proc, buffer: '' }
+  const entry: TerminalEntry = {
+    id, proc, buffer: '',
+    pendingWrites: [],
+    shellReady: false,
+    readyTimeoutId: null,
+  }
   terminals.set(id, entry)
   agentTerminals.set(agentId, id)
 
@@ -83,6 +98,17 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
     if (entry.buffer.length > MAX_BUFFER) {
       entry.buffer = entry.buffer.slice(-MAX_BUFFER)
     }
+
+    // Detect shell readiness: look for common prompt endings ($, %, >, #)
+    // This fires once — drains any queued writes (like the claude command)
+    if (!entry.shellReady) {
+      // Heuristic: shell has output something ending with a prompt character
+      const trimmed = data.trimEnd()
+      if (trimmed.endsWith('$') || trimmed.endsWith('%') || trimmed.endsWith('>') || trimmed.endsWith('#') || data.includes('\x1b]')) {
+        markShellReady(entry)
+      }
+    }
+
     pendingData += data
     // If pending data is huge, truncate to tail (keep most recent output)
     if (pendingData.length > MAX_PENDING) {
@@ -101,6 +127,7 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
 
   proc.onExit(({ exitCode }) => {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
+    if (entry.readyTimeoutId) { clearTimeout(entry.readyTimeoutId); entry.readyTimeoutId = null }
     // Flush any remaining data before closing
     if (pendingData && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(IPC.TERM_DATA, { terminalId: id, data: pendingData })
@@ -113,6 +140,21 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
   return { terminalId: id, isNew: true }
 }
 
+/** Mark shell as ready and drain pending writes */
+function markShellReady(entry: TerminalEntry) {
+  if (entry.shellReady) return
+  entry.shellReady = true
+  if (entry.readyTimeoutId) {
+    clearTimeout(entry.readyTimeoutId)
+    entry.readyTimeoutId = null
+  }
+  // Drain pending writes
+  for (const data of entry.pendingWrites) {
+    entry.proc.write(data)
+  }
+  entry.pendingWrites = []
+}
+
 /** Get buffered output for a terminal (for replaying on reattach). */
 export function getBuffer(terminalId: string): string {
   return terminals.get(terminalId)?.buffer || ''
@@ -121,6 +163,12 @@ export function getBuffer(terminalId: string): string {
 export function writeToTerminal(terminalId: string, data: string) {
   const entry = terminals.get(terminalId)
   entry?.proc.write(data)
+}
+
+/** Write data to the terminal belonging to an agent (by agentId). */
+export function writeToAgentTerminal(agentId: string, data: string) {
+  const terminalId = agentTerminals.get(agentId)
+  if (terminalId) writeToTerminal(terminalId, data)
 }
 
 export function resizeTerminal(terminalId: string, cols: number, rows: number) {
@@ -134,6 +182,7 @@ export function resizeTerminal(terminalId: string, cols: number, rows: number) {
 export function closeTerminal(terminalId: string) {
   const entry = terminals.get(terminalId)
   if (entry) {
+    if (entry.readyTimeoutId) clearTimeout(entry.readyTimeoutId)
     entry.proc.kill()
     terminals.delete(terminalId)
   }
@@ -157,8 +206,142 @@ export function closeAgentTerminal(agentId: string) {
 
 export function closeAll() {
   for (const [, entry] of terminals) {
+    if (entry.readyTimeoutId) clearTimeout(entry.readyTimeoutId)
     entry.proc.kill()
   }
   terminals.clear()
   agentTerminals.clear()
+}
+
+// ── Claude-ex MCP config ──
+
+const CODEX_MCP_ENTRY = {
+  type: 'stdio' as const,
+  command: 'claude-ex',
+  args: ['mcp'],
+}
+
+const CODEX_HOOKS = {
+  SessionStart: [
+    { matcher: '', hooks: [{ type: 'command', command: 'claude-ex brief', timeout: 5000 }] },
+  ],
+  PreToolUse: [
+    { matcher: 'Write', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+    { matcher: 'Edit', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+    { matcher: 'MultiEdit', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+    { matcher: 'Read', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+  ],
+  PostToolUse: [
+    { matcher: 'Write', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
+    { matcher: 'Edit', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
+    { matcher: 'MultiEdit', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
+  ],
+}
+
+// Track which cwds we've already configured (avoid repeated disk I/O)
+const configuredCwds = new Set<string>()
+
+/**
+ * Ensure the project has .mcp.json and .claude/settings.json configured
+ * for claude-ex code intelligence. Non-destructive — merges into existing files.
+ * Idempotent: skips if already configured this session.
+ */
+export function ensureClaudeExConfig(cwd: string): void {
+  if (configuredCwds.has(cwd)) return
+  try {
+    // .mcp.json — add codex MCP server entry
+    const mcpPath = join(cwd, '.mcp.json')
+    let mcpConfig: any = {}
+    if (existsSync(mcpPath)) {
+      try { mcpConfig = JSON.parse(readFileSync(mcpPath, 'utf-8')) } catch { /* corrupt — overwrite */ }
+    }
+    if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {}
+    if (!mcpConfig.mcpServers.codex) {
+      mcpConfig.mcpServers.codex = CODEX_MCP_ENTRY
+      writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2) + '\n')
+      log.info('terminal', `wrote codex MCP config to ${mcpPath}`)
+    }
+
+    // .claude/settings.json — add permissions + hooks
+    const claudeDir = join(cwd, '.claude')
+    const settingsPath = join(claudeDir, 'settings.json')
+    let settings: any = {}
+    if (existsSync(settingsPath)) {
+      try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* corrupt — overwrite */ }
+    } else {
+      mkdirSync(claudeDir, { recursive: true })
+    }
+    // Merge permissions
+    if (!settings.permissions) settings.permissions = {}
+    if (!settings.permissions.allow) settings.permissions.allow = []
+    if (!settings.permissions.allow.includes('mcp__codex__*')) {
+      settings.permissions.allow.push('mcp__codex__*')
+    }
+    // Merge hooks (only if not already present — don't clobber user customizations)
+    let needsWrite = false
+    if (!settings.hooks) {
+      settings.hooks = CODEX_HOOKS
+      needsWrite = true
+    }
+    if (needsWrite || !settings.permissions.allow.includes('mcp__codex__*')) {
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+      log.info('terminal', `wrote codex settings to ${settingsPath}`)
+    }
+
+    configuredCwds.add(cwd)
+  } catch (err) {
+    log.warn('terminal', `ensureClaudeExConfig failed for ${cwd}: ${err}`)
+  }
+}
+
+/**
+ * Create a terminal that launches `claude` CLI directly.
+ * The shell stays alive after claude exits (ctrl+C) so the user can re-run it.
+ * Returns { terminalId, isNew } same as getOrCreateTerminal.
+ */
+export function createClaudeTerminal(
+  agentId: string,
+  cwd: string,
+  opts?: { resume?: string },
+): { terminalId: string; isNew: boolean } {
+  // Ensure claude-ex MCP config exists in the project
+  ensureClaudeExConfig(cwd)
+
+  // If agent already has a live terminal, return it
+  const existingId = agentTerminals.get(agentId)
+  if (existingId) {
+    const entry = terminals.get(existingId)
+    if (entry) {
+      return { terminalId: existingId, isNew: false }
+    }
+    agentTerminals.delete(agentId)
+  }
+
+  // Create a shell terminal
+  const result = getOrCreateTerminal(agentId, cwd)
+  const entry = terminals.get(result.terminalId)
+  if (!entry) return result
+
+  // Build the claude command
+  const claudePath = getClaudePath()
+  const bin = claudePath || 'claude'
+
+  let cmd = bin
+  if (opts?.resume) {
+    cmd += ` --resume ${opts.resume}`
+  }
+  cmd += '\n'
+
+  // Queue the command — it will be written once the shell prompt is detected.
+  // This is more reliable than a fixed timeout, especially under load.
+  entry.pendingWrites.push(cmd)
+
+  // Safety fallback: if shell-ready detection misses (unusual prompt format),
+  // force-write after 2 seconds
+  entry.readyTimeoutId = setTimeout(() => {
+    entry.readyTimeoutId = null
+    markShellReady(entry)
+  }, 2000)
+
+  return result
 }

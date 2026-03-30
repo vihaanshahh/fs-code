@@ -210,8 +210,8 @@ export function createAgent(name: string, cwd: string, providerId: ProviderId = 
     codex: null,
   }
 
-  // Set up permission handler on the provider
-  provider.setPermissionHandler(makePermissionHandler(id, state))
+  // NOTE: Permission handler is NOT set — the claude CLI running in the terminal
+  // handles its own permissions natively (always allow, deny, etc.)
 
   agents.set(id, state)
 

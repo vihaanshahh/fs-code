@@ -615,17 +615,15 @@ function PermissionBanner({ request, onRespond }: {
             fontWeight: 600, cursor: 'pointer',
           }}
         >Allow</button>
-        {request.suggestions && request.suggestions.length > 0 && (
-          <button
-            onClick={() => onRespond('allow', undefined, true)}
-            style={{
-              background: 'none', border: `1px solid ${colors.green}60`,
-              color: colors.green, borderRadius: 6,
-              padding: '4px 12px', fontSize: 11, fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >Always Allow</button>
-        )}
+        <button
+          onClick={() => onRespond('allow', undefined, true)}
+          style={{
+            background: 'none', border: `1px solid ${colors.green}60`,
+            color: colors.green, borderRadius: 6,
+            padding: '4px 12px', fontSize: 11, fontWeight: 600,
+            cursor: 'pointer',
+          }}
+        >Always Allow</button>
       </div>
       {renderDetail()}
     </div>

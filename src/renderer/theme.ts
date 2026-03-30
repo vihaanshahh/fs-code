@@ -6,65 +6,65 @@ export type ThemeMode = 'light' | 'dark'
 // ── Dark theme (neutral blacks matching landing page .dark) ────────
 
 const darkColors = {
-  // Backgrounds
-  bg: '#1a1a1a',
-  bgSurface: '#222222',
-  bgOverlay: '#141414',
-  bgFrosted: 'rgba(26, 26, 26, 0.85)',
+  // Backgrounds — modern soft dark (VS Code / Linear style, not pure black)
+  bg: '#1e1e2e',
+  bgSurface: '#262637',
+  bgOverlay: '#191926',
+  bgFrosted: 'rgba(30, 30, 46, 0.88)',
 
-  // Borders
-  border: '#383838',
-  borderMuted: '#3d3d3d',
+  // Borders — slightly more visible for depth
+  border: '#3b3b52',
+  borderMuted: '#32324a',
 
-  // Text
-  text: '#f9f9f9',
-  textSecondary: '#b8b8b8',
-  textMuted: '#888888',
-  textLink: '#58a6ff',
+  // Text — softer white for less eye strain
+  text: '#e8e8f0',
+  textSecondary: '#a9a9c0',
+  textMuted: '#6c6c8a',
+  textLink: '#7ab0ff',
 
-  // Phase colors (bright for dark bg)
-  phaseIdle: '#888888',
-  phaseThinking: '#bc8cff',
-  phaseResearching: '#79c0ff',
+  // Phase colors (slightly softer for the warmer dark bg)
+  phaseIdle: '#6c6c8a',
+  phaseThinking: '#c4a1ff',
+  phaseResearching: '#7ab0ff',
   phaseSearching: '#7ee787',
-  phasePlanning: '#58a6ff',
-  phaseCoding: '#3fb950',
-  phaseTesting: '#d29922',
-  phaseDebugging: '#ffa657',
-  phaseReviewing: '#f778ba',
-  phaseDone: '#3fb950',
+  phasePlanning: '#7ab0ff',
+  phaseCoding: '#4aca60',
+  phaseTesting: '#e0a832',
+  phaseDebugging: '#ffb068',
+  phaseReviewing: '#f47ebd',
+  phaseDone: '#4aca60',
   phaseStuck: '#f85149',
   phaseAwaiting: '#f85149',
 
   // File operation dots
-  dotRead: '#58a6ff',
-  dotWrite: '#3fb950',
-  dotCreate: '#a371f7',
-  dotExecute: '#d29922',
+  dotRead: '#7ab0ff',
+  dotWrite: '#4aca60',
+  dotCreate: '#b490f7',
+  dotExecute: '#e0a832',
 
   // Diff viewer
-  diffAddBg: 'rgba(63, 185, 80, 0.15)',
-  diffAddBorder: 'rgba(63, 185, 80, 0.4)',
-  diffAddText: '#3fb950',
-  diffRemoveBg: 'rgba(248, 81, 73, 0.15)',
-  diffRemoveBorder: 'rgba(248, 81, 73, 0.4)',
+  diffAddBg: 'rgba(74, 202, 96, 0.12)',
+  diffAddBorder: 'rgba(74, 202, 96, 0.35)',
+  diffAddText: '#4aca60',
+  diffRemoveBg: 'rgba(248, 81, 73, 0.12)',
+  diffRemoveBorder: 'rgba(248, 81, 73, 0.35)',
   diffRemoveText: '#f85149',
-  diffHunkBg: 'rgba(56, 139, 253, 0.10)',
-  diffHunkText: '#79c0ff',
-  diffLineNum: '#888888',
-  diffLineNumActive: '#b8b8b8',
+  diffHunkBg: 'rgba(122, 176, 255, 0.08)',
+  diffHunkText: '#7ab0ff',
+  diffLineNum: '#6c6c8a',
+  diffLineNumActive: '#a9a9c0',
 
   // Accents
-  green: '#3fb950',
-  blue: '#58a6ff',
-  purple: '#a371f7',
-  amber: '#d29922',
-  pink: '#f778ba',
+  green: '#4aca60',
+  blue: '#7ab0ff',
+  purple: '#b490f7',
+  amber: '#e0a832',
+  pink: '#f47ebd',
   red: '#f85149',
 
   // Modal overlay
-  modalOverlay: 'rgba(0, 0, 0, 0.5)',
-  fileModalOverlay: 'rgba(10, 10, 10, 0.9)',
+  modalOverlay: 'rgba(0, 0, 0, 0.45)',
+  fileModalOverlay: 'rgba(15, 15, 24, 0.88)',
 } as const
 
 // ── Light theme (matching landing page :root) ─────────────────────

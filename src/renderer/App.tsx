@@ -5,7 +5,7 @@ import MinimizedAgentsPill from './components/grid/MinimizedAgentsPill'
 import FileActivitySidebar from './components/activity/FileActivitySidebar'
 import FileDetailModal from './components/activity/FileDetailModal'
 import SourceControlSidebar from './components/scm/SourceControlSidebar'
-import TerminalDrawer from './components/terminal/TerminalDrawer'
+// TerminalDrawer removed — agent cells now run claude CLI directly in a terminal
 import CommandPalette from './components/palette/CommandPalette'
 import ShortcutOverlay from './components/palette/ShortcutOverlay'
 import SessionPicker from './components/palette/SessionPicker'
@@ -68,7 +68,6 @@ function exportConversation(messages: UIMessage[]): string {
 export default function App() {
   const { colors, spacing, agentColors, fonts, toggleTheme } = useTheme()
 
-  const [showTerminal, setShowTerminal] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [selectedFile, setSelectedFile] = useState<TrackedFile | null>(null)
   const [showCommandPalette, setShowCommandPalette] = useState(false)
@@ -112,7 +111,7 @@ export default function App() {
 
   // Track focused agent's state for JourneyBar / FileActivity / StatusBar
   const focusedAgent = useAgent(manager.focusedId || '__none__')
-  const phaseInfo = useJourneyPhase(focusedAgent.messages, focusedAgent.isActive, focusedAgent.permissionRequest)
+  const phaseInfo = useJourneyPhase(focusedAgent.messages, focusedAgent.isActive, null)
   const { files, totalFiles, loading: filesLoading } = useFileActivity(
     focusedAgent.messages,
     manager.focusedAgent?.id,
@@ -161,10 +160,9 @@ export default function App() {
       if (agentId) api.emitSystemMessage(agentId, text)
     }
 
-    // Helper: send command to SDK (the SDK handles it natively and returns output
-    // via system messages with subtype 'local_command_output')
-    const sendToSDK = () => {
-      if (agentId) focusedAgent.sendMessage(rawCmd)
+    // Send a slash command to the claude CLI running in the agent's terminal
+    const sendToTerminal = () => {
+      if (agentId) api.writeToAgentTerminal(agentId, rawCmd + '\n')
       else sysMsg('No active agent — create one first with /new')
     }
 
@@ -176,6 +174,11 @@ export default function App() {
         setShowHelp(true)
         break
       case '/clear':
+        // Send Ctrl+C then /clear to the claude CLI in the terminal
+        if (agentId) {
+          api.writeToAgentTerminal(agentId, '\x03')
+          setTimeout(() => api.writeToAgentTerminal(agentId, '/clear\n'), 200)
+        }
         focusedAgent.clearMessages()
         break
       case '/new':
@@ -185,7 +188,7 @@ export default function App() {
         if (agentId) manager.closeAgent(agentId)
         break
       case '/terminal':
-        setShowTerminal(v => !v)
+        // Terminal is now the main interface — no separate drawer
         break
       case '/minimize':
         enterPillMode()
@@ -227,16 +230,13 @@ export default function App() {
       }
       case '/resume':
         if (arg) {
-          if (agentId) focusedAgent.resumeSession(arg)
+          sendToTerminal()
         } else {
           setShowSessionPicker(true)
         }
         break
       case '/continue':
-        if (agentId) {
-          sysMsg('Continuing most recent session...')
-          focusedAgent.continueSession()
-        }
+        sendToTerminal()
         break
       case '/rename':
         if (arg && agentId) {
@@ -265,47 +265,13 @@ export default function App() {
         }
         break
 
-      // === Permission mode changes (our app manages these via SDK) ===
+      // === Permission mode changes — forwarded to claude CLI in terminal ===
       case '/plan':
-        if (agentId) {
-          api.setPermissionMode(agentId, 'plan').then(() => {
-            sysMsg('Plan mode — agent will plan without executing tools')
-          })
-        }
-        break
       case '/accept-edits':
-        if (agentId) {
-          api.setPermissionMode(agentId, 'acceptEdits').then(() => {
-            sysMsg('Accept edits — file edits auto-approved, other tools still ask')
-          })
-        }
-        break
       case '/default-mode':
-        if (agentId) {
-          api.setPermissionMode(agentId, 'default').then(() => {
-            sysMsg('Default mode — prompts for dangerous operations')
-          })
-        }
-        break
       case '/yolo':
-        if (agentId) {
-          api.setPermissionMode(agentId, 'bypassPermissions').then(() => {
-            sysMsg('Bypass mode — all permissions auto-approved (use with caution)')
-          })
-        }
-        break
       case '/permissions':
-        if (agentId) {
-          if (arg === 'plan' || arg === 'acceptEdits' || arg === 'default' || arg === 'bypassPermissions' || arg === 'dontAsk') {
-            api.setPermissionMode(agentId, arg).then(() => {
-              sysMsg(`Permission mode set to: ${arg}`)
-            })
-          } else {
-            api.getPermissionMode(agentId).then((mode: string) => {
-              sysMsg(`Current mode: ${mode}\nAvailable: /permissions default | acceptEdits | plan | bypassPermissions | dontAsk`)
-            })
-          }
-        }
+        sendToTerminal()
         break
 
       // === Auth (our app handles login/logout) ===
@@ -317,32 +283,10 @@ export default function App() {
         break
 
       // =====================================================================
-      // SDK-native commands — pass through to the SDK which handles them
-      // and returns output via system messages (subtype: 'local_command_output')
+      // CLI-native commands — forwarded to claude CLI running in terminal
       // =====================================================================
-      case '/usage': {
-        if (!agentId) { sysMsg('No active agent'); break }
-        api.fetchUsage().then((data: any) => {
-          if (data.error) { sysMsg(`Usage error: ${data.error}`); return }
-          sysMsg('__usage__' + JSON.stringify(data))
-        }).catch(() => sysMsg('Failed to fetch usage'))
-        break
-      }
-      case '/model': {
-        if (!agentId) { sysMsg('No active agent'); break }
-        if (arg) {
-          // /model <name> — switch model
-          api.setModel(agentId, arg).then(() => {
-            sysMsg(`Switched to ${arg}`)
-          }).catch((e: any) => sysMsg(`Model error: ${e.message || e}`))
-        } else {
-          // /model — show current + available
-          api.getModelInfo(agentId).then((info: any) => {
-            sysMsg('__model__' + JSON.stringify(info))
-          }).catch(() => sysMsg('Failed to get model info'))
-        }
-        break
-      }
+      case '/usage':
+      case '/model':
       case '/cost':
       case '/context':
       case '/doctor':
@@ -386,11 +330,11 @@ export default function App() {
       case '/passes':
       case '/ide':
       case '/bug':
-        sendToSDK()
+        sendToTerminal()
         break
 
       default:
-        sendToSDK()
+        sendToTerminal()
         break
     }
   }, [toggleTheme])
@@ -404,7 +348,7 @@ export default function App() {
     switch (action) {
       case 'new-agent': manager.createAgent(undefined, settings.defaultProvider); break
       case 'close-agent': if (manager.focusedId) manager.closeAgent(manager.focusedId); break
-      case 'toggle-terminal': setShowTerminal(v => !v); break
+      // toggle-terminal removed — terminal is the main interface
       case 'toggle-sidebar': setSidebarCollapsed(v => !v); break
       case 'clear': focusedAgent.clearMessages(); break
       case 'shortcuts': setShowShortcutOverlay(true); break
@@ -447,9 +391,10 @@ export default function App() {
   const handleSessionSelect = useCallback((sessionId: string) => {
     setShowSessionPicker(false)
     if (manager.focusedId) {
-      focusedAgent.resumeSession(sessionId)
+      // Send /resume <sessionId> to the claude CLI in the terminal
+      api.writeToAgentTerminal(manager.focusedId, `/resume ${sessionId}\n`)
     }
-  }, [manager.focusedId, focusedAgent])
+  }, [manager.focusedId])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -463,7 +408,7 @@ export default function App() {
         else enterPillMode()
         return
       }
-      if (meta && e.key === '`') { e.preventDefault(); setShowTerminal(v => !v); return }
+      // Cmd+` no longer toggles terminal drawer — terminal is the main interface
       if (meta && e.key === 'k') { e.preventDefault(); setShowCommandPalette(v => !v); return }
       if (meta && e.key === '?') { e.preventDefault(); setShowShortcutOverlay(v => !v); return }
       if (meta && e.key === 'n') { e.preventDefault(); manager.createAgent(undefined, settings.defaultProvider); return }
@@ -476,14 +421,13 @@ export default function App() {
         if (showHelp) { setShowHelp(false); return }
         if (showCommandPalette) { setShowCommandPalette(false); return }
         if (showShortcutOverlay) { setShowShortcutOverlay(false); return }
-        if (focusedAgent.isActive) { focusedAgent.stopSession(); return }
+        // Send Ctrl+C to the claude CLI running in the terminal
+        if (manager.focusedId) { api.writeToAgentTerminal(manager.focusedId, '\x03'); return }
       }
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
   }, [manager, focusedAgent, showCommandPalette, showShortcutOverlay, showSessionPicker, showHelp, minimizedView, enterPillMode, exitPillMode])
-
-  const terminalCwd = manager.focusedAgent?.cwd || '.'
 
   // Show login gate only for Claude provider — other providers handle auth differently
   const isClaudeDefault = settings.defaultProvider === 'claude'
@@ -736,13 +680,6 @@ export default function App() {
             {'\u25D0'}
           </span>
           <span
-            style={{ cursor: 'pointer', fontSize: 14, color: colors.textMuted }}
-            onClick={() => setShowTerminal(v => !v)}
-            title="Toggle Terminal (Cmd+`)"
-          >
-            {'$_'}
-          </span>
-          <span
             style={{ cursor: 'pointer', fontSize: 14, color: showSettings ? colors.text : colors.textMuted, position: 'relative' }}
             onClick={() => setShowSettings(v => !v)}
             title="Settings"
@@ -902,14 +839,6 @@ export default function App() {
           </div>
         )}
       </div>
-
-      {/* Terminal drawer */}
-      <TerminalDrawer
-        agentId={manager.focusedAgent?.id || ''}
-        cwd={terminalCwd}
-        visible={showTerminal && !!manager.focusedAgent}
-        onToggle={() => setShowTerminal(false)}
-      />
 
       {/* Status bar */}
       <div style={{
