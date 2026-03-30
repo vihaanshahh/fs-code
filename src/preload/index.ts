@@ -131,6 +131,9 @@ const api = {
   checkForUpdates: () => ipcRenderer.invoke(IPC.UPDATE_CHECK),
   downloadUpdate: () => ipcRenderer.invoke(IPC.UPDATE_DOWNLOAD),
   installUpdate: () => ipcRenderer.invoke(IPC.UPDATE_INSTALL),
+  setGitHubToken: (token: string) => ipcRenderer.invoke(IPC.UPDATE_SET_GH_TOKEN, token),
+  hasGitHubToken: (): Promise<boolean> => ipcRenderer.invoke(IPC.UPDATE_HAS_GH_TOKEN),
+  removeGitHubToken: () => ipcRenderer.invoke(IPC.UPDATE_REMOVE_GH_TOKEN),
   onUpdateStatus: (cb: (data: any) => void) => {
     const handler = (_: any, data: any) => cb(data)
     ipcRenderer.on(IPC.UPDATE_STATUS, handler)

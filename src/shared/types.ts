@@ -320,6 +320,9 @@ export const IPC = {
   UPDATE_DOWNLOAD: 'update:download',
   UPDATE_INSTALL: 'update:install',
   UPDATE_STATUS: 'update:status',
+  UPDATE_SET_GH_TOKEN: 'update:set-gh-token',
+  UPDATE_HAS_GH_TOKEN: 'update:has-gh-token',
+  UPDATE_REMOVE_GH_TOKEN: 'update:remove-gh-token',
   // Logging
   LOG_GET_USAGE: 'log:get-usage',
   LOG_GET_PATH: 'log:get-path',
