@@ -663,7 +663,72 @@ export default function App() {
         )}
       </div>
 
-      {/* Update banner */}
+      {/* Update banner — shown when an update is available, downloading, or ready to install */}
+      {updateStatus.status?.state === 'available' && (
+        <div style={{
+          padding: '6px 16px',
+          background: `${colors.amber}12`,
+          borderBottom: `1px solid ${colors.amber}25`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          fontSize: 12,
+        }}>
+          <span style={{ color: colors.amber }}>
+            Update available — FluidState v{updateStatus.status.version}
+          </span>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              onClick={updateStatus.download}
+              style={{
+                background: colors.amber,
+                border: 'none',
+                color: '#fff',
+                borderRadius: 6,
+                padding: '3px 10px',
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >Download &amp; Install</button>
+            <button
+              onClick={updateStatus.dismiss}
+              style={{
+                background: 'none',
+                border: `1px solid ${colors.border}`,
+                color: colors.textMuted,
+                borderRadius: 6,
+                padding: '3px 10px',
+                fontSize: 11,
+                cursor: 'pointer',
+              }}
+            >Later</button>
+          </div>
+        </div>
+      )}
+
+      {updateStatus.status?.state === 'downloading' && (
+        <div style={{
+          padding: '6px 16px',
+          background: `${colors.blue}12`,
+          borderBottom: `1px solid ${colors.blue}25`,
+          fontSize: 12,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+            <span style={{ color: colors.blue }}>Downloading update... {updateStatus.status.percent}%</span>
+          </div>
+          <div style={{ height: 3, background: `${colors.border}`, borderRadius: 2, overflow: 'hidden' }}>
+            <div style={{
+              width: `${updateStatus.status.percent}%`,
+              height: '100%',
+              background: colors.blue,
+              borderRadius: 2,
+              transition: 'width 0.3s ease',
+            }} />
+          </div>
+        </div>
+      )}
+
       {updateStatus.status?.state === 'downloaded' && (
         <div style={{
           padding: '6px 16px',

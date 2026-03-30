@@ -336,6 +336,24 @@ export function registerIpcHandlers() {
     updater.installUpdate()
   })
 
+  // GitHub token for private repo updates
+  ipcMain.handle(IPC.UPDATE_SET_GH_TOKEN, async (_, token: string) => {
+    const keystore = await import('./keystore')
+    keystore.setGitHubToken(token)
+    const updater = await import('./updater')
+    updater.refreshGitHubToken()
+  })
+
+  ipcMain.handle(IPC.UPDATE_HAS_GH_TOKEN, async () => {
+    const keystore = await import('./keystore')
+    return keystore.hasGitHubToken()
+  })
+
+  ipcMain.handle(IPC.UPDATE_REMOVE_GH_TOKEN, async () => {
+    const keystore = await import('./keystore')
+    keystore.removeGitHubToken()
+  })
+
   // Log usage stats
   ipcMain.handle(IPC.LOG_GET_USAGE, async () => {
     return log.getUsage()

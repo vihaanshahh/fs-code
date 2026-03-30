@@ -10,6 +10,9 @@ import type { ProviderId } from '../shared/types'
 
 const STORE_FILE = 'provider-keys.enc'
 
+// Special key used for the GitHub token (private repo update auth)
+const GH_TOKEN_KEY = '__github_token__'
+
 interface KeyStore {
   [provider: string]: string // base64-encoded encrypted value
 }
@@ -82,4 +85,48 @@ export function removeApiKey(provider: ProviderId): void {
 export function hasApiKey(provider: ProviderId): boolean {
   const store = loadStore()
   return !!store[provider]
+}
+
+// ── GitHub token (for private repo auto-update) ──
+
+/** Store the GitHub personal access token (encrypted) */
+export function setGitHubToken(token: string): void {
+  if (!safeStorage.isEncryptionAvailable()) {
+    const store = loadStore()
+    store[GH_TOKEN_KEY] = Buffer.from(token).toString('base64')
+    saveStore(store)
+    return
+  }
+  const encrypted = safeStorage.encryptString(token)
+  const store = loadStore()
+  store[GH_TOKEN_KEY] = encrypted.toString('base64')
+  saveStore(store)
+}
+
+/** Retrieve the GitHub personal access token (decrypted) */
+export function getGitHubToken(): string | null {
+  const store = loadStore()
+  const encoded = store[GH_TOKEN_KEY]
+  if (!encoded) return null
+  try {
+    const buffer = Buffer.from(encoded, 'base64')
+    if (!safeStorage.isEncryptionAvailable()) return buffer.toString('utf-8')
+    return safeStorage.decryptString(buffer)
+  } catch (err) {
+    console.error('[keystore] Failed to decrypt GitHub token:', err)
+    return null
+  }
+}
+
+/** Check if a GitHub token is stored */
+export function hasGitHubToken(): boolean {
+  const store = loadStore()
+  return !!store[GH_TOKEN_KEY]
+}
+
+/** Remove the GitHub token */
+export function removeGitHubToken(): void {
+  const store = loadStore()
+  delete store[GH_TOKEN_KEY]
+  saveStore(store)
 }
