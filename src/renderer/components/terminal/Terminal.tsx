@@ -89,7 +89,7 @@ export default function TerminalPanel({
           foreground: colors.text,
           cursor: colors.blue,
           selectionBackground: `${colors.blue}40`,
-          black: '#1a1a1a',
+          black: colors.bgOverlay,
           red: colors.red,
           green: colors.green,
           yellow: colors.amber,

@@ -174,6 +174,11 @@ export default function App() {
         setShowHelp(true)
         break
       case '/clear':
+        // Send Ctrl+C then /clear to the claude CLI in the terminal
+        if (agentId) {
+          api.writeToAgentTerminal(agentId, '\x03')
+          setTimeout(() => api.writeToAgentTerminal(agentId, '/clear\n'), 200)
+        }
         focusedAgent.clearMessages()
         break
       case '/new':
@@ -416,7 +421,8 @@ export default function App() {
         if (showHelp) { setShowHelp(false); return }
         if (showCommandPalette) { setShowCommandPalette(false); return }
         if (showShortcutOverlay) { setShowShortcutOverlay(false); return }
-        if (focusedAgent.isActive) { focusedAgent.stopSession(); return }
+        // Send Ctrl+C to the claude CLI running in the terminal
+        if (manager.focusedId) { api.writeToAgentTerminal(manager.focusedId, '\x03'); return }
       }
     }
     window.addEventListener('keydown', handler, true)

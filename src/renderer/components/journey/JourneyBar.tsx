@@ -41,7 +41,7 @@ function AgentPhaseReporter({
   reportRef: React.MutableRefObject<(id: string, phase: PhaseInfo) => void>
 }) {
   const agent = useAgent(agentId)
-  const phase = useJourneyPhase(agent.messages, agent.isActive, agent.permissionRequest)
+  const phase = useJourneyPhase(agent.messages, agent.isActive, null)
   useEffect(() => {
     reportRef.current(agentId, phase)
   }, [phase, agentId, reportRef])
