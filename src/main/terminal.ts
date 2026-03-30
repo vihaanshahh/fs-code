@@ -41,6 +41,16 @@ class TerminalPhaseParser {
   /** After detecting the prompt, suppress emissions until real assistant activity appears */
   private waitingForInput = false
 
+  // ── Content accumulation (mirrors v0.4 SDK structured messages) ──
+  // Instead of discarding text between events, we accumulate it so that
+  // tool-result messages carry real output and assistant messages carry
+  // full text blocks — just like the SDK used to provide.
+
+  /** Lines accumulated while a tool is executing (become tool-result output) */
+  private toolOutputLines: string[] = []
+  /** Lines of assistant prose accumulated between tool events */
+  private assistantLines: string[] = []
+
   /** Debounce: hold emissions for a short window so rapid tool→text→tool doesn't flicker */
   private pendingEmit: UIMessage | null = null
   private emitTimer: ReturnType<typeof setTimeout> | null = null
@@ -51,15 +61,15 @@ class TerminalPhaseParser {
   // Match tool lines that begin with a CLI bullet marker.
   // The Claude CLI prefixes tool calls with one of these characters.
   // Includes broader set of possible bullet/box-drawing chars used across CLI versions.
-  private static readonly TOOL_RE = /^[\s]*[⏺●◆▶╭─•→›»☐✦⬤]\s*(Read|Edit|Write|MultiEdit|Bash|Grep|Glob|Agent|WebSearch|WebFetch|Skill|NotebookEdit|TodoRead|TodoWrite|AskUserQuestion|Task|Search|ListFiles|LS)\b/
+  static readonly TOOL_RE = /^[\s]*[⏺●◆▶╭─•→›»☐✦⬤]\s*(Read|Edit|Write|MultiEdit|Bash|Grep|Glob|Agent|WebSearch|WebFetch|Skill|NotebookEdit|TodoRead|TodoWrite|AskUserQuestion|Task|Search|ListFiles|LS)\b/
 
   // Claude input prompt — the ❯ character (U+276F) optionally followed by
   // non-breaking space (U+00A0) and/or regular whitespace.
-  private static readonly CLAUDE_PROMPT_RE = /^[❯]\s*$/
+  static readonly CLAUDE_PROMPT_RE = /^[❯]\s*$/
 
   // Permission / approval prompts — require the specific CLI format:
   // "Allow <tool>?" or "Allow once" or "(Y)es / (N)o" style
-  private static readonly WAITING_RE = /(?:^|\s)(?:Allow .+\?|Approve .+\?|\([Yy]\)es\s*\/\s*\([Nn]\)o|\([Aa]\)llow|\([Dd]\)eny)/
+  static readonly WAITING_RE = /(?:^|\s)(?:Allow .+\?|Approve .+\?|\([Yy]\)es\s*\/\s*\([Nn]\)o|\([Aa]\)llow|\([Dd]\)eny)/
 
   constructor(
     emit: (msg: UIMessage) => void,
@@ -89,7 +99,10 @@ class TerminalPhaseParser {
       this.processLine(partialTrimmed)
       this.lineBuf = ''
     } else if (partialTrimmed.length > 2 && !TerminalPhaseParser.TOOL_RE.test(this.lineBuf) && !this.waitingForInput) {
-      this.emitStreaming(partialTrimmed)
+      // Partial line while no tool is open → stream as assistant text
+      if (!this.lastToolId) {
+        this.emitStreaming(this.buildAssistantText(partialTrimmed))
+      }
     }
 
     this.resetIdleTimer()
@@ -115,15 +128,14 @@ class TerminalPhaseParser {
         this.onTurnStart()
       }
 
-      // Close previous tool
-      if (this.lastToolId) {
-        this.debouncedEmit({ id: uid(), type: 'tool-result', toolUseId: this.lastToolId, output: '', ts: Date.now() })
-      }
+      // Close previous tool with accumulated output
+      this.closeCurrentTool()
       this.clearStreaming()
 
       const toolUseId = uid()
       this.lastToolId = toolUseId
       this.lastToolName = toolName
+      this.toolOutputLines = []
       this.debouncedEmit({
         id: uid(), type: 'tool-use', toolName, toolUseId,
         input: this.extractInput(trimmed, toolName),
@@ -135,13 +147,12 @@ class TerminalPhaseParser {
     // ── Permission / approval prompt ──
     if (TerminalPhaseParser.WAITING_RE.test(trimmed)) {
       this.waitingForInput = false
-      if (this.lastToolId) {
-        this.debouncedEmit({ id: uid(), type: 'tool-result', toolUseId: this.lastToolId, output: '', ts: Date.now() })
-      }
+      this.closeCurrentTool()
       this.clearStreaming()
       const toolUseId = uid()
       this.lastToolId = toolUseId
       this.lastToolName = 'AskUserQuestion'
+      this.toolOutputLines = []
       this.debouncedEmit({
         id: uid(), type: 'tool-use', toolName: 'AskUserQuestion', toolUseId,
         input: { question: trimmed },
@@ -152,12 +163,7 @@ class TerminalPhaseParser {
 
     // ── Claude prompt → turn done ──
     if (TerminalPhaseParser.CLAUDE_PROMPT_RE.test(trimmed)) {
-      if (this.lastToolId) {
-        this.flushEmit()
-        this.emit({ id: uid(), type: 'tool-result', toolUseId: this.lastToolId, output: '', ts: Date.now() })
-        this.lastToolId = null
-        this.lastToolName = null
-      }
+      this.closeCurrentTool()
       this.clearStreaming()
       if (this.turnActive) {
         this.turnActive = false
@@ -168,10 +174,12 @@ class TerminalPhaseParser {
       return
     }
 
-    // ── Assistant text (only when no tool is open) ──
-    if (!this.lastToolId) {
-      // A complete line of text (not partial keystrokes) clears waitingForInput —
-      // this means the assistant has started responding with prose.
+    // ── Content accumulation ──
+    if (this.lastToolId) {
+      // Lines while a tool is open → accumulate as tool output
+      this.toolOutputLines.push(trimmed)
+    } else {
+      // Lines with no tool open → assistant text
       if (this.waitingForInput && trimmed.length > 3) {
         this.waitingForInput = false
       }
@@ -180,9 +188,34 @@ class TerminalPhaseParser {
           this.turnActive = true
           this.onTurnStart()
         }
-        this.emitStreaming(trimmed)
+        this.assistantLines.push(trimmed)
+        this.emitStreaming(this.assistantLines.join('\n'))
       }
     }
+  }
+
+  /** Close the current tool, emitting a tool-result with accumulated output */
+  private closeCurrentTool() {
+    if (this.lastToolId) {
+      this.flushEmit()
+      this.emit({
+        id: uid(), type: 'tool-result',
+        toolUseId: this.lastToolId,
+        output: this.toolOutputLines.join('\n'),
+        ts: Date.now(),
+      })
+      this.lastToolId = null
+      this.lastToolName = null
+      this.toolOutputLines = []
+    }
+    // Reset assistant text accumulation on any transition
+    this.assistantLines = []
+  }
+
+  /** Build the full assistant text for streaming, appending a partial line if present */
+  private buildAssistantText(partialLine: string): string {
+    if (this.assistantLines.length === 0) return partialLine
+    return this.assistantLines.join('\n') + '\n' + partialLine
   }
 
   // ── Debounced emission ──
@@ -234,9 +267,16 @@ class TerminalPhaseParser {
     if (this.idleTimer) clearTimeout(this.idleTimer)
     this.idleTimer = setTimeout(() => {
       if (this.lastToolId) {
-        this.emit({ id: uid(), type: 'tool-result', toolUseId: this.lastToolId, output: '', ts: Date.now() })
+        this.flushEmit()
+        this.emit({
+          id: uid(), type: 'tool-result',
+          toolUseId: this.lastToolId,
+          output: this.toolOutputLines.join('\n'),
+          ts: Date.now(),
+        })
         this.lastToolId = null
         this.lastToolName = null
+        this.toolOutputLines = []
       }
     }, 3000)
   }
@@ -246,13 +286,87 @@ class TerminalPhaseParser {
     return map[name] || name
   }
 
+  /**
+   * Extract structured input from a CLI tool line.
+   *
+   * The Claude CLI prints tool invocations like:
+   *   ⏺ Read src/main/agent.ts
+   *   ⏺ Bash npm run test
+   *   ⏺ Grep "pattern" src/
+   *   ⏺ Edit src/foo.ts
+   *   ⏺ Agent (search codebase for...)
+   *
+   * This mirrors the structured input the v0.4 SDK provided directly,
+   * so useJourneyPhase can match on command patterns (TEST_COMMANDS, etc.)
+   */
   private extractInput(line: string, toolName: string): Record<string, unknown> {
-    const parenMatch = line.match(new RegExp(`${toolName}\\(([^)]+)\\)`))
-    const arg = parenMatch?.[1]?.trim() || line.match(new RegExp(`${toolName}\\s+(.+)`))?.[1]?.trim()
-    if (!arg) return {}
-    if (toolName === 'Bash') return { command: arg }
-    if (toolName === 'Grep' || toolName === 'Glob') return { pattern: arg }
-    return { file_path: arg }
+    // Strip the bullet prefix and tool name to isolate the argument text.
+    // Match: optional whitespace, bullet char, whitespace, tool name, then capture the rest.
+    const argMatch = line.match(new RegExp(`^[\\s]*[⏺●◆▶╭─•→›»☐✦⬤]\\s*${toolName}\\s*(.*)$`))
+    const raw = argMatch?.[1]?.trim() || ''
+
+    // Also try the parenthesized form: ToolName(arg)
+    if (!raw) {
+      const parenMatch = line.match(new RegExp(`${toolName}\\(([^)]+)\\)`))
+      const parenArg = parenMatch?.[1]?.trim()
+      if (parenArg) {
+        if (toolName === 'Bash') return { command: parenArg }
+        return { file_path: parenArg }
+      }
+      return {}
+    }
+
+    switch (toolName) {
+      case 'Bash':
+        return { command: raw }
+
+      case 'Read':
+      case 'Write':
+      case 'Edit':
+      case 'MultiEdit':
+      case 'NotebookEdit':
+        return { file_path: raw.replace(/^["']|["']$/g, '') }
+
+      case 'Grep': {
+        // Grep "pattern" path/  or  Grep pattern
+        const quoted = raw.match(/^["']([^"']+)["']\s*(.*)$/)
+        if (quoted) {
+          const result: Record<string, unknown> = { pattern: quoted[1] }
+          if (quoted[2]) result.path = quoted[2]
+          return result
+        }
+        // Unquoted: first token is pattern, rest is path
+        const parts = raw.split(/\s+/)
+        if (parts.length > 1) return { pattern: parts[0], path: parts.slice(1).join(' ') }
+        return { pattern: raw }
+      }
+
+      case 'Glob':
+        return { pattern: raw }
+
+      case 'Agent':
+      case 'Skill': {
+        // Agent (description...)  or  Agent description
+        const desc = raw.replace(/^\(/, '').replace(/\)$/, '').trim()
+        return { description: desc }
+      }
+
+      case 'WebSearch':
+        return { query: raw }
+
+      case 'WebFetch':
+        return { url: raw }
+
+      case 'AskUserQuestion':
+        return { question: raw }
+
+      case 'TodoRead':
+      case 'TodoWrite':
+        return {}
+
+      default:
+        return { text: raw }
+    }
   }
 
   dispose() {

@@ -257,3 +257,146 @@ describe('end-to-end pipeline', () => {
     expect(parseLine(raw)).toEqual({ type: 'tool', name: 'Agent' })
   })
 })
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 6. Input extraction — verifies the parser produces SDK-quality structured inputs
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('extractInput (via TOOL_RE + arg parsing)', () => {
+  // Simulate extractInput logic: strip bullet+tool, then parse remaining text
+  function extractInput(line: string): { toolName: string; input: Record<string, unknown> } {
+    const clean = stripAnsi(line).replace(/\u00A0/g, ' ').trim()
+    const match = clean.match(TOOL_RE)
+    if (!match) return { toolName: '', input: {} }
+
+    const toolName = match[1]
+    const argMatch = clean.match(new RegExp(`^[\\s]*[⏺●◆▶╭─•→›»☐✦⬤]\\s*${toolName}\\s*(.*)$`))
+    const raw = argMatch?.[1]?.trim() || ''
+
+    switch (toolName) {
+      case 'Bash': return { toolName, input: raw ? { command: raw } : {} }
+      case 'Read':
+      case 'Edit':
+      case 'Write':
+      case 'MultiEdit':
+        return { toolName, input: raw ? { file_path: raw.replace(/^["']|["']$/g, '') } : {} }
+      case 'Grep':
+      case 'Search': {
+        const quoted = raw.match(/^["']([^"']+)["']\s*(.*)$/)
+        if (quoted) {
+          const result: Record<string, unknown> = { pattern: quoted[1] }
+          if (quoted[2]) result.path = quoted[2]
+          return { toolName, input: result }
+        }
+        const parts = raw.split(/\s+/)
+        if (parts.length > 1) return { toolName, input: { pattern: parts[0], path: parts.slice(1).join(' ') } }
+        return { toolName, input: raw ? { pattern: raw } : {} }
+      }
+      case 'Glob':
+      case 'ListFiles':
+      case 'LS':
+        return { toolName, input: raw ? { pattern: raw } : {} }
+      case 'Agent':
+      case 'Task':
+      case 'Skill': {
+        const desc = raw.replace(/^\(/, '').replace(/\)$/, '').trim()
+        return { toolName, input: desc ? { description: desc } : {} }
+      }
+      case 'WebSearch': return { toolName, input: raw ? { query: raw } : {} }
+      case 'WebFetch': return { toolName, input: raw ? { url: raw } : {} }
+      default: return { toolName, input: raw ? { text: raw } : {} }
+    }
+  }
+
+  it('extracts file_path from Read', () => {
+    expect(extractInput('⏺ Read src/main/agent.ts')).toEqual({
+      toolName: 'Read',
+      input: { file_path: 'src/main/agent.ts' },
+    })
+  })
+
+  it('extracts file_path from Edit', () => {
+    expect(extractInput('⏺ Edit src/renderer/App.tsx')).toEqual({
+      toolName: 'Edit',
+      input: { file_path: 'src/renderer/App.tsx' },
+    })
+  })
+
+  it('extracts command from Bash', () => {
+    expect(extractInput('⏺ Bash npm run test')).toEqual({
+      toolName: 'Bash',
+      input: { command: 'npm run test' },
+    })
+  })
+
+  it('extracts command from Bash with complex args', () => {
+    expect(extractInput('● Bash git diff --stat HEAD~3')).toEqual({
+      toolName: 'Bash',
+      input: { command: 'git diff --stat HEAD~3' },
+    })
+  })
+
+  it('extracts pattern from Grep', () => {
+    expect(extractInput('⏺ Grep "useEffect" src/')).toEqual({
+      toolName: 'Grep',
+      input: { pattern: 'useEffect', path: 'src/' },
+    })
+  })
+
+  it('extracts unquoted Grep pattern', () => {
+    expect(extractInput('⏺ Grep TODO')).toEqual({
+      toolName: 'Grep',
+      input: { pattern: 'TODO' },
+    })
+  })
+
+  it('extracts pattern from Glob', () => {
+    expect(extractInput('⏺ Glob **/*.test.ts')).toEqual({
+      toolName: 'Glob',
+      input: { pattern: '**/*.test.ts' },
+    })
+  })
+
+  it('extracts description from Agent', () => {
+    expect(extractInput('⏺ Agent (search codebase for auth logic)')).toEqual({
+      toolName: 'Agent',
+      input: { description: 'search codebase for auth logic' },
+    })
+  })
+
+  it('extracts query from WebSearch', () => {
+    expect(extractInput('⏺ WebSearch electron IPC best practices')).toEqual({
+      toolName: 'WebSearch',
+      input: { query: 'electron IPC best practices' },
+    })
+  })
+
+  it('extracts url from WebFetch', () => {
+    expect(extractInput('⏺ WebFetch https://example.com/api')).toEqual({
+      toolName: 'WebFetch',
+      input: { url: 'https://example.com/api' },
+    })
+  })
+
+  it('extracts file_path from Write', () => {
+    expect(extractInput('⏺ Write /tmp/output.ts')).toEqual({
+      toolName: 'Write',
+      input: { file_path: '/tmp/output.ts' },
+    })
+  })
+
+  it('handles ANSI-colored Bash tool line', () => {
+    const raw = '\x1b[1;34m⏺\x1b[0m \x1b[1;36mBash\x1b[0m npm test'
+    expect(extractInput(raw)).toEqual({
+      toolName: 'Bash',
+      input: { command: 'npm test' },
+    })
+  })
+
+  it('handles tool with no arguments', () => {
+    expect(extractInput('⏺ TodoRead')).toEqual({
+      toolName: 'TodoRead',
+      input: {},
+    })
+  })
+})

@@ -3,31 +3,27 @@ import type { UIMessage, AgentPhase, PhaseInfo, PermissionRequest, ActiveToolInf
 import { phaseLabelMap } from '../theme'
 import { useTheme } from '../ThemeContext'
 
-// ── Phase progression ordering ──
-// Higher = further along. Phase can only jump backward after a cooldown,
-// preventing flicker when the parser briefly misdetects.
-const PHASE_ORDER: Record<AgentPhase, number> = {
-  idle: 0,
-  thinking: 1,
-  researching: 1,
-  searching: 2,
-  planning: 3,
-  coding: 4,
-  testing: 5,
-  debugging: 4,
-  reviewing: 4,
-  done: 6,
-  stuck: 0,
-  awaiting: 7, // always shows immediately
+// ── Phase inference ──
+// Mirrors the v0.4 SDK approach: analyse the structured UIMessage stream
+// to determine what the agent is doing. Now that the terminal parser
+// produces rich messages (with real tool inputs and accumulated output),
+// this works just as well as it did when the SDK provided messages directly.
+
+const SEARCH_TOOLS = ['Grep', 'Glob', 'WebSearch', 'WebFetch']
+const READ_TOOLS = ['Read', 'Ls']
+const WRITE_TOOLS = ['Edit', 'Write', 'NotebookEdit']
+const AGENT_TOOLS = ['Agent', 'Skill']
+const TEST_COMMANDS = /\b(test|jest|vitest|mocha|pytest|cargo test|go test|npm test|bun test|yarn test|make test|build|tsc|eslint|lint)\b/i
+const DEBUG_COMMANDS = /\b(debug|gdb|lldb|strace|valgrind|console\.log|print|pdb|breakpoint)\b/i
+
+function basename(path: string): string {
+  return path.split('/').pop() || path
 }
 
-/** Minimum ms a phase must hold before we allow moving backward */
-const PHASE_HOLD_MS = 400
-
-function formatElapsed(seconds: number): string {
-  const s = Math.round(seconds)
-  if (s < 60) return `${s}s`
-  return `${Math.floor(s / 60)}m ${s % 60}s`
+function getToolInput(msg: Extract<UIMessage, { type: 'tool-use' }>): string {
+  return typeof msg.input === 'object' && msg.input !== null
+    ? JSON.stringify(msg.input)
+    : String(msg.input || '')
 }
 
 function getActiveTools(messages: UIMessage[]): ActiveToolInfo[] {
@@ -54,21 +50,10 @@ function getActiveTools(messages: UIMessage[]): ActiveToolInfo[] {
   return active
 }
 
-const SEARCH_TOOLS = ['Grep', 'Glob', 'WebSearch', 'WebFetch']
-const READ_TOOLS = ['Read', 'Ls']
-const WRITE_TOOLS = ['Edit', 'Write', 'NotebookEdit']
-const AGENT_TOOLS = ['Agent', 'Skill']
-const TEST_COMMANDS = /\b(test|jest|vitest|mocha|pytest|cargo test|go test|npm test|bun test|yarn test|make test|build|tsc|eslint|lint)\b/i
-const DEBUG_COMMANDS = /\b(debug|gdb|lldb|strace|valgrind|console\.log|print|pdb|breakpoint)\b/i
-
-function basename(path: string): string {
-  return path.split('/').pop() || path
-}
-
-function getToolInput(msg: Extract<UIMessage, { type: 'tool-use' }>): string {
-  return typeof msg.input === 'object' && msg.input !== null
-    ? JSON.stringify(msg.input)
-    : String(msg.input || '')
+function formatElapsed(seconds: number): string {
+  const s = Math.round(seconds)
+  if (s < 60) return `${s}s`
+  return `${Math.floor(s / 60)}m ${s % 60}s`
 }
 
 function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPhase; detail: string; activeTool?: ActiveToolInfo } {
@@ -90,8 +75,7 @@ function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPha
   // Session ended without result
   if (!isActive && messages.length > 0) return { phase: 'done', detail: '' }
 
-  // --- Scope to current turn only (messages after last 'result' marker) ---
-  // This prevents old tool activity from previous turns polluting the phase.
+  // --- Scope to current turn (messages after last 'result' marker) ---
   let turnStart = 0
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].type === 'result') {
@@ -100,25 +84,20 @@ function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPha
     }
   }
   const turnMessages = messages.slice(turnStart)
-
-  // If active but no messages in current turn yet, show idle (waiting for input)
   if (turnMessages.length === 0) return { phase: 'idle', detail: '' }
 
   const turnLast = turnMessages[turnMessages.length - 1]
 
-  // --- Walk current turn messages to build activity profile ---
+  // --- Walk current turn to build activity profile (last 30 msgs) ---
   const window = turnMessages.length > 30 ? turnMessages.slice(-30) : turnMessages
   let hasSearches = false
   let hasReads = false
   let hasWrites = false
   let hasAgentSpawns = false
   let readingAfterWriting = false
-  let hasErrorRecentlyThenRead = false
 
-  // Track recent window (last ~8 messages) for fine-grained phase
   const recentTools: { name: string; input: string }[] = []
   let lastAssistantStreaming = false
-  let lastAssistantLen = 0
   let hasLongAssistantAfterReads = false
   let recentErrorCount = 0
 
@@ -140,23 +119,19 @@ function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPha
       if (name === 'Bash') {
         if (/\b(>|>>|tee|cp|mv|mkdir|touch|echo\s.*>)\b/.test(input)) hasWrites = true
       }
-
-      // Reset error tracking on non-error
       recentErrorCount = 0
     }
-    if (msg.type === 'error') {
-      recentErrorCount++
-    }
+    if (msg.type === 'error') recentErrorCount++
     if (msg.type === 'assistant') {
       lastAssistantStreaming = msg.isStreaming
-      lastAssistantLen = msg.text.length
       if (!msg.isStreaming && hasReads && !hasWrites && msg.text.length > 200) {
         hasLongAssistantAfterReads = true
       }
     }
   }
 
-  // Check if recently had an error then reads (= debugging)
+  // Check for error→read pattern (debugging)
+  let hasErrorRecentlyThenRead = false
   if (recentErrorCount > 0) {
     const lastFew = turnMessages.slice(-6)
     const hadError = lastFew.some(m => m.type === 'error')
@@ -164,7 +139,18 @@ function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPha
     if (hadError && hadReadAfter) hasErrorRecentlyThenRead = true
   }
 
-  // --- Active tool tracking (scoped to current turn) ---
+  // Also check tool-result output for error indicators (enriched by terminal parser)
+  if (!hasErrorRecentlyThenRead) {
+    const recentResults = turnMessages.slice(-4).filter(m => m.type === 'tool-result') as Array<Extract<UIMessage, { type: 'tool-result' }>>
+    for (const r of recentResults) {
+      if (r.output && /\b(FAIL|ERROR|error|failed|exception)\b/i.test(r.output.slice(0, 500))) {
+        hasErrorRecentlyThenRead = true
+        break
+      }
+    }
+  }
+
+  // --- Active tool tracking ---
   const activeTools = getActiveTools(turnMessages)
   const currentActiveTool = activeTools[activeTools.length - 1]
   const elapsedSuffix = currentActiveTool?.elapsed
@@ -188,89 +174,108 @@ function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPha
       }
       if (name === 'Grep') return `Searching for "${(parsed.pattern || '').slice(0, 30)}"`
       if (name === 'Glob') return `Finding ${parsed.pattern || 'files'}...`
-      if (name === 'Agent') return 'Spawned sub-agent...'
+      if (name === 'Agent') return parsed.description ? `Agent: ${parsed.description.slice(0, 40)}` : 'Spawned sub-agent...'
       if (name === 'Bash') {
         const cmd = parsed.command || ''
-        if (TEST_COMMANDS.test(cmd)) return `Running ${cmd.split(' ')[0]}...`
+        if (TEST_COMMANDS.test(cmd)) return `Running ${cmd.split(/\s+/)[0]}...`
         if (DEBUG_COMMANDS.test(cmd)) return 'Debugging...'
-        return `Running command...`
+        return `Running: ${cmd.slice(0, 50)}`
       }
-      if (name === 'WebSearch') return 'Searching the web...'
+      if (name === 'WebSearch') return `Searching: ${(parsed.query || '').slice(0, 40)}`
       if (name === 'WebFetch') return 'Fetching page...'
     } catch { /* fallthrough */ }
     return `Using ${name}...`
   }
 
-  // Helper to build return value with active tool info
   const result = (phase: AgentPhase, detail: string) => ({
     phase,
     detail: detail + (currentActiveTool && detail ? elapsedSuffix : ''),
     activeTool: currentActiveTool,
   })
 
-  // --- Determine phase from recent activity (most specific first) ---
+  // --- Phase decision tree (most specific first) ---
 
-  // Currently streaming assistant text with no tools yet = thinking
+  // Streaming assistant text with no tools yet → thinking
   if (turnLast?.type === 'assistant' && lastAssistantStreaming && recentTools.length === 0) {
     return result('thinking', 'Thinking...')
   }
 
-  // Last tool in recent window determines fine-grained phase
+  // Last tool determines fine-grained phase
   if (lastTool) {
     const { name, input } = lastTool
 
-    // AskUserQuestion = awaiting user action
+    // Awaiting user
     if (name === 'AskUserQuestion') return result('awaiting', 'Needs attention')
 
-    // Testing: bash with test commands
+    // Bash: check command content for test/debug patterns
     if (name === 'Bash') {
       if (TEST_COMMANDS.test(input)) return result('testing', detailFromTool())
       if (DEBUG_COMMANDS.test(input)) return result('debugging', detailFromTool())
     }
 
-    // Agent/Skill spawn = researching
+    // Agent/Skill → researching
     if (AGENT_TOOLS.includes(name)) return result('researching', detailFromTool())
 
-    // Web search/fetch = researching
+    // Web → researching
     if (name === 'WebSearch' || name === 'WebFetch') return result('researching', detailFromTool())
 
-    // Grep/Glob = searching
+    // Grep/Glob → searching
     if (name === 'Grep' || name === 'Glob') return result('searching', detailFromTool())
   }
 
-  // Error then reading = debugging
+  // Error then reading → debugging
   if (hasErrorRecentlyThenRead) return result('debugging', detailFromTool() || 'Investigating error...')
 
-  // Reading after writing = reviewing
+  // Reading after writing → reviewing
   if (readingAfterWriting) return result('reviewing', detailFromTool() || 'Reviewing changes...')
 
-  // Has writes = coding
+  // Has writes → coding
   if (hasWrites) return result('coding', detailFromTool() || 'Writing code...')
 
-  // Long assistant response after reads = planning
+  // Long assistant after reads → planning
   if (hasLongAssistantAfterReads) return result('planning', 'Forming a plan...')
 
-  // Streaming assistant after reads = thinking
+  // Streaming after reads → thinking
   if (turnLast?.type === 'assistant' && lastAssistantStreaming && hasReads) {
     return result('thinking', 'Analyzing...')
   }
 
-  // Has searches or reads = searching
+  // Has searches or reads → searching
   if (hasSearches || hasReads) return result('searching', detailFromTool() || 'Searching...')
 
-  // Streaming text at start = thinking
+  // Streaming at start → thinking
   if (turnLast?.type === 'assistant' && lastAssistantStreaming) {
     return result('thinking', 'Thinking...')
   }
 
-  // Sub-agents spawned = researching
+  // Sub-agents spawned → researching
   if (hasAgentSpawns) return result('researching', 'Researching...')
 
-  // Nothing actively happening (no streaming, no active tools) = idle
+  // Nothing happening → idle
   if (!lastAssistantStreaming && activeTools.length === 0) return { phase: 'idle', detail: '' }
 
   return result('thinking', '')
 }
+
+// ── Phase smoothing ──
+// Prevents flicker when the parser briefly misdetects. Higher = further along.
+// Phase can only jump backward after a cooldown.
+const PHASE_ORDER: Record<AgentPhase, number> = {
+  idle: 0,
+  thinking: 1,
+  researching: 1,
+  searching: 2,
+  planning: 3,
+  coding: 4,
+  testing: 5,
+  debugging: 4,
+  reviewing: 4,
+  done: 6,
+  stuck: 0,
+  awaiting: 7,
+}
+
+const PHASE_HOLD_MS = 400
 
 export function useJourneyPhase(
   messages: UIMessage[],
@@ -282,7 +287,6 @@ export function useJourneyPhase(
   const lastPhaseRef = useRef<AgentPhase>('idle')
   const lastPhaseTimeRef = useRef(0)
 
-  // Compute raw phase
   const raw = useMemo(() => {
     let { phase, detail, activeTool } = inferPhase(messages, isActive)
 
@@ -296,7 +300,6 @@ export function useJourneyPhase(
     return { phase, detail, activeTool }
   }, [messages, isActive, permissionRequest])
 
-  // Smooth: only allow backward jumps after PHASE_HOLD_MS
   const [smoothPhase, setSmoothPhase] = useState<AgentPhase>(raw.phase)
   const [smoothDetail, setSmoothDetail] = useState(raw.detail)
   const [smoothTool, setSmoothTool] = useState(raw.activeTool)
@@ -306,9 +309,7 @@ export function useJourneyPhase(
     const rawOrder = PHASE_ORDER[raw.phase] ?? 0
     const curOrder = PHASE_ORDER[smoothPhase] ?? 0
 
-    // Always allow forward progression, awaiting, or done immediately.
-    // idle is NOT fast-tracked — it should go through the hold period to prevent
-    // brief flashes when transitioning between turns.
+    // Forward progression, awaiting, or done → apply immediately
     if (rawOrder >= curOrder || raw.phase === 'awaiting' || raw.phase === 'done') {
       lastPhaseRef.current = raw.phase
       lastPhaseTimeRef.current = now
@@ -318,7 +319,7 @@ export function useJourneyPhase(
       return
     }
 
-    // Backward jump — only allow after hold period
+    // Backward jump → only after hold period
     const elapsed = now - lastPhaseTimeRef.current
     if (elapsed >= PHASE_HOLD_MS) {
       lastPhaseRef.current = raw.phase
@@ -327,7 +328,6 @@ export function useJourneyPhase(
       setSmoothDetail(raw.detail)
       setSmoothTool(raw.activeTool)
     } else {
-      // Schedule update after remaining hold time
       const timer = setTimeout(() => {
         lastPhaseRef.current = raw.phase
         lastPhaseTimeRef.current = Date.now()
