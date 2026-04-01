@@ -498,6 +498,7 @@ class JourneyHookWatcher {
 
         for (const line of lines) {
           if (!line.trim()) continue
+          if (this.disposed) return
           try {
             const event = JSON.parse(line)
             this.emitPhase(event.phase, event.detail || '', event.activeTool, event.ts)
