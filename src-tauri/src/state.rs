@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, oneshot};
+use portable_pty::MasterPty;
 
 // ---------------------------------------------------------------------------
 // Permission handling
@@ -57,6 +58,10 @@ pub struct TerminalState {
     pub cwd: String,
     /// Sync writer to the PTY master — wrapped in a Mutex for multi-writer safety
     pub writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    /// PTY master handle — needed for resize operations
+    pub master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    /// Scrollback buffer for terminal reattach
+    pub buffer: Arc<Mutex<String>>,
 }
 
 // ---------------------------------------------------------------------------
