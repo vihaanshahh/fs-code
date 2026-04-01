@@ -69,6 +69,10 @@ function flushMessages() {
   if (pendingMsgs.length > MSG_QUEUE_CAP / 2) {
     highWaterCount++
     if (highWaterCount > 3) currentBatchMs = Math.min(currentBatchMs + 10, MSG_BATCH_MS_MAX)
+  } else if (pendingMsgs.length < MSG_QUEUE_CAP * 0.1) {
+    // Queue is nearly empty — reset immediately to minimum interval
+    highWaterCount = 0
+    currentBatchMs = MSG_BATCH_MS_MIN
   } else {
     highWaterCount = Math.max(0, highWaterCount - 1)
     if (highWaterCount === 0) currentBatchMs = MSG_BATCH_MS_MIN
@@ -176,6 +180,23 @@ export function startMemoryMonitor() {
   }
   _memoryMonitorTimer = setInterval(tick, _monitorIntervalMs)
   _memoryMonitorTimer.unref()
+}
+
+/** Stop the memory monitor timer — call on before-quit to prevent leaked timers */
+export function stopMemoryMonitor() {
+  if (_memoryMonitorTimer) {
+    clearInterval(_memoryMonitorTimer)
+    _memoryMonitorTimer = null
+  }
+}
+
+/** Clear the batched IPC message timer — call on before-quit */
+export function cleanupBatchTimer() {
+  if (batchTimer) {
+    clearTimeout(batchTimer)
+    batchTimer = null
+  }
+  pendingMsgs = []
 }
 
 // --- Agent lifecycle ---

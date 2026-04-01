@@ -306,6 +306,15 @@ app.whenReady().then(async () => {
   })
 })
 
+app.on('before-quit', async () => {
+  // Stop timers that would otherwise leak after quit
+  try {
+    const agent = await import('./agent')
+    agent.stopMemoryMonitor()
+    agent.cleanupBatchTimer()
+  } catch {}
+})
+
 app.on('window-all-closed', async () => {
   log.flush()
   try {

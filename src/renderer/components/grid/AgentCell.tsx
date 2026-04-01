@@ -4,7 +4,7 @@ import { useAgent } from '../../hooks/useAgent'
 import { useTheme } from '../../ThemeContext'
 import type { AgentDescriptor } from '../../../shared/types'
 
-export default function AgentCell({
+function AgentCell({
   descriptor,
   index,
   isFocused,
@@ -219,3 +219,15 @@ export default function AgentCell({
     </div>
   )
 }
+
+export default React.memo(AgentCell, (prev, next) =>
+  prev.descriptor === next.descriptor &&
+  prev.isFocused === next.isFocused &&
+  prev.index === next.index &&
+  prev.onFocus === next.onFocus &&
+  prev.onClose === next.onClose &&
+  prev.onSlashCommand === next.onSlashCommand &&
+  prev.onRename === next.onRename &&
+  prev.draggable === next.draggable &&
+  prev.onDragStart === next.onDragStart
+)

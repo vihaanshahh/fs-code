@@ -66,57 +66,74 @@ export function clearAgentAwaitingSnapshot(agentId: string) {
 }
 
 // ── IPC listeners — keep session tracking for active dot indicator ──
+// Guard against duplicate registration on hot-reload: store cleanup fns
+// and call them before re-registering.
 
-api.onSessionStarted((data: any) => {
-  if (!data?.agentId) return
-  setState(data.agentId, prev => ({
-    ...prev,
-    isActive: true,
-    phaseSnapshot: null,
-  }))
-})
+let _ipcCleanups: (() => void)[] | null = null
 
-api.onSessionEnded((data: any) => {
-  if (!data?.agentId) return
-  setState(data.agentId, prev => ({
-    ...prev,
-    isActive: false,
-    phaseSnapshot: prev.phaseSnapshot?.phase === 'done' ? prev.phaseSnapshot : null,
-  }))
-})
+function setupIpcListeners() {
+  // Clean up any previous listeners (hot-reload safety)
+  if (_ipcCleanups) {
+    _ipcCleanups.forEach(fn => fn())
+  }
 
-// Keep message listener for JourneyBar / FileActivity compatibility
-api.onAgentMessage((data: any) => {
-  const agentId = data.agentId as string
-  if (!agentId || !data.type || !data.id) return
-  const msg: UIMessage = data
-  setState(agentId, prev => ({
-    ...prev,
-    messages: [...prev.messages.slice(-199), msg],
-  }))
-})
+  const cleanups: (() => void)[] = []
 
-api.onAgentPhase((data: any) => {
-  const agentId = data.agentId as string
-  if (!agentId || !data.phase) return
-  setState(agentId, prev => ({
-    ...prev,
-    phaseSnapshot: {
-      phase: data.phase,
-      detail: data.detail || '',
-      startedAt: data.startedAt || Date.now(),
-      activeTool: data.activeTool,
-    },
+  cleanups.push(api.onSessionStarted((data: any) => {
+    if (!data?.agentId) return
+    setState(data.agentId, prev => ({
+      ...prev,
+      isActive: true,
+      phaseSnapshot: null,
+    }))
   }))
-})
 
-api.onAgentMessageBatch((data: { agentId: string; messages: any[] }) => {
-  if (!data?.agentId || !Array.isArray(data.messages)) return
-  setState(data.agentId, prev => ({
-    ...prev,
-    messages: [...prev.messages, ...data.messages].slice(-200),
+  cleanups.push(api.onSessionEnded((data: any) => {
+    if (!data?.agentId) return
+    setState(data.agentId, prev => ({
+      ...prev,
+      isActive: false,
+      phaseSnapshot: prev.phaseSnapshot?.phase === 'done' ? prev.phaseSnapshot : null,
+    }))
   }))
-})
+
+  // Keep message listener for JourneyBar / FileActivity compatibility
+  cleanups.push(api.onAgentMessage((data: any) => {
+    const agentId = data.agentId as string
+    if (!agentId || !data.type || !data.id) return
+    const msg: UIMessage = data
+    setState(agentId, prev => ({
+      ...prev,
+      messages: [...prev.messages.slice(-199), msg],
+    }))
+  }))
+
+  cleanups.push(api.onAgentPhase((data: any) => {
+    const agentId = data.agentId as string
+    if (!agentId || !data.phase) return
+    setState(agentId, prev => ({
+      ...prev,
+      phaseSnapshot: {
+        phase: data.phase,
+        detail: data.detail || '',
+        startedAt: data.startedAt || Date.now(),
+        activeTool: data.activeTool,
+      },
+    }))
+  }))
+
+  cleanups.push(api.onAgentMessageBatch((data: { agentId: string; messages: any[] }) => {
+    if (!data?.agentId || !Array.isArray(data.messages)) return
+    setState(data.agentId, prev => ({
+      ...prev,
+      messages: [...prev.messages, ...data.messages].slice(-200),
+    }))
+  }))
+
+  _ipcCleanups = cleanups
+}
+
+setupIpcListeners()
 
 // ── Public: clear cache for a destroyed agent ──
 export function clearAgentCache(agentId: string) {

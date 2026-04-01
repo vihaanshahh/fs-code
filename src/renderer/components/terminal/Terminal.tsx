@@ -18,6 +18,8 @@ type TermExitHandler = () => void
 
 const dataHandlers = new Map<string, TermDataHandler>()
 const exitHandlers = new Map<string, TermExitHandler>()
+// Generation counter per terminal ID — prevents stale cleanup from deleting new handler
+const handlerGenerations = new Map<string, number>()
 let globalListenersSetup = false
 
 function normalizeTerminalScreen(text: string): string {
@@ -94,6 +96,7 @@ export default function TerminalPanel({
     let term: Terminal | null = null
     let fitAddon: FitAddon | null = null
     let ptyId: string | null = null
+    let ptyGen = 0 // generation counter for handler cleanup safety
     let inputDisposable: { dispose: () => void } | null = null
     let resizeDisposable: { dispose: () => void } | null = null
     let observer: ResizeObserver | null = null
@@ -214,6 +217,9 @@ export default function TerminalPanel({
         ptyId = terminalId
 
         // Register handler BEFORE replaying buffer to avoid missing data
+        // Use generation counter to guard against stale cleanup race
+        ptyGen = (handlerGenerations.get(terminalId) || 0) + 1
+        handlerGenerations.set(terminalId, ptyGen)
         let gotPrompt = false
         dataHandlers.set(terminalId, (data: string) => {
           if (term && !disposed) {
@@ -302,8 +308,12 @@ export default function TerminalPanel({
       inputDisposable?.dispose()
       resizeDisposable?.dispose()
       if (ptyId) {
-        dataHandlers.delete(ptyId)
-        exitHandlers.delete(ptyId)
+        // Only delete handlers if this cleanup owns the current generation
+        // (prevents new mount's handler from being deleted by old mount's cleanup)
+        if (handlerGenerations.get(ptyId) === ptyGen) {
+          dataHandlers.delete(ptyId)
+          exitHandlers.delete(ptyId)
+        }
       }
       termRef.current = null
       fitRef.current = null

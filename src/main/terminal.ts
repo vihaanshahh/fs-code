@@ -202,11 +202,13 @@ class SessionJsonlWatcher {
       this.sessionPollTimer = null
     }
 
-    // Poll every 200ms for new data
+    // Poll at 2s — the file watcher handles the fast path.
+    // Before session discovery we polled at 250ms; now that session is found,
+    // this is just a fallback for missed fs events.
     this.pollTimer = setInterval(() => {
       if (this.disposed) return
       this.readNewLines()
-    }, 200)
+    }, 2000)
 
     // Also read immediately
     this.readNewLines()
@@ -430,6 +432,8 @@ class JourneyHookWatcher {
   private partialLine = ''
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private fileWatcher: ReturnType<typeof watch> | null = null
+  private disposed = false
+  private fileFound = false
 
   constructor(
     filePath: string,
@@ -443,10 +447,14 @@ class JourneyHookWatcher {
   }
 
   private attach() {
-    const read = () => this.readNewLines()
+    const read = () => {
+      if (this.disposed) return
+      this.readNewLines()
+    }
     this.pollTimer = setInterval(read, 200)
     try {
       this.fileWatcher = watch(tmpdir(), (_eventType, filename) => {
+        if (this.disposed) return
         if (!filename || join(tmpdir(), filename.toString()) !== this.filePath) return
         read()
       })
@@ -460,7 +468,21 @@ class JourneyHookWatcher {
   }
 
   private readNewLines() {
+    if (this.disposed) return
     if (!existsSync(this.filePath)) return
+
+    // After first successful read, slow polling to 500ms (file watcher handles fast path)
+    if (!this.fileFound) {
+      this.fileFound = true
+      if (this.pollTimer) {
+        clearInterval(this.pollTimer)
+        this.pollTimer = setInterval(() => {
+          if (this.disposed) return
+          this.readNewLines()
+        }, 500)
+      }
+    }
+
     try {
       const fd = openSync(this.filePath, 'r')
       try {
@@ -492,6 +514,7 @@ class JourneyHookWatcher {
   }
 
   dispose() {
+    this.disposed = true
     if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
     if (this.fileWatcher) { this.fileWatcher.close(); this.fileWatcher = null }
     try { unlinkSync(this.filePath) } catch { /* ignore */ }
