@@ -33,6 +33,10 @@ export function registerIpcHandlers() {
     return auth.logout()
   })
 
+  ipcMain.handle(IPC.GH_CLI_STATUS, async () => {
+    return auth.getGhCliStatus()
+  })
+
   // Dialog
   ipcMain.handle(IPC.DIALOG_OPEN_FOLDER, async () => {
     const result = await dialog.showOpenDialog({

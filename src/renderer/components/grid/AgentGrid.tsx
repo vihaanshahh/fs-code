@@ -252,7 +252,7 @@ export default function AgentGrid({
 
       {/* 1 agent: full screen */}
       {n === 1 && (
-        <div style={{ height: '100%' }}>
+        <div key={1} className="layout-enter" style={{ height: '100%' }}>
           <AgentCell
             descriptor={agents[0]}
             index={0}
@@ -268,7 +268,7 @@ export default function AgentGrid({
 
       {/* 2 agents: vertical split (left | right) */}
       {n === 2 && (
-        <div style={{ display: 'flex', height: '100%' }}>
+        <div key={2} className="layout-enter" style={{ display: 'flex', height: '100%' }}>
           <div
             style={{ width: `${hSplit}%`, overflow: 'hidden', minWidth: 0 }}
             onDragOver={e => e.preventDefault()}
@@ -297,7 +297,7 @@ export default function AgentGrid({
 
       {/* 3 agents: top full-width | bottom two side-by-side */}
       {n === 3 && (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <div key={3} className="layout-enter" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           <div
             style={{ height: `${vSplit}%`, overflow: 'hidden', minHeight: 0 }}
             onDragOver={e => e.preventDefault()}
@@ -341,7 +341,7 @@ export default function AgentGrid({
 
       {/* 4 agents: 2x2 with both dividers */}
       {n === 4 && (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <div key={4} className="layout-enter" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           {/* Top row */}
           <div style={{ height: `${vSplit}%`, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
             <div
@@ -402,7 +402,7 @@ export default function AgentGrid({
       {n >= 5 && (() => {
         const rows = Math.ceil(n / 3)
         return (
-          <div style={{
+          <div key={n} className="layout-enter" style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(3, 1fr)',
             gridTemplateRows: `repeat(${rows}, 1fr)`,

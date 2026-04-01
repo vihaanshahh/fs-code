@@ -96,9 +96,6 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
         />
       </div>
 
-      {/* Layout section */}
-      {/* Layout picker commented out — grid mode disabled for now */}
-      {/*
       <div style={{ borderTop: `1px solid ${colors.border}` }}>
         <div style={{
           padding: '8px 16px 4px',
@@ -134,7 +131,6 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           ))}
         </div>
       </div>
-      */}
 
       {/* Updates section */}
       <div style={{ borderTop: `1px solid ${colors.border}` }}>

@@ -1,5 +1,5 @@
 // Centralized design tokens for Fluidstate AI
-// Multiple themes with Japanese-inspired aesthetics
+// Multiple color themes
 
 export type ThemeMode = 'dark' | 'light' | 'midnight' | 'sakura' | 'matcha' | 'wabi' | 'claude'
 
@@ -11,16 +11,16 @@ export interface ThemeInfo {
 }
 
 export const themeList: ThemeInfo[] = [
-  { id: 'dark',     label: 'Sumi',     description: 'Warm charcoal',   swatch: '#1e1e1e' },
-  { id: 'light',    label: 'Shiro',    description: 'Clean daylight',  swatch: '#ffffff' },
-  { id: 'midnight', label: 'Yoru',     description: 'Deep indigo',     swatch: '#0f0f1a' },
-  { id: 'sakura',   label: 'Sakura',   description: 'Blush pink',      swatch: '#1a1018' },
-  { id: 'matcha',   label: 'Matcha',   description: 'Forest green',    swatch: '#0e1610' },
-  { id: 'wabi',     label: 'Wabi',     description: 'Aged clay',       swatch: '#1c1714' },
+  { id: 'dark',     label: 'Charcoal', description: 'Warm charcoal',   swatch: '#1e1e1e' },
+  { id: 'light',    label: 'Light',    description: 'Clean daylight',  swatch: '#ffffff' },
+  { id: 'midnight', label: 'Midnight', description: 'Deep indigo',     swatch: '#0f0f1a' },
+  { id: 'sakura',   label: 'Rose',     description: 'Blush pink',      swatch: '#1a1018' },
+  { id: 'matcha',   label: 'Forest',   description: 'Forest green',    swatch: '#0e1610' },
+  { id: 'wabi',     label: 'Clay',     description: 'Aged clay',       swatch: '#1c1714' },
   { id: 'claude',   label: 'Claude',   description: 'Anthropic',       swatch: '#d97757' },
 ]
 
-// ── Sumi — warm charcoal (default dark) ─────────────────────────
+// ── Charcoal — warm charcoal (default dark) ─────────────────────
 
 const darkColors = {
   bg: '#1e1e1e',
@@ -76,7 +76,7 @@ const darkColors = {
   fileModalOverlay: 'rgba(18, 18, 18, 0.88)',
 } as const
 
-// ── Shiro — clean daylight ──────────────────────────────────────
+// ── Light — clean daylight ──────────────────────────────────────
 
 const lightColors = {
   bg: '#ffffff',
@@ -132,7 +132,7 @@ const lightColors = {
   fileModalOverlay: 'rgba(240, 240, 240, 0.9)',
 } as const
 
-// ── Yoru — deep indigo midnight ─────────────────────────────────
+// ── Midnight — deep indigo ──────────────────────────────────────
 
 const midnightColors = {
   bg: '#0f0f1a',
@@ -188,7 +188,7 @@ const midnightColors = {
   fileModalOverlay: 'rgba(10, 10, 18, 0.92)',
 } as const
 
-// ── Sakura — soft blush pink on deep plum ───────────────────────
+// ── Rose — soft blush pink on deep plum ─────────────────────────
 
 const sakuraColors = {
   bg: '#1a1018',
@@ -244,7 +244,7 @@ const sakuraColors = {
   fileModalOverlay: 'rgba(20, 12, 18, 0.90)',
 } as const
 
-// ── Matcha — deep forest green ──────────────────────────────────
+// ── Forest — deep forest green ──────────────────────────────────
 
 const matchaColors = {
   bg: '#0e1610',
@@ -300,7 +300,7 @@ const matchaColors = {
   fileModalOverlay: 'rgba(10, 16, 12, 0.92)',
 } as const
 
-// ── Wabi — aged clay / weathered earth ──────────────────────────
+// ── Clay — aged clay / weathered earth ──────────────────────────
 
 const wabiColors = {
   bg: '#1c1714',

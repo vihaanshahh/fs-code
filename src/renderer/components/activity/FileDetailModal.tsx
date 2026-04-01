@@ -145,17 +145,17 @@ function TotalDiffView({ filePath, cwd }: { filePath: string; cwd?: string }) {
       .then((data: any) => {
         if (cancelled) return
         if (data && typeof data === 'object' && typeof data.status === 'string') {
-          setGitData(data)
+          setGitData({ ...data, currentContent: data.currentContent ?? '' })
         } else {
-          return api.readFile(filePath, cwd).then(({ content }: { content: string }) => {
-            if (!cancelled) setGitData({ baseContent: null, currentContent: content, status: 'untracked' })
+          return api.readFile(filePath, cwd).then((res: any) => {
+            if (!cancelled) setGitData({ baseContent: null, currentContent: res?.content ?? '', status: 'untracked' })
           })
         }
       })
       .catch(() => {
         return api.readFile(filePath, cwd)
-          .then(({ content }: { content: string }) => {
-            if (!cancelled) setGitData({ baseContent: null, currentContent: content, status: 'untracked' })
+          .then((res: any) => {
+            if (!cancelled) setGitData({ baseContent: null, currentContent: res?.content ?? '', status: 'untracked' })
           })
           .catch(() => {
             if (!cancelled) setGitData({ baseContent: null, currentContent: '', status: 'error' })
@@ -389,9 +389,9 @@ export default function FileDetailModal({
   useEffect(() => {
     setLoading(true)
     api.readFile(file.path, cwd)
-      .then(({ content, language }: { content: string; language: string }) => {
-        setContent(content)
-        setLanguage(language)
+      .then((res: any) => {
+        setContent(res?.content ?? '// Could not read file')
+        setLanguage(res?.language ?? 'plaintext')
       })
       .catch(() => setContent('// Could not read file'))
       .finally(() => setLoading(false))

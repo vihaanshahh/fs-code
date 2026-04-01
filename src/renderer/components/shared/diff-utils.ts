@@ -16,9 +16,9 @@ interface DiffHunk {
 }
 
 /** Simple LCS-based line diff */
-export function computeLineDiff(oldStr: string, newStr: string): DiffLine[] {
-  const oldLines = oldStr.split('\n')
-  const newLines = newStr.split('\n')
+export function computeLineDiff(oldStr: string | undefined | null, newStr: string | undefined | null): DiffLine[] {
+  const oldLines = (oldStr ?? '').split('\n')
+  const newLines = (newStr ?? '').split('\n')
   const m = oldLines.length
   const n = newLines.length
 
@@ -91,7 +91,8 @@ export function splitIntoHunks(lines: DiffLine[], contextLines = 3): DiffHunk[] 
   return hunks
 }
 
-export function newFileDiffLines(content: string): DiffLine[] {
+export function newFileDiffLines(content: string | undefined | null): DiffLine[] {
+  if (!content) return []
   return content.split('\n').map((line, i) => ({
     type: 'add' as const,
     content: line,
@@ -99,7 +100,8 @@ export function newFileDiffLines(content: string): DiffLine[] {
   }))
 }
 
-export function deletedFileDiffLines(content: string): DiffLine[] {
+export function deletedFileDiffLines(content: string | undefined | null): DiffLine[] {
+  if (!content) return []
   return content.split('\n').map((line, i) => ({
     type: 'remove' as const,
     content: line,

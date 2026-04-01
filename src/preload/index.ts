@@ -1,12 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/types'
-import type { PermissionResponse, ProviderId, ProviderConfig } from '../shared/types'
+import type { PermissionResponse, ProviderId, ProviderConfig, GhCliStatus } from '../shared/types'
 
 const api = {
   // Auth
   authStatus: () => ipcRenderer.invoke(IPC.AUTH_STATUS),
   authLogin: () => ipcRenderer.invoke(IPC.AUTH_LOGIN),
   authLogout: () => ipcRenderer.invoke(IPC.AUTH_LOGOUT),
+  ghCliStatus: (): Promise<GhCliStatus> => ipcRenderer.invoke(IPC.GH_CLI_STATUS),
 
   // Dialog
   openFolderDialog: (): Promise<string | null> =>
@@ -172,6 +173,11 @@ const api = {
     const handler = (_: any, data: any) => cb(data)
     ipcRenderer.on(IPC.AGENT_SESSION_ENDED, handler)
     return () => ipcRenderer.removeListener(IPC.AGENT_SESSION_ENDED, handler)
+  },
+  onAgentPhase: (cb: (data: any) => void) => {
+    const handler = (_: any, data: any) => cb(data)
+    ipcRenderer.on(IPC.AGENT_PHASE, handler)
+    return () => ipcRenderer.removeListener(IPC.AGENT_PHASE, handler)
   },
   onTerminalData: (cb: (data: { terminalId: string; data: string }) => void) => {
     const handler = (_: any, data: any) => cb(data)

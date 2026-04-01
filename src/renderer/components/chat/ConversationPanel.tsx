@@ -403,7 +403,7 @@ function ModelCard({ data, onSlashCommand }: { data: ModelData; onSlashCommand?:
         Model
       </div>
 
-      {data.models.length > 0 ? data.models.map(m => {
+      {(data.models ?? []).length > 0 ? (data.models ?? []).map(m => {
         const isCurrent = m.value === data.current
         return (
           <div

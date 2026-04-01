@@ -32,7 +32,6 @@ files:
   - node_modules/tree-sitter-json/**/*
   - node_modules/tree-sitter-css/**/*
   - node_modules/tree-sitter-html/**/*
-  - node_modules/chokidar/**/*
   - node_modules/bindings/**/*
   - node_modules/file-uri-to-path/**/*
   - node_modules/prebuild-install/**/*
@@ -43,7 +42,9 @@ extraResources:
     filter:
       - "**/*"
 asar: true
+afterPack: ./scripts/fix-spawn-helper.cjs
 asarUnpack:
+  - node_modules/node-pty/**/*
   - node_modules/@anthropic-ai/claude-agent-sdk/**/*
   - node_modules/@img/**/*
   - node_modules/better-sqlite3/**/*
@@ -66,7 +67,10 @@ mac:
   category: public.app-category.developer-tools
   icon: resources/icon.icns
   darkModeSupport: true
-  identity: null
+  identity: "-"
+  hardenedRuntime: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.inherit.plist
 win:
   target:
     - nsis

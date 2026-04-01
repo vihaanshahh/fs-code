@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { shell } from 'electron'
-import type { AuthStatus } from '../shared/types'
+import type { AuthStatus, GhCliStatus } from '../shared/types'
 
 const execFileAsync = promisify(execFile)
 const isWindows = process.platform === 'win32'
@@ -230,6 +230,27 @@ async function getOAuthToken(): Promise<string | null> {
     return config?.claudeAiOauth?.accessToken || null
   } catch {
     return null
+  }
+}
+
+/** Check GitHub CLI auth status */
+export async function getGhCliStatus(): Promise<GhCliStatus> {
+  try {
+    const { stdout, stderr } = await execFileAsync('gh', ['auth', 'status'], {
+      timeout: 5000,
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    const text = stdout + '\n' + stderr
+    const userMatch = text.match(/Logged in to \S+ account (\S+)/i)
+      || text.match(/as (\S+) \(/i)
+    return { state: 'authenticated', user: userMatch?.[1] }
+  } catch (err: any) {
+    const code = err?.code
+    const msg = (err?.stderr || err?.stdout || err?.message || '').toString()
+    if (code === 'ENOENT' || msg.includes('not found') || msg.includes('command not found')) {
+      return { state: 'not_installed' }
+    }
+    return { state: 'not_authenticated' }
   }
 }
 

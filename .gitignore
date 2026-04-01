@@ -8,3 +8,7 @@ dist
 .cache
 *.tsbuildinfo
 .codex/
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/

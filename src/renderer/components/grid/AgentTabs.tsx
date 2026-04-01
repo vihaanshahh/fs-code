@@ -37,7 +37,7 @@ function loadSidebarCollapsed(): boolean {
 function TabStatus({ agentId, accentColor, isFocusedTab }: { agentId: string; accentColor: string; isFocusedTab: boolean }) {
   const { colors } = useTheme()
   const agent = useAgent(agentId)
-  const phase = useJourneyPhase(agent.messages, agent.isActive, null)
+  const phase = useJourneyPhase(agent.messages, agent.isActive, null, agent.phaseSnapshot)
 
   // Idle / no activity — just show the dot
   if (phase.phase === 'idle') {
@@ -478,7 +478,7 @@ export default function AgentTabs({
                         whiteSpace: 'nowrap',
                         opacity: 0.6,
                       }}>
-                        {agent.cwd === '.' ? '~' : agent.cwd.split('/').pop()}
+                        {!agent.cwd || agent.cwd === '.' ? '~' : agent.cwd.split('/').pop()}
                       </span>
                     </div>
 
@@ -557,25 +557,32 @@ export default function AgentTabs({
         </div>
       )}
 
-      {/* Agent body — all agents mounted, only focused visible */}
+      {/* Agent body — all agents mounted, only focused visible.
+          Use visibility+z-index instead of display:none so terminals
+          keep their dimensions and don't collapse to 0 cols on tab switch. */}
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative', minWidth: 0 }}>
-        {agents.map((agent) => (
-          <div
-            key={agent.id}
-            style={{
-              position: 'absolute',
-              inset: 0,
-              display: agent.id === focusedId ? 'flex' : 'none',
-              flexDirection: 'column',
-            }}
-          >
-            <TerminalPanel
-              agentId={agent.id}
-              cwd={agent.cwd}
-              mode="claude"
-            />
-          </div>
-        ))}
+        {agents.map((agent) => {
+          const isFocused = agent.id === focusedId
+          return (
+            <div
+              key={agent.id}
+              style={{
+                position: 'absolute',
+                inset: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                visibility: isFocused ? 'visible' : 'hidden',
+                zIndex: isFocused ? 1 : 0,
+              }}
+            >
+              <TerminalPanel
+                agentId={agent.id}
+                cwd={agent.cwd}
+                mode="claude"
+              />
+            </div>
+          )
+        })}
       </div>
     </div>
   )

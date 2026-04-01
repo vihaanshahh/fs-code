@@ -61,6 +61,7 @@ export function useAgentManager() {
     if (agentsRef.current.length >= MAX_AGENTS) return null
     const name = AGENT_NAMES[agentsRef.current.length] || `Agent ${agentsRef.current.length + 1}`
     const descriptor: AgentDescriptor = await api.createAgent(name, cwd, provider)
+    if (!descriptor?.id) return null
     setAgents(prev => [...prev, descriptor])
     setFocusedId(descriptor.id)
     addRecentFolder(cwd)

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useTheme } from '../../ThemeContext'
 import { api } from '../../lib/api'
 import type { FileEntry } from '../../../shared/types'
+import DiffView from '../scm/DiffView'
 
 interface GitInfo {
   status: string
@@ -58,6 +59,9 @@ function ChevronIcon({ expanded }: { expanded: boolean }) {
   )
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function TreeNode({
   entry,
   depth,
@@ -65,6 +69,7 @@ function TreeNode({
   changedDirs,
   expandedDirs,
   onToggleDir,
+  onFileClick,
 }: {
   entry: FileEntry
   depth: number
@@ -72,6 +77,7 @@ function TreeNode({
   changedDirs: Set<string>
   expandedDirs: Set<string>
   onToggleDir: (path: string) => void
+  onFileClick: (path: string) => void
 }) {
   const { colors, fonts } = useTheme()
   const isDir = entry.type === 'directory'
@@ -104,14 +110,14 @@ function TreeNode({
   return (
     <>
       <div
-        onClick={() => { if (isDir) onToggleDir(entry.path) }}
+        onClick={() => { if (isDir) onToggleDir(entry.path); else onFileClick(entry.path) }}
         style={{
           display: 'flex',
           alignItems: 'center',
           gap: 4,
           padding: '1px 8px 1px 0',
           paddingLeft: 10 + depth * 14,
-          cursor: isDir ? 'pointer' : 'default',
+          cursor: 'pointer',
           borderRadius: 3,
           transition: 'background 0.1s ease',
           minHeight: 22,
@@ -212,6 +218,7 @@ function TreeNode({
           changedDirs={changedDirs}
           expandedDirs={expandedDirs}
           onToggleDir={onToggleDir}
+          onFileClick={onFileClick}
         />
       ))}
     </>
@@ -235,6 +242,7 @@ export default function FileExplorer({
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<string[]>([])
   const [searching, setSearching] = useState(false)
+  const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const searchTimeout = useRef<ReturnType<typeof setTimeout>>()
   const hasAutoExpanded = useRef(false)
 
@@ -247,7 +255,7 @@ export default function FileExplorer({
     setLoading(true)
     try {
       const entries = await api.readDir(cwd)
-      const result = entries || []
+      const result = Array.isArray(entries) ? entries : []
       setTree(result)
       // Auto-expand common top-level dirs on first load
       if (!hasAutoExpanded.current && result.length > 0) {
@@ -268,7 +276,8 @@ export default function FileExplorer({
       const map = new Map<string, GitInfo>()
       if (result?.files) {
         for (const f of result.files) {
-          const rel = f.path.startsWith(cwd) ? f.path.slice(cwd.length + 1) : f.path
+          const normCwd = cwd.endsWith('/') ? cwd.slice(0, -1) : cwd
+          const rel = f.path.startsWith(normCwd + '/') ? f.path.slice(normCwd.length + 1) : f.path
           map.set(rel, { status: f.status })
         }
       }
@@ -358,6 +367,7 @@ export default function FileExplorer({
       overflow: 'hidden',
       flex: 1,
     }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
       {/* Search */}
       <div style={{ padding: '6px 8px', flexShrink: 0, borderBottom: `1px solid ${colors.border}` }}>
         <div style={{ position: 'relative' }}>
@@ -447,6 +457,7 @@ export default function FileExplorer({
               return (
                 <div
                   key={path}
+                  onClick={() => setSelectedFile(path)}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -454,7 +465,7 @@ export default function FileExplorer({
                     padding: '3px 10px',
                     borderRadius: 3,
                     transition: 'background 0.1s ease',
-                    cursor: 'default',
+                    cursor: 'pointer',
                     minHeight: 22,
                   }}
                   onMouseEnter={e => { e.currentTarget.style.background = colors.bgSurface }}
@@ -516,6 +527,7 @@ export default function FileExplorer({
               changedDirs={changedDirs}
               expandedDirs={expandedDirs}
               onToggleDir={handleToggleDir}
+              onFileClick={setSelectedFile}
             />
           ))
         )}
@@ -546,5 +558,10 @@ export default function FileExplorer({
         </div>
       )}
     </div>
+    </div>
+    {selectedFile && cwd && (
+      <DiffView filePath={selectedFile} cwd={cwd} onClose={() => setSelectedFile(null)} />
+    )}
+  </div>
   )
 }

@@ -2,377 +2,499 @@ import * as pty from 'node-pty'
 import type { IPty } from 'node-pty'
 import type { BrowserWindow } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, watch, readdirSync, openSync, readSync, fstatSync, closeSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
 import { IPC } from '../shared/types'
-import type { UIMessage } from '../shared/types'
+import type { UIMessage, AgentPhase, ActiveToolInfo } from '../shared/types'
 import { getClaudePath } from './auth'
 import { log } from './logger'
 
-// ── Terminal phase detection ──
-// Parses raw Claude CLI output to emit synthetic UIMessages so the
-// JourneyBar can track thinking → searching → planning → coding phases.
-//
-// Key design: only match tool lines that start with a CLI bullet marker
-// (⏺, ●, ◆, ▶) to avoid false positives from assistant prose.
-// Debounce all emissions so the bar never flickers.
-
-// Strip ANSI escape sequences, OSC sequences, hyperlinks, and Kitty/iTerm private modes
-const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|\][^\n]*|[()][0-9A-Z]|\][^\x07]*\x07|P[^\x1b]*\x1b\\|\][^\x1b]*\x1b)/g
-function stripAnsi(s: string): string {
-  return s.replace(ANSI_RE, '').replace(/\x0f|\x0e/g, '')
-}
+// ── Session JSONL watcher ──
+// Instead of parsing raw ANSI terminal output with fragile regexes,
+// we read the structured JSONL that the Claude CLI writes to disk.
+// The CLI writes session data to ~/.claude/projects/<project-hash>/<sessionId>.jsonl
+// in real-time. Each line is a JSON object with perfect tool_use, tool_result,
+// and assistant text data — no guessing required.
 
 function uid(): string {
   return randomUUID().slice(0, 8)
 }
 
-class TerminalPhaseParser {
+/** Convert a cwd path to the Claude CLI's project directory name */
+function cwdToProjectDir(cwd: string): string {
+  return cwd.replace(/\//g, '-').replace(/^-/, '-')
+}
+
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+function journeyFileForAgent(agentId: string): string {
+  return join(tmpdir(), `fluidstate-journey-${agentId}.jsonl`)
+}
+
+/**
+ * Watches the Claude CLI's session JSONL file for structured events.
+ * Replaces the old TerminalPhaseParser that parsed ANSI terminal output.
+ */
+class SessionJsonlWatcher {
   private emit: (msg: UIMessage) => void
+  private emitPhase: (phase: AgentPhase, detail: string, activeTool?: ActiveToolInfo) => void
   private onTurnDone: () => void
   private onTurnStart: () => void
-  private lineBuf = ''
-  private lastToolId: string | null = null
-  private lastToolName: string | null = null
-  private streamTimer: ReturnType<typeof setTimeout> | null = null
-  private streamingId: string | null = null
-  private idleTimer: ReturnType<typeof setTimeout> | null = null
+  private cwd: string
+
+  private sessionId: string | null = null
+  private jsonlPath: string | null = null
+  private fileOffset = 0
+  private partialLine = ''
+  private pollTimer: ReturnType<typeof setInterval> | null = null
+  private sessionPollTimer: ReturnType<typeof setInterval> | null = null
+  private parentDirWatcher: ReturnType<typeof watch> | null = null
+  private projectDirWatcher: ReturnType<typeof watch> | null = null
+  private disposed = false
   private turnActive = false
-  /** After detecting the prompt, suppress emissions until real assistant activity appears */
-  private waitingForInput = false
-
-  // ── Content accumulation (mirrors v0.4 SDK structured messages) ──
-  // Instead of discarding text between events, we accumulate it so that
-  // tool-result messages carry real output and assistant messages carry
-  // full text blocks — just like the SDK used to provide.
-
-  /** Lines accumulated while a tool is executing (become tool-result output) */
-  private toolOutputLines: string[] = []
-  /** Lines of assistant prose accumulated between tool events */
-  private assistantLines: string[] = []
-
-  /** Debounce: hold emissions for a short window so rapid tool→text→tool doesn't flicker */
-  private pendingEmit: UIMessage | null = null
-  private emitTimer: ReturnType<typeof setTimeout> | null = null
-  private readonly EMIT_DELAY = 80 // ms — imperceptible but absorbs rapid state changes
-
-  // ── Detection patterns ──
-
-  // Match tool lines that begin with a CLI bullet marker.
-  // The Claude CLI prefixes tool calls with one of these characters.
-  // Includes broader set of possible bullet/box-drawing chars used across CLI versions.
-  static readonly TOOL_RE = /^[\s]*[⏺●◆▶╭─•→›»☐✦⬤]\s*(Read|Edit|Write|MultiEdit|Bash|Grep|Glob|Agent|WebSearch|WebFetch|Skill|NotebookEdit|TodoRead|TodoWrite|AskUserQuestion|Task|Search|ListFiles|LS)\b/
-
-  // Claude input prompt — the ❯ character (U+276F) optionally followed by
-  // non-breaking space (U+00A0) and/or regular whitespace.
-  static readonly CLAUDE_PROMPT_RE = /^[❯]\s*$/
-
-  // Permission / approval prompts — require the specific CLI format:
-  // "Allow <tool>?" or "Allow once" or "(Y)es / (N)o" style
-  static readonly WAITING_RE = /(?:^|\s)(?:Allow .+\?|Approve .+\?|\([Yy]\)es\s*\/\s*\([Nn]\)o|\([Aa]\)llow|\([Dd]\)eny)/
+  private launchTime: number
+  private lastAssistantId: string | null = null
+  private openToolIds = new Map<string, string>() // real toolUseId → our emitted toolUseId
+  private observedFiles = new Map<string, { size: number; mtimeMs: number; birthtimeMs: number }>()
+  private currentPhase: { phase: AgentPhase; detail: string; toolUseId?: string } | null = null
 
   constructor(
     emit: (msg: UIMessage) => void,
+    emitPhase: (phase: AgentPhase, detail: string, activeTool?: ActiveToolInfo) => void,
     onTurnDone: () => void,
     onTurnStart: () => void,
+    cwd: string,
   ) {
     this.emit = emit
+    this.emitPhase = emitPhase
     this.onTurnDone = onTurnDone
     this.onTurnStart = onTurnStart
+    this.cwd = cwd
+    this.launchTime = Date.now()
+
+    this.startSessionDiscovery()
   }
 
-  feed(rawData: string) {
-    const clean = stripAnsi(rawData)
-    this.lineBuf += clean
+  private startSessionDiscovery() {
+    const projectDir = cwdToProjectDir(this.cwd)
+    const projectsRoot = join(homedir(), '.claude', 'projects')
+    const jsonlDir = join(homedir(), '.claude', 'projects', projectDir)
+    log.info('jsonl-watcher', `looking for session in ${jsonlDir} (cwd=${this.cwd})`)
 
-    const lines = this.lineBuf.split(/\r?\n/)
-    this.lineBuf = lines.pop() || ''
+    const scan = () => this.scanForSession(jsonlDir)
 
-    for (const line of lines) {
-      this.processLine(line)
-    }
-
-    // Partial buffer — check for prompt first (prompt line has no trailing \n),
-    // then treat remaining text as streaming if no tool marker present.
-    const partialTrimmed = this.lineBuf.replace(/\u00A0/g, ' ').trim()
-    if (TerminalPhaseParser.CLAUDE_PROMPT_RE.test(partialTrimmed)) {
-      this.processLine(partialTrimmed)
-      this.lineBuf = ''
-    } else if (partialTrimmed.length > 2 && !TerminalPhaseParser.TOOL_RE.test(this.lineBuf) && !this.waitingForInput) {
-      // Partial line while no tool is open → stream as assistant text
-      if (!this.lastToolId) {
-        this.emitStreaming(this.buildAssistantText(partialTrimmed))
+    if (existsSync(projectsRoot)) {
+      try {
+        this.parentDirWatcher = watch(projectsRoot, (_eventType, filename) => {
+          if (!filename || filename.toString() === projectDir) {
+            this.attachProjectWatcher(jsonlDir)
+            scan()
+          }
+        })
+        this.parentDirWatcher.on('error', () => {
+          this.parentDirWatcher?.close()
+          this.parentDirWatcher = null
+        })
+      } catch (err) {
+        log.warn('jsonl-watcher', `failed to watch projects root ${projectsRoot}: ${err}`)
       }
     }
 
-    this.resetIdleTimer()
+    this.attachProjectWatcher(jsonlDir)
+    scan()
+    this.sessionPollTimer = setInterval(scan, 250)
+
+    setTimeout(() => {
+      if (!this.sessionId && this.sessionPollTimer) {
+        clearInterval(this.sessionPollTimer)
+        this.sessionPollTimer = null
+        log.warn('jsonl-watcher', 'session discovery timed out after 120s')
+      }
+    }, 120000)
   }
 
-  private processLine(line: string) {
-    const trimmed = line.replace(/\u00A0/g, ' ').trim()
-    if (!trimmed) return
+  private attachProjectWatcher(jsonlDir: string) {
+    if (this.projectDirWatcher || !existsSync(jsonlDir)) return
+    try {
+      this.projectDirWatcher = watch(jsonlDir, () => {
+        this.scanForSession(jsonlDir)
+        this.readNewLines()
+      })
+      this.projectDirWatcher.on('error', () => {
+        this.projectDirWatcher?.close()
+        this.projectDirWatcher = null
+      })
+    } catch (err) {
+      log.warn('jsonl-watcher', `failed to watch project dir ${jsonlDir}: ${err}`)
+    }
+  }
 
-    // Debug: log lines that contain tool-like words to help diagnose detection failures
-    if (/(Read|Edit|Write|Bash|Grep|Glob|Agent)\b/.test(trimmed) && trimmed.length < 200) {
-      log.info('phase-parser', `line: ${JSON.stringify(trimmed.slice(0, 120))} | tool_match=${TerminalPhaseParser.TOOL_RE.test(trimmed)}`)
+  private scanForSession(jsonlDir: string) {
+    if (this.disposed || this.sessionId || !existsSync(jsonlDir)) return
+    try {
+      const files = readdirSync(jsonlDir).filter(f => f.endsWith('.jsonl'))
+      if (files.length === 0) return
+
+      let bestCandidate: { name: string; offset: number; score: number; birthtimeMs: number; mtimeMs: number } | null = null
+
+      for (const fileName of files) {
+        try {
+          const fullPath = join(jsonlDir, fileName)
+          const fd = openSync(fullPath, 'r')
+          const stat = fstatSync(fd)
+          closeSync(fd)
+
+          const prev = this.observedFiles.get(fileName)
+          const info = {
+            size: stat.size,
+            mtimeMs: stat.mtimeMs,
+            birthtimeMs: stat.birthtimeMs || stat.ctimeMs,
+          }
+          this.observedFiles.set(fileName, info)
+
+          let score = 0
+          let offset = stat.size
+
+          if (info.birthtimeMs >= this.launchTime - 1000) {
+            score = 4
+            offset = 0
+          } else if (!prev && info.mtimeMs >= this.launchTime - 1000) {
+            score = 3
+            offset = 0
+          } else if (prev && info.size > prev.size) {
+            score = 2
+            offset = prev.size
+          } else if (info.mtimeMs >= this.launchTime - 1000) {
+            score = 1
+            offset = stat.size
+          }
+
+          if (!bestCandidate || score > bestCandidate.score || (score === bestCandidate.score && info.mtimeMs > bestCandidate.mtimeMs)) {
+            bestCandidate = { name: fileName, offset, score, birthtimeMs: info.birthtimeMs, mtimeMs: info.mtimeMs }
+          }
+        } catch {
+          continue
+        }
+      }
+
+      if (!bestCandidate || bestCandidate.score <= 0) return
+
+      this.sessionId = bestCandidate.name.replace('.jsonl', '')
+      this.jsonlPath = join(jsonlDir, bestCandidate.name)
+      this.fileOffset = bestCandidate.offset
+      this.partialLine = ''
+      log.info(
+        'jsonl-watcher',
+        `attached session ${this.sessionId} score=${bestCandidate.score} offset=${this.fileOffset} birth=${new Date(bestCandidate.birthtimeMs).toISOString()} mtime=${new Date(bestCandidate.mtimeMs).toISOString()}`,
+      )
+      this.startFilePolling()
+    } catch (err) {
+      log.warn('jsonl-watcher', `session discovery error: ${err}`)
+    }
+  }
+
+  private startFilePolling() {
+    if (this.sessionPollTimer) {
+      clearInterval(this.sessionPollTimer)
+      this.sessionPollTimer = null
     }
 
-    // ── Tool use (requires bullet marker prefix) ──
-    const toolMatch = trimmed.match(TerminalPhaseParser.TOOL_RE)
-    if (toolMatch) {
-      const toolName = this.normalizeTool(toolMatch[1])
-      this.waitingForInput = false
+    // Poll every 200ms for new data
+    this.pollTimer = setInterval(() => {
+      if (this.disposed) return
+      this.readNewLines()
+    }, 200)
 
+    // Also read immediately
+    this.readNewLines()
+  }
+
+  private readNewLines() {
+    if (!this.jsonlPath || !existsSync(this.jsonlPath)) return
+
+    try {
+      const fd = openSync(this.jsonlPath, 'r')
+      try {
+        const stat = fstatSync(fd)
+        if (stat.size <= this.fileOffset) return
+
+        const buf = Buffer.alloc(stat.size - this.fileOffset)
+        readSync(fd, buf, 0, buf.length, this.fileOffset)
+        this.fileOffset = stat.size
+
+        const text = this.partialLine + buf.toString('utf-8')
+        const lines = text.split('\n')
+        this.partialLine = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const event = JSON.parse(line)
+            this.processEvent(event)
+          } catch { /* skip malformed lines */ }
+        }
+      } finally {
+        closeSync(fd)
+      }
+    } catch (err) {
+      log.warn('jsonl-watcher', `read error: ${err}`)
+    }
+  }
+
+  private setPhase(phase: AgentPhase, detail: string, activeTool?: ActiveToolInfo) {
+    const toolUseId = activeTool?.toolUseId
+    const prev = this.currentPhase
+    if (prev && prev.phase === phase && prev.detail === detail && prev.toolUseId === toolUseId) return
+    this.currentPhase = { phase, detail, toolUseId }
+    this.emitPhase(phase, detail, activeTool)
+  }
+
+  /** Called by the journey hook watcher when a new phase is emitted from hooks */
+  noteHookPhase(phase: AgentPhase) {
+    if (phase !== 'idle' && phase !== 'done') {
+      this.seenTurn = true
       if (!this.turnActive) {
         this.turnActive = true
         this.onTurnStart()
       }
+    }
+  }
 
-      // Close previous tool with accumulated output
-      this.closeCurrentTool()
-      this.clearStreaming()
+  private processEvent(event: any) {
+    const ts = Date.now()
 
-      const toolUseId = uid()
-      this.lastToolId = toolUseId
-      this.lastToolName = toolName
-      this.toolOutputLines = []
-      this.debouncedEmit({
-        id: uid(), type: 'tool-use', toolName, toolUseId,
-        input: this.extractInput(trimmed, toolName),
-        ts: Date.now(),
-      })
-      return
+    if (event.type === 'assistant' && event.message?.content) {
+      if (!this.turnActive) {
+        this.turnActive = true
+        this.seenTurn = true
+        this.onTurnStart()
+        // Phase is driven by hooks (UserPromptSubmit/PreToolUse/PermissionRequest),
+        // not by JSONL events. Do not call setPhase here.
+      }
+
+      for (const block of event.message.content) {
+        if (block.type === 'tool_use') {
+          this.lastAssistantId = null
+
+          const ourId = uid()
+          this.openToolIds.set(block.id, ourId)
+          // No setPhase here — PreToolUse hook already fired before tool execution
+          this.emit({
+            id: uid(), type: 'tool-use',
+            toolName: block.name,
+            toolUseId: ourId,
+            input: block.input || {},
+            ts,
+          })
+        } else if (block.type === 'text' && block.text) {
+          const id = this.lastAssistantId || uid()
+          this.lastAssistantId = id
+          // No setPhase here — hooks drive phase, not assistant text events
+          this.emit({
+            id, type: 'assistant',
+            text: block.text,
+            isStreaming: !event.message.stop_reason,
+            ts,
+          })
+        }
+      }
+
+      if (event.message.stop_reason === 'end_turn') {
+        this.lastAssistantId = null
+        for (const [, ourId] of this.openToolIds) {
+          this.emit({ id: uid(), type: 'tool-result', toolUseId: ourId, output: '', ts })
+        }
+        this.openToolIds.clear()
+
+        if (this.turnActive) {
+          this.turnActive = false
+          this.setPhase('done', 'Completed')
+          this.emit({ id: uid(), type: 'result', cost: 0, duration: 0, numTurns: 0, ts })
+          this.onTurnDone()
+        }
+      } else if (event.message.stop_reason) {
+        this.lastAssistantId = null
+      }
     }
 
-    // ── Permission / approval prompt ──
-    if (TerminalPhaseParser.WAITING_RE.test(trimmed)) {
-      this.waitingForInput = false
-      this.closeCurrentTool()
-      this.clearStreaming()
-      const toolUseId = uid()
-      this.lastToolId = toolUseId
-      this.lastToolName = 'AskUserQuestion'
-      this.toolOutputLines = []
-      this.debouncedEmit({
-        id: uid(), type: 'tool-use', toolName: 'AskUserQuestion', toolUseId,
-        input: { question: trimmed },
-        ts: Date.now(),
-      })
-      return
+    if (event.type === 'user' && event.message?.content) {
+      for (const block of event.message.content) {
+        if (block.type === 'tool_result' && block.tool_use_id) {
+          const ourId = this.openToolIds.get(block.tool_use_id)
+          if (ourId) {
+            const output = typeof block.content === 'string'
+              ? block.content
+              : Array.isArray(block.content)
+                ? block.content.map((c: any) => c.text || '').join('\n')
+                : ''
+            this.emit({
+              id: uid(), type: 'tool-result',
+              toolUseId: ourId,
+              output: output.slice(0, 2000),
+              ts,
+            })
+            this.openToolIds.delete(block.tool_use_id)
+          }
+        }
+      }
     }
 
-    // ── Claude prompt → turn done ──
-    if (TerminalPhaseParser.CLAUDE_PROMPT_RE.test(trimmed)) {
-      this.closeCurrentTool()
-      this.clearStreaming()
+    if (event.type === 'result') {
+      for (const [, ourId] of this.openToolIds) {
+        this.emit({ id: uid(), type: 'tool-result', toolUseId: ourId, output: '', ts })
+      }
+      this.openToolIds.clear()
+      this.lastAssistantId = null
+
       if (this.turnActive) {
         this.turnActive = false
-        this.emit({ id: uid(), type: 'result', cost: 0, duration: 0, numTurns: 0, ts: Date.now() })
+        this.setPhase('done', 'Completed')
+        this.emit({
+          id: uid(), type: 'result',
+          cost: event.total_cost_usd || 0,
+          duration: event.duration_ms || 0,
+          numTurns: event.num_turns || 0,
+          ts,
+        })
         this.onTurnDone()
       }
-      this.waitingForInput = true
-      return
     }
 
-    // ── Content accumulation ──
-    if (this.lastToolId) {
-      // Lines while a tool is open → accumulate as tool output
-      this.toolOutputLines.push(trimmed)
-    } else {
-      // Lines with no tool open → assistant text
-      if (this.waitingForInput && trimmed.length > 3) {
-        this.waitingForInput = false
-      }
-      if (!this.waitingForInput) {
-        if (!this.turnActive) {
-          this.turnActive = true
-          this.onTurnStart()
-        }
-        this.assistantLines.push(trimmed)
-        this.emitStreaming(this.assistantLines.join('\n'))
-      }
-    }
-  }
-
-  /** Close the current tool, emitting a tool-result with accumulated output */
-  private closeCurrentTool() {
-    if (this.lastToolId) {
-      this.flushEmit()
+    if (event.type === 'rate_limit_event' && event.rate_limit_info) {
+      const info = event.rate_limit_info
       this.emit({
-        id: uid(), type: 'tool-result',
-        toolUseId: this.lastToolId,
-        output: this.toolOutputLines.join('\n'),
-        ts: Date.now(),
+        id: uid(), type: 'usage',
+        utilization: 0,
+        resetsAt: info.resetsAt ? info.resetsAt * 1000 : null,
+        limitType: info.rateLimitType || '',
+        status: info.status || '',
+        ts,
       })
-      this.lastToolId = null
-      this.lastToolName = null
-      this.toolOutputLines = []
     }
-    // Reset assistant text accumulation on any transition
-    this.assistantLines = []
-  }
-
-  /** Build the full assistant text for streaming, appending a partial line if present */
-  private buildAssistantText(partialLine: string): string {
-    if (this.assistantLines.length === 0) return partialLine
-    return this.assistantLines.join('\n') + '\n' + partialLine
-  }
-
-  // ── Debounced emission ──
-  // Holds the most recent message for EMIT_DELAY ms before sending.
-  // If a new message arrives within the window, the old one is replaced.
-  // This absorbs rapid tool→text→tool transitions into a single smooth change.
-
-  private debouncedEmit(msg: UIMessage) {
-    this.pendingEmit = msg
-    if (!this.emitTimer) {
-      this.emitTimer = setTimeout(() => {
-        this.flushEmit()
-      }, this.EMIT_DELAY)
-    }
-  }
-
-  private flushEmit() {
-    if (this.emitTimer) { clearTimeout(this.emitTimer); this.emitTimer = null }
-    if (this.pendingEmit) {
-      this.emit(this.pendingEmit)
-      this.pendingEmit = null
-    }
-  }
-
-  private emitStreaming(text: string) {
-    if (this.streamTimer) clearTimeout(this.streamTimer)
-    if (!this.streamingId) this.streamingId = uid()
-
-    const streamId = this.streamingId
-    this.emit({ id: streamId, type: 'assistant', text, isStreaming: true, ts: Date.now() })
-
-    this.streamTimer = setTimeout(() => {
-      // Only close streaming if the same stream is still active —
-      // prevents a stale timer from emitting isStreaming:false into a new turn.
-      if (this.streamingId === streamId) {
-        this.emit({ id: streamId, type: 'assistant', text, isStreaming: false, ts: Date.now() })
-        this.streamingId = null
-      }
-      this.streamTimer = null
-    }, 600)
-  }
-
-  private clearStreaming() {
-    if (this.streamTimer) { clearTimeout(this.streamTimer); this.streamTimer = null }
-    this.streamingId = null
-  }
-
-  private resetIdleTimer() {
-    if (this.idleTimer) clearTimeout(this.idleTimer)
-    this.idleTimer = setTimeout(() => {
-      if (this.lastToolId) {
-        this.flushEmit()
-        this.emit({
-          id: uid(), type: 'tool-result',
-          toolUseId: this.lastToolId,
-          output: this.toolOutputLines.join('\n'),
-          ts: Date.now(),
-        })
-        this.lastToolId = null
-        this.lastToolName = null
-        this.toolOutputLines = []
-      }
-    }, 3000)
-  }
-
-  private normalizeTool(name: string): string {
-    const map: Record<string, string> = { Search: 'Grep', ListFiles: 'Glob', LS: 'Glob', Task: 'Agent' }
-    return map[name] || name
   }
 
   /**
-   * Extract structured input from a CLI tool line.
-   *
-   * The Claude CLI prints tool invocations like:
-   *   ⏺ Read src/main/agent.ts
-   *   ⏺ Bash npm run test
-   *   ⏺ Grep "pattern" src/
-   *   ⏺ Edit src/foo.ts
-   *   ⏺ Agent (search codebase for...)
-   *
-   * This mirrors the structured input the v0.4 SDK provided directly,
-   * so useJourneyPhase can match on command patterns (TEST_COMMANDS, etc.)
+   * Feed raw PTY data. The only thing we watch for here is the Claude Code
+   * input prompt (❯) reappearing after work finishes. This covers interrupted
+   * tools and permission denials where no JSONL event fires.
    */
-  private extractInput(line: string, toolName: string): Record<string, unknown> {
-    // Strip the bullet prefix and tool name to isolate the argument text.
-    // Match: optional whitespace, bullet char, whitespace, tool name, then capture the rest.
-    const argMatch = line.match(new RegExp(`^[\\s]*[⏺●◆▶╭─•→›»☐✦⬤]\\s*${toolName}\\s*(.*)$`))
-    const raw = argMatch?.[1]?.trim() || ''
+  feedTerminalData(rawData: string) {
+    // Strip ANSI escape sequences
+    const clean = rawData.replace(/\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][0-9A-Z])/g, '').replace(/\x0f|\x0e/g, '')
+    this.termBuf += clean
+    if (this.termBuf.length > 800) this.termBuf = this.termBuf.slice(-800)
 
-    // Also try the parenthesized form: ToolName(arg)
-    if (!raw) {
-      const parenMatch = line.match(new RegExp(`${toolName}\\(([^)]+)\\)`))
-      const parenArg = parenMatch?.[1]?.trim()
-      if (parenArg) {
-        if (toolName === 'Bash') return { command: parenArg }
-        return { file_path: parenArg }
+    // ⏺ = Claude Code tool bullet (appears when a tool runs)
+    // ⎿ = Claude Code tool-result indent (appears in same chunk as "Interrupted")
+    // Both appear well before ❯ — using them to mark turn active avoids the
+    // 200ms hook-watcher polling race for the interrupted-tool case.
+    if (!this.seenTurn && /[⎿⏺]/.test(this.termBuf)) {
+      this.seenTurn = true
+      if (!this.turnActive) {
+        this.turnActive = true
+        this.onTurnStart()
       }
-      return {}
     }
 
-    switch (toolName) {
-      case 'Bash':
-        return { command: raw }
+    // ❯ at the start of a line = Claude Code returned to its interactive prompt.
+    // Emit done if we have an active turn and have seen work happen.
+    if (this.seenTurn && this.turnActive && /(?:^|\r|\n)❯/.test(this.termBuf)) {
+      this.turnActive = false
+      this.seenTurn = false
+      this.setPhase('done', 'Completed')
+      this.emit({ id: uid(), type: 'result', cost: 0, duration: 0, numTurns: 0, ts: Date.now() })
+      this.onTurnDone()
+      this.termBuf = ''
+    }
+  }
 
-      case 'Read':
-      case 'Write':
-      case 'Edit':
-      case 'MultiEdit':
-      case 'NotebookEdit':
-        return { file_path: raw.replace(/^["']|["']$/g, '') }
+  private termBuf = ''
+  private seenTurn = false
 
-      case 'Grep': {
-        // Grep "pattern" path/  or  Grep pattern
-        const quoted = raw.match(/^["']([^"']+)["']\s*(.*)$/)
-        if (quoted) {
-          const result: Record<string, unknown> = { pattern: quoted[1] }
-          if (quoted[2]) result.path = quoted[2]
-          return result
+  dispose() {
+    this.disposed = true
+    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
+    if (this.sessionPollTimer) { clearInterval(this.sessionPollTimer); this.sessionPollTimer = null }
+    if (this.parentDirWatcher) { this.parentDirWatcher.close(); this.parentDirWatcher = null }
+    if (this.projectDirWatcher) { this.projectDirWatcher.close(); this.projectDirWatcher = null }
+  }
+}
+
+class JourneyHookWatcher {
+  private filePath: string
+  private emitPhase: (phase: AgentPhase, detail: string, activeTool?: ActiveToolInfo, startedAt?: number) => void
+  private fileOffset = 0
+  private partialLine = ''
+  private pollTimer: ReturnType<typeof setInterval> | null = null
+  private fileWatcher: ReturnType<typeof watch> | null = null
+
+  constructor(
+    filePath: string,
+    emitPhase: (phase: AgentPhase, detail: string, activeTool?: ActiveToolInfo, startedAt?: number) => void,
+  ) {
+    this.filePath = filePath
+    this.emitPhase = emitPhase
+
+    try { unlinkSync(this.filePath) } catch { /* ignore */ }
+    this.attach()
+  }
+
+  private attach() {
+    const read = () => this.readNewLines()
+    this.pollTimer = setInterval(read, 200)
+    try {
+      this.fileWatcher = watch(tmpdir(), (_eventType, filename) => {
+        if (!filename || join(tmpdir(), filename.toString()) !== this.filePath) return
+        read()
+      })
+      this.fileWatcher.on('error', () => {
+        this.fileWatcher?.close()
+        this.fileWatcher = null
+      })
+    } catch (err) {
+      log.warn('journey-hook', `watch failed for ${this.filePath}: ${err}`)
+    }
+  }
+
+  private readNewLines() {
+    if (!existsSync(this.filePath)) return
+    try {
+      const fd = openSync(this.filePath, 'r')
+      try {
+        const stat = fstatSync(fd)
+        if (stat.size <= this.fileOffset) return
+        const buf = Buffer.alloc(stat.size - this.fileOffset)
+        readSync(fd, buf, 0, buf.length, this.fileOffset)
+        this.fileOffset = stat.size
+
+        const text = this.partialLine + buf.toString('utf8')
+        const lines = text.split('\n')
+        this.partialLine = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const event = JSON.parse(line)
+            this.emitPhase(event.phase, event.detail || '', event.activeTool, event.ts)
+          } catch {
+            continue
+          }
         }
-        // Unquoted: first token is pattern, rest is path
-        const parts = raw.split(/\s+/)
-        if (parts.length > 1) return { pattern: parts[0], path: parts.slice(1).join(' ') }
-        return { pattern: raw }
+      } finally {
+        closeSync(fd)
       }
-
-      case 'Glob':
-        return { pattern: raw }
-
-      case 'Agent':
-      case 'Skill': {
-        // Agent (description...)  or  Agent description
-        const desc = raw.replace(/^\(/, '').replace(/\)$/, '').trim()
-        return { description: desc }
-      }
-
-      case 'WebSearch':
-        return { query: raw }
-
-      case 'WebFetch':
-        return { url: raw }
-
-      case 'AskUserQuestion':
-        return { question: raw }
-
-      case 'TodoRead':
-      case 'TodoWrite':
-        return {}
-
-      default:
-        return { text: raw }
+    } catch (err) {
+      log.warn('journey-hook', `read failed for ${this.filePath}: ${err}`)
     }
   }
 
   dispose() {
-    if (this.streamTimer) clearTimeout(this.streamTimer)
-    if (this.idleTimer) clearTimeout(this.idleTimer)
-    if (this.emitTimer) clearTimeout(this.emitTimer)
+    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
+    if (this.fileWatcher) { this.fileWatcher.close(); this.fileWatcher = null }
+    try { unlinkSync(this.filePath) } catch { /* ignore */ }
   }
 }
 
@@ -386,8 +508,9 @@ interface TerminalEntry {
   shellReady: boolean
   /** Timer ID for shell-ready timeout fallback */
   readyTimeoutId: ReturnType<typeof setTimeout> | null
-  /** Phase parser for claude-mode terminals (null for plain shells) */
-  phaseParser: TerminalPhaseParser | null
+  /** JSONL session watcher for claude-mode terminals (null for plain shells) */
+  jsonlWatcher: SessionJsonlWatcher | null
+  journeyHookWatcher: JourneyHookWatcher | null
 }
 
 const terminals = new Map<string, TerminalEntry>()
@@ -406,7 +529,11 @@ export function setMainWindow(win: BrowserWindow) {
  * If a live terminal already exists for this agentId, return it (idempotent).
  * Returns { terminalId, isNew }.
  */
-export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId: string; isNew: boolean } {
+export function getOrCreateTerminal(
+  agentId: string,
+  cwd: string,
+  envOverrides?: Record<string, string>,
+): { terminalId: string; isNew: boolean } {
   // Check for existing live terminal
   const existingId = agentTerminals.get(agentId)
   if (existingId) {
@@ -442,7 +569,10 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
     cols: 80,
     rows: 24,
     cwd,
-    env: process.env as Record<string, string>,
+    env: {
+      ...(process.env as Record<string, string>),
+      ...(envOverrides || {}),
+    },
   })
 
   const entry: TerminalEntry = {
@@ -450,7 +580,8 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
     pendingWrites: [],
     shellReady: false,
     readyTimeoutId: null,
-    phaseParser: null,
+    jsonlWatcher: null,
+    journeyHookWatcher: null,
   }
   terminals.set(id, entry)
   agentTerminals.set(agentId, id)
@@ -470,9 +601,9 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
       entry.buffer = entry.buffer.slice(-MAX_BUFFER)
     }
 
-    // Feed phase parser (claude-mode terminals only)
-    if (entry.phaseParser) {
-      entry.phaseParser.feed(data)
+    // Feed to JSONL watcher for ❯ prompt detection (interrupt/done fallback)
+    if (entry.jsonlWatcher) {
+      entry.jsonlWatcher.feedTerminalData(data)
     }
 
     // Detect shell readiness: look for common prompt endings ($, %, >, #)
@@ -504,7 +635,8 @@ export function getOrCreateTerminal(agentId: string, cwd: string): { terminalId:
   proc.onExit(({ exitCode }) => {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
     if (entry.readyTimeoutId) { clearTimeout(entry.readyTimeoutId); entry.readyTimeoutId = null }
-    if (entry.phaseParser) { entry.phaseParser.dispose(); entry.phaseParser = null }
+    if (entry.jsonlWatcher) { entry.jsonlWatcher.dispose(); entry.jsonlWatcher = null }
+    if (entry.journeyHookWatcher) { entry.journeyHookWatcher.dispose(); entry.journeyHookWatcher = null }
     // Flush any remaining data before closing
     if (pendingData && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(IPC.TERM_DATA, { terminalId: id, data: pendingData })
@@ -539,7 +671,8 @@ export function getBuffer(terminalId: string): string {
 
 export function writeToTerminal(terminalId: string, data: string) {
   const entry = terminals.get(terminalId)
-  entry?.proc.write(data)
+  if (!entry) return
+  entry.proc.write(data)
 }
 
 /** Write data to the terminal belonging to an agent (by agentId). */
@@ -560,7 +693,8 @@ export function closeTerminal(terminalId: string) {
   const entry = terminals.get(terminalId)
   if (entry) {
     if (entry.readyTimeoutId) clearTimeout(entry.readyTimeoutId)
-    if (entry.phaseParser) { entry.phaseParser.dispose(); entry.phaseParser = null }
+    if (entry.jsonlWatcher) { entry.jsonlWatcher.dispose(); entry.jsonlWatcher = null }
+    if (entry.journeyHookWatcher) { entry.journeyHookWatcher.dispose(); entry.journeyHookWatcher = null }
     entry.proc.kill()
     terminals.delete(terminalId)
   }
@@ -585,6 +719,8 @@ export function closeAgentTerminal(agentId: string) {
 export function closeAll() {
   for (const [, entry] of terminals) {
     if (entry.readyTimeoutId) clearTimeout(entry.readyTimeoutId)
+    if (entry.jsonlWatcher) { entry.jsonlWatcher.dispose(); entry.jsonlWatcher = null }
+    if (entry.journeyHookWatcher) { entry.journeyHookWatcher.dispose(); entry.journeyHookWatcher = null }
     entry.proc.kill()
   }
   terminals.clear()
@@ -599,25 +735,57 @@ const CODEX_MCP_ENTRY = {
   args: ['mcp'],
 }
 
-const CODEX_HOOKS = {
-  SessionStart: [
-    { matcher: '', hooks: [{ type: 'command', command: 'claude-ex brief', timeout: 5000 }] },
-  ],
-  PreToolUse: [
-    { matcher: 'Write', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
-    { matcher: 'Edit', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
-    { matcher: 'MultiEdit', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
-    { matcher: 'Read', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
-  ],
-  PostToolUse: [
-    { matcher: 'Write', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
-    { matcher: 'Edit', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
-    { matcher: 'MultiEdit', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
-  ],
+const JOURNEY_TOOL_MATCHER = 'Read|Write|Edit|MultiEdit|NotebookEdit|Bash|Grep|Glob|Agent|Skill|WebSearch|WebFetch|Ls|Search|ListFiles|Task'
+const JOURNEY_HOOK_SCRIPT = join(process.cwd(), 'scripts', 'claude-journey-hook.cjs')
+
+function buildClaudeHooks() {
+  const journeyCmd = `node ${shellEscape(JOURNEY_HOOK_SCRIPT)}`
+  return {
+    SessionStart: [
+      { matcher: '', hooks: [{ type: 'command', command: 'claude-ex brief', timeout: 5000 }] },
+    ],
+    UserPromptSubmit: [
+      { matcher: '', hooks: [{ type: 'command', command: journeyCmd, timeout: 2000 }] },
+    ],
+    PermissionRequest: [
+      { matcher: '', hooks: [{ type: 'command', command: journeyCmd, timeout: 2000 }] },
+    ],
+    Stop: [
+      { matcher: '', hooks: [{ type: 'command', command: journeyCmd, timeout: 2000 }] },
+    ],
+    PreToolUse: [
+      { matcher: JOURNEY_TOOL_MATCHER, hooks: [{ type: 'command', command: journeyCmd, timeout: 2000 }] },
+      { matcher: 'Write', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+      { matcher: 'Edit', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+      { matcher: 'MultiEdit', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+      { matcher: 'Read', hooks: [{ type: 'command', command: 'claude-ex pre-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 3000 }] },
+    ],
+    PostToolUse: [
+      { matcher: JOURNEY_TOOL_MATCHER, hooks: [{ type: 'command', command: journeyCmd, timeout: 2000 }] },
+      { matcher: 'Write', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
+      { matcher: 'Edit', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
+      { matcher: 'MultiEdit', hooks: [{ type: 'command', command: 'claude-ex post-edit "$(jq -r \'.tool_input.file_path\')"', timeout: 5000 }] },
+    ],
+  }
 }
 
-// Track which cwds we've already configured (avoid repeated disk I/O)
-const configuredCwds = new Set<string>()
+function mergeHookConfig(existing: any, additions: any) {
+  const next = { ...(existing || {}) }
+  for (const [eventName, matchers] of Object.entries(additions)) {
+    const list = Array.isArray(next[eventName]) ? [...next[eventName]] : []
+    for (const matcher of matchers as any[]) {
+      const matcherKey = JSON.stringify(matcher)
+      if (!list.some(item => JSON.stringify(item) === matcherKey)) {
+        list.push(matcher)
+      }
+    }
+    next[eventName] = list
+  }
+  return next
+}
+
+const CLAUDE_CONFIG_VERSION = 'journey-v3'
+const configuredCwds = new Map<string, string>()
 
 /**
  * Ensure the project has .mcp.json and .claude/settings.json configured
@@ -625,8 +793,9 @@ const configuredCwds = new Set<string>()
  * Idempotent: skips if already configured this session.
  */
 export function ensureClaudeExConfig(cwd: string): void {
-  if (configuredCwds.has(cwd)) return
+  if (configuredCwds.get(cwd) === CLAUDE_CONFIG_VERSION) return
   try {
+    const claudeHooks = buildClaudeHooks()
     // .mcp.json — add codex MCP server entry
     const mcpPath = join(cwd, '.mcp.json')
     let mcpConfig: any = {}
@@ -655,18 +824,16 @@ export function ensureClaudeExConfig(cwd: string): void {
     if (!settings.permissions.allow.includes('mcp__codex__*')) {
       settings.permissions.allow.push('mcp__codex__*')
     }
-    // Merge hooks (only if not already present — don't clobber user customizations)
-    let needsWrite = false
-    if (!settings.hooks) {
-      settings.hooks = CODEX_HOOKS
-      needsWrite = true
-    }
+    // Merge hooks non-destructively so existing project hooks keep working.
+    const mergedHooks = mergeHookConfig(settings.hooks, claudeHooks)
+    const needsWrite = JSON.stringify(settings.hooks || {}) !== JSON.stringify(mergedHooks)
+    settings.hooks = mergedHooks
     if (needsWrite || !settings.permissions.allow.includes('mcp__codex__*')) {
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
       log.info('terminal', `wrote codex settings to ${settingsPath}`)
     }
 
-    configuredCwds.add(cwd)
+    configuredCwds.set(cwd, CLAUDE_CONFIG_VERSION)
   } catch (err) {
     log.warn('terminal', `ensureClaudeExConfig failed for ${cwd}: ${err}`)
   }
@@ -695,15 +862,41 @@ export function createClaudeTerminal(
     agentTerminals.delete(agentId)
   }
 
-  // Create a shell terminal
-  const result = getOrCreateTerminal(agentId, cwd)
+  const journeyFile = journeyFileForAgent(agentId)
+
+  // Create a shell terminal with the journey hook environment already attached.
+  const result = getOrCreateTerminal(agentId, cwd, {
+    FLUIDSTATE_JOURNEY_FILE: journeyFile,
+    FLUIDSTATE_AGENT_ID: agentId,
+  })
   const entry = terminals.get(result.terminalId)
   if (!entry) return result
 
-  // Attach phase parser to emit synthetic UIMessages for the journey bar.
   const sendMsg = (msg: UIMessage) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(IPC.AGENT_MESSAGE, { agentId, ...msg })
+    }
+  }
+  const sendPhase = (phase: AgentPhase, detail: string, activeTool?: ActiveToolInfo) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC.AGENT_PHASE, {
+        agentId,
+        phase,
+        detail,
+        activeTool,
+        startedAt: activeTool?.startTs || Date.now(),
+      })
+    }
+  }
+  const sendPhaseWithStart = (phase: AgentPhase, detail: string, activeTool?: ActiveToolInfo, startedAt?: number) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC.AGENT_PHASE, {
+        agentId,
+        phase,
+        detail,
+        activeTool,
+        startedAt: startedAt || activeTool?.startTs || Date.now(),
+      })
     }
   }
   const sendSessionEnd = () => {
@@ -716,9 +909,11 @@ export function createClaudeTerminal(
       mainWindow.webContents.send(IPC.AGENT_SESSION_STARTED, { agentId, sessionId: uid() })
     }
   }
-  entry.phaseParser = new TerminalPhaseParser(sendMsg, sendSessionEnd, sendSessionStart)
-  // Mark session active right away so the journey bar shows "Thinking" while claude boots
-  sendSessionStart()
+  entry.jsonlWatcher = new SessionJsonlWatcher(sendMsg, sendPhase, sendSessionEnd, sendSessionStart, cwd)
+  entry.journeyHookWatcher = new JourneyHookWatcher(journeyFile, (phase, detail, activeTool, startedAt) => {
+    sendPhaseWithStart(phase, detail, activeTool, startedAt)
+    entry.jsonlWatcher?.noteHookPhase(phase)
+  })
 
   // Build the claude command
   const claudePath = getClaudePath()

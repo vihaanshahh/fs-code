@@ -226,7 +226,11 @@ export function createAgent(name: string, cwd: string, providerId: ProviderId = 
       codex.onStatus((status) => {
         send(IPC.CODEX_STATUS, { agentId: id, ...status })
       })
-      log.info(`agent:${id}`, `codex ready for ${cwd}`)
+      if (codex.isAvailable) {
+        log.info(`agent:${id}`, `codex ready for ${cwd}`)
+      } else {
+        log.warn(`agent:${id}`, `codex unavailable for ${cwd}`)
+      }
       return codex
     } else {
       // Agent was closed before codex finished

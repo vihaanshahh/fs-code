@@ -41,10 +41,10 @@ function InlineDiff({ filePath, cwd }: { filePath: string; cwd: string }) {
       .then((data: any) => {
         if (cancelled) return
         if (data && typeof data === 'object' && typeof data.status === 'string') {
-          setGitData(data)
+          setGitData({ ...data, currentContent: data.currentContent ?? '' })
         } else {
-          return api.readFile(filePath, cwd).then(({ content }: { content: string }) => {
-            if (!cancelled) setGitData({ baseContent: null, currentContent: content, status: 'untracked' })
+          return api.readFile(filePath, cwd).then((res: any) => {
+            if (!cancelled) setGitData({ baseContent: null, currentContent: res?.content ?? '', status: 'untracked' })
           })
         }
       })
@@ -577,7 +577,7 @@ export default function SourceControlSidebar({
     setIsCommitting(true)
     const result = await scm.commit(commitMessage)
     setIsCommitting(false)
-    if (result.success) {
+    if (result?.success) {
       setCommitMessage('')
     }
   }, [commitMessage, scm])

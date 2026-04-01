@@ -2,32 +2,37 @@
 # Project: fs-code
 
 ## Architecture
-- **Languages**: typescript (56 files), tsx (28 files), json (6 files), javascript (1 files), html (1 files)
-- **Size**: 92 files, 510 symbols, 2309 relationships
+- **Languages**: javascript (58 files), typescript (57 files), json (55 files), c (33 files), tsx (29 files), cpp (22 files), html (1 files), css (1 files), bash (1 files)
+- **Size**: 537 files, 27857 symbols, 26120 relationships
 
 ## Key Symbols (by structural importance)
-1. `UIMessage` [type] in src/shared/types.ts
-2. `useTheme` [function] in src/renderer/ThemeContext.tsx
-3. `API` [type] in src/preload/index.ts
-4. `ProviderId` [type] in src/shared/types.ts
-5. `PermissionMode` [type] in src/shared/types.ts
-6. `AuthStatus` [interface] in src/shared/types.ts
-7. `PermissionRequest` [interface] in src/shared/types.ts
-8. `getOrPrepare` [function] in src/main/codex/db.ts
-9. `FileEntry` [interface] in src/shared/types.ts
-10. `GitFileStatus` [interface] in src/shared/types.ts
-11. `JsonlProvider` [class] in src/main/providers/jsonl-provider.ts
-12. `ThemeColors` [type] in src/renderer/theme.ts
-13. `ModelInfo` [interface] in src/main/providers/provider.ts
-14. `getLanguage` [function] in src/main/codex/parser.ts
-15. `reindexFile` [function] in src/main/codex/indexer.ts
+1. `useTheme` [function] in src/renderer/ThemeContext.tsx
+2. `getOrPrepare` [function] in src/main/codex/db.ts
+3. `JsonlProvider` [class] in src/main/providers/jsonl-provider.ts
+4. `ThemeColors` [type] in src/renderer/theme.ts
+5. `ModelInfo` [interface] in src/main/providers/provider.ts
+6. `getLanguage` [function] in src/main/codex/parser.ts
+7. `reindexFile` [function] in src/main/codex/indexer.ts
+8. `getClaudePath` [function] in src/main/auth.ts
+9. `ProviderHandle` [interface] in src/main/providers/provider.ts
+10. `SendPromptOptions` [interface] in src/main/providers/provider.ts
+11. `ProviderDriver` [interface] in src/main/providers/provider.ts
+12. `PermissionHandler` [type] in src/main/providers/provider.ts
+13. `ThemeMode` [type] in src/renderer/theme.ts
+14. `buildPhaseColorMap` [function] in src/renderer/theme.ts
+15. `buildTheme` [function] in src/renderer/theme.ts
 
 ## Module Map
-src/ (84 files, 510 symbols) → imports from: (none — leaf dependency)
+dist/ (427 files, 25648 symbols) → imports from: (none — leaf dependency)
+out/ (14 files, 1677 symbols) → imports from: (none — leaf dependency)
+src/ (86 files, 532 symbols) → imports from: (none — leaf dependency)
 ./ (8 files, 0 symbols) → imports from: (none — leaf dependency)
+.claude/ (1 files, 0 symbols) → imports from: (none — leaf dependency)
+node_modules/ (1 files, 0 symbols) → imports from: (none — leaf dependency)
 
 ## File Map (file → key exports)
 
+- `.claude/settings.local.json`
 - `.mcp.json`
 - `electron.vite.config.ts`
 - `package-lock.json`
@@ -65,7 +70,8 @@ src/ (84 files, 510 symbols) → imports from: (none — leaf dependency)
 - `src/main/providers/jsonl-provider.ts` — JsonlProvider, JsonlProviderConfig, extractTextFromJson
 - `src/main/providers/openai-provider.ts` — createOpenAIProvider
 - `src/main/providers/provider.ts` — ModelInfo, ProviderHandle, PermissionHandler, SendPromptOptions, ProviderDriver
-- `src/main/terminal.ts` — writeToTerminal, closeTerminal, ensureClaudeExConfig, setMainWindow, getOrCreateTerminal, getBuffer, writeToAgentTerminal, resizeTerminal +3 more
+- `src/main/terminal-parser.test.ts`
+- `src/main/terminal.ts` — setMainWindow, getOrCreateTerminal, getBuffer, writeToTerminal, writeToAgentTerminal, resizeTerminal, closeTerminal, closeAgentTerminal +4 more
 - `src/main/updater.ts` — checkForUpdates, setMainWindow, initAutoUpdater, downloadUpdate, installUpdate
 - `src/preload/index.ts` — API
 - `src/renderer/App.tsx` — App
@@ -75,8 +81,9 @@ src/ (84 files, 510 symbols) → imports from: (none — leaf dependency)
 - `src/renderer/components/activity/FileExplorer.tsx` — FileExplorer
 - `src/renderer/components/chat/ConversationPanel.tsx` — ConversationPanel
 - `src/renderer/components/chat/MarkdownRenderer.tsx`
-- `src/renderer/components/grid/AgentCell.tsx` — AgentCell
+- `src/renderer/components/grid/AgentCell.tsx` — AgentCell, AgentCell
 - `src/renderer/components/grid/AgentGrid.tsx` — AgentGrid
+- `src/renderer/components/grid/AgentTabs.tsx` — AgentTabs
 - `src/renderer/components/grid/FluidBackground.tsx` — FluidBackground
 - `src/renderer/components/grid/MinimizedAgentsPill.tsx` — MinimizedAgentsPill
 - `src/renderer/components/journey/JourneyBar.tsx` — JourneyBar
@@ -87,13 +94,13 @@ src/ (84 files, 510 symbols) → imports from: (none — leaf dependency)
 - `src/renderer/components/palette/commands.ts` — slashCommands, keyboardShortcuts, paletteCommands, resolveAlias
 - `src/renderer/components/scm/ContextMenu.tsx` — ContextMenuItem, ContextMenu
 - `src/renderer/components/scm/DiffView.tsx` — DiffView
-- `src/renderer/components/scm/SourceControlSidebar.tsx` — SourceControlSidebar
+- `src/renderer/components/scm/SourceControlSidebar.tsx` — SourceControlSidebar, SourceControlSidebar
 - `src/renderer/components/settings/ProviderSection.tsx` — ProviderSection
 - `src/renderer/components/settings/SettingsPanel.tsx` — SettingsPanel
 - `src/renderer/components/settings/ThemePicker.tsx` — ThemePicker
 - `src/renderer/components/settings/UpdateSection.tsx` — UpdateSection
 - `src/renderer/components/shared/ConfirmDialog.tsx` — ConfirmDialog
-- `src/renderer/components/shared/DiffDisplay.tsx` — DiffHunkHeader, DiffLineRow, CollapsedContext
+- `src/renderer/components/shared/DiffDisplay.tsx` — DiffHunkHeader, DiffLineRow, CollapsedContext, ExpandableContext, DiffHunkHeader, DiffLineRow, CollapsedContext, ExpandableContext
 - `src/renderer/components/shared/diff-utils.test.ts`
 - `src/renderer/components/shared/diff-utils.ts` — DiffLine, computeLineDiff, splitIntoHunks, newFileDiffLines, deletedFileDiffLines, countDiffLines
 - `src/renderer/components/terminal/Terminal.tsx` — TerminalPanel
@@ -105,10 +112,7 @@ src/ (84 files, 510 symbols) → imports from: (none — leaf dependency)
 - `src/renderer/hooks/useContextUsage.ts` — useContextUsage
 - `src/renderer/hooks/useFileActivity.ts` — useFileActivity
 - `src/renderer/hooks/useJourneyPhase.ts` — useJourneyPhase
-- `src/renderer/hooks/useRecentFolders.ts` — addRecentFolder, getRecentFolders
-- `src/renderer/hooks/useResourceStats.ts` — useResourceStats
-- `src/renderer/hooks/useSettings.ts` — useSettings, AppSettings
-- ... and 12 more files
+- ... and 15 more files
 
 ## Codex MCP Tools — USE THESE
 

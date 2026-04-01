@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, useEffect } from 'react'
-import type { UIMessage, AgentPhase, PhaseInfo, PermissionRequest, ActiveToolInfo } from '../../shared/types'
+import type { UIMessage, AgentPhase, PhaseInfo, PermissionRequest, ActiveToolInfo, AgentPhaseSnapshot } from '../../shared/types'
 import { phaseLabelMap } from '../theme'
 import { useTheme } from '../ThemeContext'
 
@@ -15,6 +15,8 @@ const WRITE_TOOLS = ['Edit', 'Write', 'NotebookEdit']
 const AGENT_TOOLS = ['Agent', 'Skill']
 const TEST_COMMANDS = /\b(test|jest|vitest|mocha|pytest|cargo test|go test|npm test|bun test|yarn test|make test|build|tsc|eslint|lint)\b/i
 const DEBUG_COMMANDS = /\b(debug|gdb|lldb|strace|valgrind|console\.log|print|pdb|breakpoint)\b/i
+const SEARCH_COMMANDS = /\b(curl|wget|http|lynx|links|rg|ripgrep|grep|find|fd|ls|dir|tree|cat|sed|awk|head|tail|less|git status|git diff|git show|git log)\b/i
+const WRITE_COMMANDS = /\b(cp|mv|mkdir|touch|chmod|chown|rm|tee)\b|>>?/
 
 function basename(path: string): string {
   return path.split('/').pop() || path
@@ -58,6 +60,7 @@ function formatElapsed(seconds: number): string {
 
 function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPhase; detail: string; activeTool?: ActiveToolInfo } {
   if (!isActive && messages.length === 0) return { phase: 'idle', detail: '' }
+  if (isActive && messages.length === 0) return { phase: 'idle', detail: '' }
 
   const last = messages[messages.length - 1]
 
@@ -124,7 +127,7 @@ function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPha
     if (msg.type === 'error') recentErrorCount++
     if (msg.type === 'assistant') {
       lastAssistantStreaming = msg.isStreaming
-      if (!msg.isStreaming && hasReads && !hasWrites && msg.text.length > 200) {
+      if (!msg.isStreaming && hasReads && !hasWrites && (msg.text?.length ?? 0) > 200) {
         hasLongAssistantAfterReads = true
       }
     }
@@ -179,6 +182,8 @@ function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPha
         const cmd = parsed.command || ''
         if (TEST_COMMANDS.test(cmd)) return `Running ${cmd.split(/\s+/)[0]}...`
         if (DEBUG_COMMANDS.test(cmd)) return 'Debugging...'
+        if (SEARCH_COMMANDS.test(cmd)) return `Inspecting: ${cmd.slice(0, 40)}`
+        if (WRITE_COMMANDS.test(cmd)) return `Changing files: ${cmd.slice(0, 36)}`
         return `Running: ${cmd.slice(0, 50)}`
       }
       if (name === 'WebSearch') return `Searching: ${(parsed.query || '').slice(0, 40)}`
@@ -211,6 +216,9 @@ function inferPhase(messages: UIMessage[], isActive: boolean): { phase: AgentPha
     if (name === 'Bash') {
       if (TEST_COMMANDS.test(input)) return result('testing', detailFromTool())
       if (DEBUG_COMMANDS.test(input)) return result('debugging', detailFromTool())
+      if (WRITE_COMMANDS.test(input)) return result('coding', detailFromTool())
+      if (SEARCH_COMMANDS.test(input)) return result('searching', detailFromTool())
+      return result('coding', detailFromTool())
     }
 
     // Agent/Skill → researching
@@ -275,12 +283,13 @@ const PHASE_ORDER: Record<AgentPhase, number> = {
   awaiting: 7,
 }
 
-const PHASE_HOLD_MS = 400
+const PHASE_HOLD_MS = 250
 
 export function useJourneyPhase(
   messages: UIMessage[],
   isActive: boolean,
   permissionRequest?: PermissionRequest | null,
+  phaseSnapshot?: AgentPhaseSnapshot | null,
 ): PhaseInfo {
   const { phaseColorMap } = useTheme()
   const startedAtRef = useRef<Record<string, number>>({})
@@ -288,7 +297,18 @@ export function useJourneyPhase(
   const lastPhaseTimeRef = useRef(0)
 
   const raw = useMemo(() => {
-    let { phase, detail, activeTool } = inferPhase(messages, isActive)
+    const inferred = inferPhase(messages, isActive)
+    let phase: AgentPhase = inferred.phase
+    let detail: string = inferred.detail
+    let activeTool: ActiveToolInfo | undefined = inferred.activeTool
+
+    // Hook sidecar is the sole phase authority for terminal-mode agents.
+    // When a snapshot is present, use it unconditionally — no order comparison.
+    if (phaseSnapshot) {
+      phase = phaseSnapshot.phase
+      detail = phaseSnapshot.detail
+      activeTool = phaseSnapshot.activeTool
+    }
 
     if (permissionRequest && isActive) {
       phase = 'awaiting'
@@ -298,7 +318,7 @@ export function useJourneyPhase(
     }
 
     return { phase, detail, activeTool }
-  }, [messages, isActive, permissionRequest])
+  }, [messages, isActive, permissionRequest, phaseSnapshot])
 
   const [smoothPhase, setSmoothPhase] = useState<AgentPhase>(raw.phase)
   const [smoothDetail, setSmoothDetail] = useState(raw.detail)
@@ -340,7 +360,9 @@ export function useJourneyPhase(
   }, [raw.phase, raw.detail, raw.activeTool]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!startedAtRef.current[smoothPhase]) {
-    startedAtRef.current[smoothPhase] = Date.now()
+    startedAtRef.current[smoothPhase] = phaseSnapshot?.phase === smoothPhase
+      ? phaseSnapshot.startedAt
+      : Date.now()
   }
 
   return {

@@ -16,7 +16,7 @@ function AgentChip({
 }) {
   const { colors, fonts } = useTheme()
   const agentState = useAgent(agent.id)
-  const phase = useJourneyPhase(agentState.messages, agentState.isActive, null)
+  const phase = useJourneyPhase(agentState.messages, agentState.isActive, null, agentState.phaseSnapshot)
   const detailText = phase.detail || phase.label
 
   return (

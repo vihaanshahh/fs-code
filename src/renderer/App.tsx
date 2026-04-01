@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import JourneyBar from './components/journey/JourneyBar'
+import AgentGrid from './components/grid/AgentGrid'
 import AgentTabs from './components/grid/AgentTabs'
 import MinimizedAgentsPill from './components/grid/MinimizedAgentsPill'
 import FileExplorer from './components/activity/FileExplorer'
@@ -55,10 +56,10 @@ function exportConversation(messages: UIMessage[]): string {
       case 'user': return `> ${msg.text}`
       case 'assistant': return msg.text
       case 'tool-use': return `[Tool: ${msg.toolName}]`
-      case 'tool-result': return `[Result: ${msg.output.slice(0, 200)}]`
+      case 'tool-result': return `[Result: ${(msg.output ?? '').slice(0, 200)}]`
       case 'system': return `-- ${msg.text}`
       case 'error': return `!! ${msg.message}`
-      case 'result': return `-- Done in ${(msg.duration / 1000).toFixed(1)}s · ${msg.numTurns} turns · $${msg.cost.toFixed(4)}`
+      case 'result': return `-- Done in ${(msg.duration / 1000).toFixed(1)}s · ${msg.numTurns} turns · $${(msg.cost ?? 0).toFixed(4)}`
       default: return ''
     }
   }).filter(Boolean).join('\n\n')
@@ -109,7 +110,7 @@ export default function App() {
 
   // Track focused agent's state for JourneyBar / StatusBar
   const focusedAgent = useAgent(manager.focusedId || '__none__')
-  const phaseInfo = useJourneyPhase(focusedAgent.messages, focusedAgent.isActive, null)
+  const phaseInfo = useJourneyPhase(focusedAgent.messages, focusedAgent.isActive, null, focusedAgent.phaseSnapshot)
   const contextUsage = useContextUsage()
   const apiUsage = useApiUsage()
   const updateStatus = useUpdateStatus()
@@ -249,9 +250,14 @@ export default function App() {
         break
       case '/diff':
         if (manager.focusedAgent?.cwd) {
-          api.gitDiff(manager.focusedAgent.cwd).then((diff: string) => {
-            sysMsg(diff?.trim() ? `Git diff:\n${diff.slice(0, 2000)}${diff.length > 2000 ? '\n...(truncated)' : ''}` : 'No uncommitted changes')
-          })
+          api.gitDiff(manager.focusedAgent.cwd, manager.focusedAgent.cwd).then((data: any) => {
+            if (data?.currentContent) {
+              const content = data.currentContent.slice(0, 2000)
+              sysMsg(`Status: ${data.status}\n${content}${data.currentContent.length > 2000 ? '\n...(truncated)' : ''}`)
+            } else {
+              sysMsg('No uncommitted changes')
+            }
+          }).catch(() => sysMsg('No uncommitted changes'))
         } else {
           sysMsg('No working directory set')
         }
@@ -368,10 +374,10 @@ export default function App() {
         const agentId = manager.focusedId
         const sysMsg = (text: string) => { if (agentId) api.emitSystemMessage(agentId, text) }
         api.installCLI().then((result: any) => {
-          if (result.success) {
+          if (result?.success) {
             sysMsg(`CLI installed! You can now run 'fluidstate .' from any terminal.\nInstalled to: ${result.path}`)
           } else {
-            sysMsg(`CLI install failed: ${result.error}`)
+            sysMsg(`CLI install failed: ${result?.error ?? 'unknown error'}`)
           }
         })
         break
@@ -773,21 +779,44 @@ export default function App() {
       )}
 
       {/* Main content */}
+      <style>{`
+        @keyframes layoutFadeIn {
+          from { opacity: 0; transform: scale(0.98); }
+          to   { opacity: 1; transform: scale(1); }
+        }
+        .layout-enter { animation: layoutFadeIn 0.18s ease forwards; }
+      `}</style>
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        <div style={{ flex: 1, overflow: 'hidden', minWidth: 0 }}>
-          <AgentTabs
-            agents={manager.agents}
-            focusedId={manager.focusedId}
-            canAddAgent={manager.canAddAgent}
-            onFocus={manager.focusAgent}
-            onClose={manager.closeAgent}
-            onAddAgent={() => manager.createAgent(undefined, settings.defaultProvider)}
-            onSlashCommand={handleSlashCommand}
-            onReorder={manager.reorderAgents}
-            onRename={manager.renameAgent}
-            recentFolders={recentFolders}
-            onOpenRecent={(path) => manager.createAgent(path, settings.defaultProvider)}
-          />
+        <div key={settings.layoutMode} className="layout-enter" style={{ flex: 1, overflow: 'hidden', minWidth: 0 }}>
+          {settings.layoutMode === 'grid' ? (
+            <AgentGrid
+              agents={manager.agents}
+              focusedId={manager.focusedId}
+              canAddAgent={manager.canAddAgent}
+              onFocus={manager.focusAgent}
+              onClose={manager.closeAgent}
+              onAddAgent={() => manager.createAgent(undefined, settings.defaultProvider)}
+              onSlashCommand={handleSlashCommand}
+              onReorder={manager.reorderAgents}
+              onRename={manager.renameAgent}
+              recentFolders={recentFolders}
+              onOpenRecent={(path) => manager.createAgent(path, settings.defaultProvider)}
+            />
+          ) : (
+            <AgentTabs
+              agents={manager.agents}
+              focusedId={manager.focusedId}
+              canAddAgent={manager.canAddAgent}
+              onFocus={manager.focusAgent}
+              onClose={manager.closeAgent}
+              onAddAgent={() => manager.createAgent(undefined, settings.defaultProvider)}
+              onSlashCommand={handleSlashCommand}
+              onReorder={manager.reorderAgents}
+              onRename={manager.renameAgent}
+              recentFolders={recentFolders}
+              onOpenRecent={(path) => manager.createAgent(path, settings.defaultProvider)}
+            />
+          )}
         </div>
 
         {/* Sidebar with panel switcher */}

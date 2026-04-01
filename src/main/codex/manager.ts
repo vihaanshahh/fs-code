@@ -4,32 +4,34 @@
  * One instance per agent cwd. Handles:
  * 1. Opening/creating the index DB (in FluidState app data)
  * 2. Background initial indexing (in a worker thread — zero main-thread blocking)
- * 3. File watcher for live reindex
- * 4. In-process MCP server with 14 tools
- * 5. Hook callbacks for automatic context injection
+ * 3. In-process MCP server with 14 tools
+ * 4. Hook callbacks for automatic context injection
  *
+ * Live reindex is handled by claude-ex post-edit hooks (no directory watcher needed).
  * Managers are ref-counted by cwd so multiple agents sharing a project
  * reuse the same index.
  */
 
+import { stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import type Database from 'better-sqlite3'
 import type { McpSdkServerConfigWithInstance, HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk'
 import type { CodexStatus } from '../../shared/types'
-import { openDatabase } from './db'
+import { openDatabase, getIndexDir } from './db'
 import { runIndexInWorker } from './indexer'
 import { createCodexMcpServer } from './mcp-server'
 import { createCodexHooks } from './hooks'
-import { startWatcher, type CodexWatcher } from './watcher'
+
 
 export class CodexManager {
   private db: Database.Database | null = null
-  private watcher: CodexWatcher | null = null
   private mcpServer: McpSdkServerConfigWithInstance | null = null
   private hooks: Partial<Record<string, HookCallbackMatcher[]>> | null = null
   private indexReady = false
   private indexPromise: Promise<void> | null = null
   private disposed = false
   private statusCallback: ((status: CodexStatus) => void) | null = null
+  private initError: string | null = null
 
   constructor(private readonly cwd: string) {}
 
@@ -39,6 +41,8 @@ export class CodexManager {
     // Emit current state immediately if already known
     if (this.indexReady) {
       cb({ state: 'ready' })
+    } else if (this.initError) {
+      cb({ state: 'error', error: this.initError })
     }
   }
 
@@ -67,22 +71,14 @@ export class CodexManager {
 
       // 3. Background initial index in a WORKER THREAD (zero main-thread blocking).
       //    The worker opens its own DB connection (WAL mode allows concurrent access).
+      //    Live reindex is handled by claude-ex post-edit hooks — no directory watcher needed.
       this.indexPromise = this.runInitialIndex().catch((err) => {
         console.error('[codex] background index failed:', err)
       })
-
-      // 4. Start file watcher (reindexes individual files on changes — fast enough for main thread)
-      if (!this.disposed) {
-        try {
-          this.watcher = await startWatcher(this.cwd, this.db, (file) => {
-            console.log(`[codex] reindexed: ${file}`)
-          })
-        } catch (err) {
-          console.error('[codex] watcher failed to start:', err)
-        }
-      }
     } catch (err) {
       console.error('[codex] initialization failed:', err)
+      this.initError = err instanceof Error ? err.message : String(err)
+      this.emitStatus({ state: 'error', error: this.initError })
       // Non-fatal — agent still works, just without code intelligence
     }
   }
@@ -90,18 +86,30 @@ export class CodexManager {
   private async runInitialIndex(): Promise<void> {
     if (!this.db) return
     try {
+      // If the DB already exists and has content, it's already indexed.
+      // Skip the worker scan entirely — the file watcher handles incremental updates.
+      const dbPath = join(getIndexDir(this.cwd), 'index.db')
+      try {
+        const { size } = await stat(dbPath)
+        if (size > 0) {
+          console.log(`[codex] index exists — ready immediately for ${this.cwd}`)
+          this.indexReady = true
+          this.emitStatus({ state: 'ready' })
+          return
+        }
+      } catch { /* DB doesn't exist yet — run full index below */ }
+
+      // First run for this project: build the index from scratch.
       this.emitStatus({ state: 'indexing', filesProcessed: 0, totalFiles: 0, symbols: 0 })
       const start = performance.now()
-      // Run indexing in a worker thread — completely off the main thread
       const stats = await runIndexInWorker(this.cwd, undefined, (p) => {
         if (!this.disposed) {
           this.emitStatus({ state: 'indexing', filesProcessed: p.filesProcessed, totalFiles: p.totalFiles, symbols: p.symbols })
         }
       })
-      // Guard: if manager was disposed while worker was running, don't update state
       if (this.disposed) return
       const elapsed = (performance.now() - start).toFixed(0)
-      console.log(`[codex] indexed ${stats.totalFiles} files (${stats.indexedFiles} new, ${stats.skippedFiles} cached) in ${elapsed}ms — ${stats.symbols} symbols, ${stats.edges} edges`)
+      console.log(`[codex] indexed ${stats.totalFiles} files in ${elapsed}ms — ${stats.symbols} symbols, ${stats.edges} edges`)
       this.indexReady = true
       this.emitStatus({ state: 'ready', filesProcessed: stats.totalFiles, totalFiles: stats.totalFiles, symbols: stats.symbols })
     } catch (err) {
@@ -114,6 +122,10 @@ export class CodexManager {
   /** Whether the initial index has completed */
   get isReady(): boolean {
     return this.indexReady
+  }
+
+  get isAvailable(): boolean {
+    return !this.initError && !!this.db && !!this.mcpServer
   }
 
   /** Wait for initial index to complete (for tests/debug) */
@@ -144,10 +156,6 @@ export class CodexManager {
   dispose(): void {
     this.disposed = true
     try {
-      if (this.watcher) {
-        this.watcher.close()
-        this.watcher = null
-      }
       if (this.db) {
         this.db.close()
         this.db = null

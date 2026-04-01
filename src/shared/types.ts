@@ -109,6 +109,21 @@ export interface PhaseInfo {
   activeTool?: ActiveToolInfo
 }
 
+export interface AgentPhaseSnapshot {
+  phase: AgentPhase
+  detail: string
+  startedAt: number
+  activeTool?: ActiveToolInfo
+}
+
+// GitHub CLI status
+export type GhCliStatusState = 'not_installed' | 'not_authenticated' | 'authenticated'
+
+export interface GhCliStatus {
+  state: GhCliStatusState
+  user?: string
+}
+
 // Codex indexing status
 export type CodexStatusState = 'loading' | 'indexing' | 'ready' | 'error'
 
@@ -271,6 +286,7 @@ export const IPC = {
   AGENT_PERMISSION_DISMISSED: 'agent:permission-dismissed',
   AGENT_SESSION_STARTED: 'agent:session-started',
   AGENT_SESSION_ENDED: 'agent:session-ended',
+  AGENT_PHASE: 'agent:phase',
   // Dialog
   DIALOG_OPEN_FOLDER: 'dialog:open-folder',
   // File system
@@ -328,6 +344,8 @@ export const IPC = {
   LOG_GET_PATH: 'log:get-path',
   // Codex status (main -> renderer)
   CODEX_STATUS: 'codex:status',
+  // GitHub CLI status
+  GH_CLI_STATUS: 'gh:status',
   // Resource stats (observability)
   RESOURCE_STATS: 'resource:stats',
 } as const

@@ -34,7 +34,7 @@ export default function TerminalDrawer({
 
   if (!visible) return null
 
-  const shortCwd = cwd === '.' ? '~' : '~/' + cwd.split('/').slice(-2).join('/')
+  const shortCwd = !cwd || cwd === '.' ? '~' : '~/' + cwd.split('/').slice(-2).join('/')
 
   return (
     <div style={{

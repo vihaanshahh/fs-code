@@ -5,6 +5,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { api } from '../../lib/api'
 import { useTheme } from '../../ThemeContext'
+import { clearAgentAwaitingSnapshot, setAgentPhaseSnapshot } from '../../hooks/useAgent'
 
 // ── Centralized terminal data dispatcher ──
 // Instead of N terminal panels each subscribing to all TERM_DATA events
@@ -18,6 +19,32 @@ type TermExitHandler = () => void
 const dataHandlers = new Map<string, TermDataHandler>()
 const exitHandlers = new Map<string, TermExitHandler>()
 let globalListenersSetup = false
+
+function normalizeTerminalScreen(text: string): string {
+  return text
+    .replace(/\r/g, '\n')
+    .replace(/[^\S\n]+/g, ' ')
+    .replace(/\n+/g, '\n')
+    .toLowerCase()
+}
+
+function screenShowsAwaitingPrompt(text: string): boolean {
+  const normalized = normalizeTerminalScreen(text)
+  const hasPrompt = /\b(do you want to proceed|approve\b|permission required|confirm this action|needs your approval)\b/.test(normalized)
+  const hasMenu =
+    /(?:^|\n)\s*(?:❯\s*)?1\. yes\b/.test(normalized)
+    && /(?:^|\n)\s*2\. yes,? and always allow\b/.test(normalized)
+    && /(?:^|\n)\s*3\. no\b/.test(normalized)
+  const hasAllowDeny = /\ballow\b|\bdeny\b|\bproceed\b/.test(normalized)
+  return (hasPrompt && hasMenu) || (hasPrompt && hasAllowDeny)
+}
+
+function screenShowsClaudePrompt(text: string): boolean {
+  const normalized = normalizeTerminalScreen(text)
+  const lines = normalized.split('\n').map(line => line.trim()).filter(Boolean)
+  const last = lines[lines.length - 1] || ''
+  return last === '❯' || last === '>' || /^❯ /.test(last)
+}
 
 function ensureGlobalListeners() {
   if (globalListenersSetup) return
@@ -53,6 +80,7 @@ export default function TerminalPanel({
   const { colors } = useTheme()
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
+  const fitRef = useRef<FitAddon | null>(null)
   const isCli = mode === 'claude' || mode === 'codex'
   const [ready, setReady] = useState(!isCli)
 
@@ -69,6 +97,56 @@ export default function TerminalPanel({
     let inputDisposable: { dispose: () => void } | null = null
     let resizeDisposable: { dispose: () => void } | null = null
     let observer: ResizeObserver | null = null
+    let inspectTimer: ReturnType<typeof setTimeout> | null = null
+    let lastScreenPhase: 'awaiting' | 'idle' | 'none' = 'none'
+
+    function inspectTerminalScreen() {
+      if (!term || disposed || mode !== 'claude') return
+      const active = (term as any).buffer?.active
+      if (!active) return
+
+      const cursor = active.baseY + active.cursorY
+      const start = Math.max(0, cursor - 18)
+      const end = Math.min(active.length - 1, cursor + 2)
+      const lines: string[] = []
+      for (let i = start; i <= end; i++) {
+        const line = active.getLine(i)
+        if (!line) continue
+        lines.push(line.translateToString(true))
+      }
+
+      const screenText = lines.join('\n')
+      if (screenShowsAwaitingPrompt(screenText)) {
+        if (lastScreenPhase !== 'awaiting') {
+          lastScreenPhase = 'awaiting'
+          setAgentPhaseSnapshot(agentId, {
+            phase: 'awaiting',
+            detail: 'Needs attention',
+            startedAt: Date.now(),
+          })
+        }
+      } else if (screenShowsClaudePrompt(screenText)) {
+        if (lastScreenPhase !== 'idle') {
+          lastScreenPhase = 'idle'
+          setAgentPhaseSnapshot(agentId, {
+            phase: 'idle',
+            detail: '',
+            startedAt: Date.now(),
+          })
+        }
+      } else if (lastScreenPhase !== 'none') {
+        lastScreenPhase = 'none'
+        clearAgentAwaitingSnapshot(agentId)
+      }
+    }
+
+    function scheduleInspect() {
+      if (inspectTimer) return
+      inspectTimer = setTimeout(() => {
+        inspectTimer = null
+        inspectTerminalScreen()
+      }, 50)
+    }
 
     // Wait for container to have real dimensions before opening xterm
     function tryOpen() {
@@ -116,6 +194,7 @@ export default function TerminalPanel({
       })
 
       fitAddon = new FitAddon()
+      fitRef.current = fitAddon
       term.loadAddon(fitAddon)
       term.loadAddon(new WebLinksAddon())
       termRef.current = term
@@ -137,7 +216,11 @@ export default function TerminalPanel({
         // Register handler BEFORE replaying buffer to avoid missing data
         let gotPrompt = false
         dataHandlers.set(terminalId, (data: string) => {
-          if (term && !disposed) term.write(data)
+          if (term && !disposed) {
+            term.write(data, () => {
+              if (!disposed) scheduleInspect()
+            })
+          }
           // Consider ready only once the CLI prompt appears:
           // Claude uses ❯, Codex uses > at start of line or "codex>" prompt
           if (isCli && !disposed && !gotPrompt) {
@@ -164,7 +247,9 @@ export default function TerminalPanel({
         if (!isNew && term) {
           const { data } = await api.getTerminalBuffer(terminalId)
           if (data && term && !disposed) {
-            term.write(data)
+            term.write(data, () => {
+              if (!disposed) scheduleInspect()
+            })
             if (isCli) {
               gotPrompt = true
               setReady(true)
@@ -186,6 +271,7 @@ export default function TerminalPanel({
         if (ptyId) {
           api.writeTerminal(ptyId, data)
         }
+        scheduleInspect()
       })
 
       // Resize: xterm → PTY
@@ -196,8 +282,11 @@ export default function TerminalPanel({
       })
 
       // Observe container resize → fit xterm
+      // Skip fitting when container is hidden (0 dimensions) to avoid
+      // collapsing the terminal to 0 cols/rows when switching tabs.
       observer = new ResizeObserver(() => {
         requestAnimationFrame(() => {
+          if (!container || container.offsetWidth === 0 || container.offsetHeight === 0) return
           try { fitAddon?.fit() } catch { /* container may be hidden */ }
         })
       })
@@ -208,6 +297,7 @@ export default function TerminalPanel({
 
     return () => {
       disposed = true
+      if (inspectTimer) clearTimeout(inspectTimer)
       observer?.disconnect()
       inputDisposable?.dispose()
       resizeDisposable?.dispose()
@@ -216,11 +306,27 @@ export default function TerminalPanel({
         exitHandlers.delete(ptyId)
       }
       termRef.current = null
+      fitRef.current = null
       term?.dispose()
       // NOTE: intentionally do NOT close the PTY here.
       // The PTY persists in the main process until the agent is closed.
     }
   }, [agentId, cwd, mode, resume]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-fit when container becomes visible (tab switch with visibility:hidden)
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const obs = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting && fitRef.current && container.offsetWidth > 0) {
+        requestAnimationFrame(() => {
+          try { fitRef.current?.fit() } catch { /* ignore */ }
+        })
+      }
+    }, { threshold: 0.1 })
+    obs.observe(container)
+    return () => obs.disconnect()
+  }, [])
 
   // Live theme update — patches xterm colors without reinitializing the terminal
   useEffect(() => {

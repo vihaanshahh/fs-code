@@ -171,7 +171,7 @@ export default function AgentCell({
           }}
           title={descriptor.cwd}
         >
-          {descriptor.cwd === '.'
+          {!descriptor.cwd || descriptor.cwd === '.'
             ? '~'
             : '~/' + descriptor.cwd.split('/').slice(-2).join('/')}
         </span>
