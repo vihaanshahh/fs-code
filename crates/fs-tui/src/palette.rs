@@ -16,6 +16,9 @@ struct PaletteEntry {
 const COMMANDS: &[PaletteEntry] = &[
     PaletteEntry { id: "new", label: "New Agent", shortcut: "Ctrl+N" },
     PaletteEntry { id: "close", label: "Close Agent", shortcut: "Ctrl+W" },
+    PaletteEntry { id: "replace", label: "Replace Agent", shortcut: "Ctrl+R" },
+    PaletteEntry { id: "open", label: "Open File", shortcut: "Ctrl+O" },
+    PaletteEntry { id: "diff", label: "View Diff", shortcut: "Ctrl+D" },
     PaletteEntry { id: "quit", label: "Quit", shortcut: "Ctrl+Q" },
 ];
 
