@@ -105,3 +105,60 @@ fn layout_grid(area: Rect, n: usize) -> Vec<Rect> {
 
     panes
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn area(w: u16, h: u16) -> Rect {
+        Rect::new(0, 0, w, h)
+    }
+
+    #[test]
+    fn grid_0_agents_returns_empty() {
+        assert!(compute_grid(area(80, 24), 0).is_empty());
+    }
+
+    #[test]
+    fn grid_1_agent_returns_full_area() {
+        let rects = compute_grid(area(80, 24), 1);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0], area(80, 24));
+    }
+
+    #[test]
+    fn grid_2_agents_splits_horizontal() {
+        let rects = compute_grid(area(80, 24), 2);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].width + rects[1].width, 80);
+        assert_eq!(rects[0].height, 24);
+    }
+
+    #[test]
+    fn grid_4_agents_2x2() {
+        let rects = compute_grid(area(80, 24), 4);
+        assert_eq!(rects.len(), 4);
+        // All panes should fit within the area
+        for r in &rects {
+            assert!(r.x + r.width <= 80);
+            assert!(r.y + r.height <= 24);
+        }
+    }
+
+    #[test]
+    fn grid_9_agents_3x3() {
+        let rects = compute_grid(area(90, 30), 9);
+        assert_eq!(rects.len(), 9);
+        // Should be 3 columns, 3 rows
+        for r in &rects {
+            assert!(r.x + r.width <= 90);
+            assert!(r.y + r.height <= 30);
+        }
+    }
+
+    #[test]
+    fn grid_5_agents_has_5_panes() {
+        let rects = compute_grid(area(90, 30), 5);
+        assert_eq!(rects.len(), 5);
+    }
+}

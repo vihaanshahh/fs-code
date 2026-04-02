@@ -29,6 +29,18 @@ fn main() -> anyhow::Result<()> {
     // Run the TUI app
     rt.block_on(async {
         let mut app = fs_tui::App::new();
-        app.run().await
+        match app.run().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Friendly message if no terminal is available
+                let msg = e.to_string();
+                if msg.contains("No such device") || msg.contains("not a terminal") {
+                    eprintln!("Error: FluidState requires an interactive terminal (TTY).");
+                    eprintln!("Run this command directly in a terminal, not piped or in CI.");
+                    std::process::exit(1);
+                }
+                Err(e)
+            }
+        }
     })
 }
