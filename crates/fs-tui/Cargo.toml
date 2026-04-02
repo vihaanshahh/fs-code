@@ -1,0 +1,16 @@
+[package]
+name = "fs-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fs-core = { path = "../fs-core" }
+fs-pty = { path = "../fs-pty" }
+fs-agent = { path = "../fs-agent" }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+alacritty_terminal = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+unicode-width = "0.2"
