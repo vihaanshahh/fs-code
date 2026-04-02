@@ -52,9 +52,13 @@ pub async fn get_auth_status() -> AuthStatus {
 
 pub async fn auth_login() -> Result<(), String> {
     let cli = crate::agent::find_claude_cli().ok_or("Claude CLI not found")?;
+    // Spawn login process detached — it opens a browser for OAuth.
+    // Don't .wait() as that blocks the IPC handler until login completes.
     Command::new(&cli).arg("auth").arg("login")
-        .spawn().map_err(|e| e.to_string())?
-        .wait().await.map_err(|e| e.to_string())?;
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn().map_err(|e| e.to_string())?;
     Ok(())
 }
 

@@ -551,10 +551,11 @@ async fn term_create_codex(
 
 #[tauri::command]
 async fn term_buffer(
-    _terminal_id: String,
+    terminal_id: String,
+    app_state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
-    // Buffer replay not yet implemented (would require storing PTY output)
-    Ok(serde_json::json!({ "data": "" }))
+    let data = terminal::get_buffer(Arc::clone(&*app_state), &terminal_id).await;
+    Ok(serde_json::json!({ "data": data }))
 }
 
 #[tauri::command]
@@ -706,16 +707,53 @@ async fn update_remove_gh_token() -> Result<(), String> {
 async fn resource_stats(app_state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let agents = app_state.agents.lock().await;
     let active = agents.values().filter(|a| a.is_active).count();
+    let terminals = app_state.terminals.lock().await;
+
+    // Read RSS from /proc/self/statm (Linux) or use 0 as fallback
+    let memory_mb = get_rss_mb();
+
     Ok(serde_json::json!({
         "agentCount": agents.len(),
         "activeAgentCount": active,
-        "memoryMB": 0,
-        "heapUsedMB": 0,
+        "memoryMB": memory_mb,
+        "heapUsedMB": memory_mb,
         "heapTotalMB": 0,
         "externalMB": 0,
         "codexReadyCount": 0,
-        "uptimeSeconds": 0,
+        "terminalCount": terminals.len(),
+        "uptimeSeconds": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
     }))
+}
+
+fn get_rss_mb() -> u64 {
+    // Linux: read from /proc/self/statm (page count)
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(data) = std::fs::read_to_string("/proc/self/statm") {
+            if let Some(rss_pages) = data.split_whitespace().nth(1) {
+                if let Ok(pages) = rss_pages.parse::<u64>() {
+                    let page_size = 4096u64; // standard page size
+                    return (pages * page_size) / (1024 * 1024);
+                }
+            }
+        }
+    }
+    // macOS: use `ps` as a portable fallback
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+        {
+            if let Ok(rss_kb) = String::from_utf8_lossy(&output.stdout).trim().parse::<u64>() {
+                return rss_kb / 1024;
+            }
+        }
+    }
+    0
 }
 
 // ============================================================================
@@ -751,10 +789,11 @@ fn extract_text_content(content: &serde_json::Value) -> Option<String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = Arc::new(AppState::new());
+    let state_for_setup = app_state.clone();
 
     tauri::Builder::default()
         .manage(app_state)
-        .setup(|app| {
+        .setup(move |app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -762,6 +801,27 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            // Graceful shutdown: close all terminals and agents on window close
+            let state_for_exit = state_for_setup.clone();
+            let handle = app.handle().clone();
+            handle.on_window_event(move |_win, event| {
+                if let tauri::WindowEvent::Destroyed = event {
+                    let state = state_for_exit.clone();
+                    tokio::spawn(async move {
+                        // Close all terminals (kills PTY child processes)
+                        terminal::close_all(state.clone()).await;
+                        // Clear all agents (drops stop channels)
+                        let mut agents = state.agents.lock().await;
+                        for (_id, agent) in agents.drain() {
+                            if let Some(tx) = agent.stop_tx {
+                                let _ = tx.send(());
+                            }
+                        }
+                    });
+                }
+            });
+
             Ok(())
         })
         .plugin(tauri_plugin_shell::init())

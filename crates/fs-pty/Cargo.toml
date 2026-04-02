@@ -1,0 +1,12 @@
+[package]
+name = "fs-pty"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fs-core = { path = "../fs-core" }
+alacritty_terminal = { workspace = true }
+portable-pty = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }

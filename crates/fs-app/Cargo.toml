@@ -1,0 +1,16 @@
+[package]
+name = "fluidstate"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "fluidstate"
+path = "src/main.rs"
+
+[dependencies]
+fs-core = { path = "../fs-core" }
+fs-tui = { path = "../fs-tui" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

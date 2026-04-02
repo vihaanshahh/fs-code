@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react'
+import React, { useState, useRef, useCallback, useMemo } from 'react'
 import AgentCell from './AgentCell'
 import FluidBackground from './FluidBackground'
 import { useTheme } from '../../ThemeContext'
@@ -115,6 +115,26 @@ export default function AgentGrid({
     const size = el.getBoundingClientRect().height
     setVSplit(prev => clamp(prev + (delta / size) * 100))
   }, [])
+
+  // Stable drag event handlers — prevents inline arrows from defeating AgentCell memoization
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent, targetIndex: number) => {
+    e.preventDefault()
+    const from = parseInt(e.dataTransfer.getData('text/plain'))
+    if (from !== targetIndex) onReorder(from, targetIndex)
+  }, [onReorder])
+
+  // Stable per-agent callbacks to avoid new function refs every render
+  const agentCallbacks = useMemo(() => {
+    return agents.map((agent, i) => ({
+      onFocus: () => onFocus(agent.id),
+      onClose: () => onClose(agent.id),
+      onDrop: (e: React.DragEvent) => handleDrop(e, i),
+    }))
+  }, [agents, onFocus, onClose, handleDrop])
 
   return (
     <div ref={containerRef} style={{ height: '100%', overflow: 'hidden', position: 'relative' }}>
@@ -252,14 +272,14 @@ export default function AgentGrid({
 
       {/* 1 agent: full screen */}
       {n === 1 && (
-        <div key={1} className="layout-enter" style={{ height: '100%' }}>
+        <div className="layout-enter" style={{ height: '100%' }}>
           <AgentCell
             descriptor={agents[0]}
             index={0}
             isFocused={true}
             compact={false}
-            onFocus={() => onFocus(agents[0].id)}
-            onClose={() => onClose(agents[0].id)}
+            onFocus={agentCallbacks[0].onFocus}
+            onClose={agentCallbacks[0].onClose}
             onSlashCommand={onSlashCommand}
             onRename={onRename}
           />
@@ -268,27 +288,27 @@ export default function AgentGrid({
 
       {/* 2 agents: vertical split (left | right) */}
       {n === 2 && (
-        <div key={2} className="layout-enter" style={{ display: 'flex', height: '100%' }}>
+        <div className="layout-enter" style={{ display: 'flex', height: '100%' }}>
           <div
             style={{ width: `${hSplit}%`, overflow: 'hidden', minWidth: 0 }}
-            onDragOver={e => e.preventDefault()}
-            onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('text/plain')); if (from === 1) onReorder(1, 0) }}
+            onDragOver={handleDragOver}
+            onDrop={agentCallbacks[0].onDrop}
           >
             <AgentCell
               descriptor={agents[0]} index={0} isFocused={agents[0].id === focusedId}
-              compact onFocus={() => onFocus(agents[0].id)} onClose={() => onClose(agents[0].id)}
+              compact onFocus={agentCallbacks[0].onFocus} onClose={agentCallbacks[0].onClose}
               onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={0}
             />
           </div>
           <Divider direction="vertical" onDrag={handleHDrag} />
           <div
             style={{ flex: 1, overflow: 'hidden', minWidth: 0 }}
-            onDragOver={e => e.preventDefault()}
-            onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('text/plain')); if (from === 0) onReorder(0, 1) }}
+            onDragOver={handleDragOver}
+            onDrop={agentCallbacks[1].onDrop}
           >
             <AgentCell
               descriptor={agents[1]} index={1} isFocused={agents[1].id === focusedId}
-              compact onFocus={() => onFocus(agents[1].id)} onClose={() => onClose(agents[1].id)}
+              compact onFocus={agentCallbacks[1].onFocus} onClose={agentCallbacks[1].onClose}
               onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={1}
             />
           </div>
@@ -297,15 +317,15 @@ export default function AgentGrid({
 
       {/* 3 agents: top full-width | bottom two side-by-side */}
       {n === 3 && (
-        <div key={3} className="layout-enter" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <div className="layout-enter" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           <div
             style={{ height: `${vSplit}%`, overflow: 'hidden', minHeight: 0 }}
-            onDragOver={e => e.preventDefault()}
-            onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('text/plain')); if (from !== 0) onReorder(from, 0) }}
+            onDragOver={handleDragOver}
+            onDrop={agentCallbacks[0].onDrop}
           >
             <AgentCell
               descriptor={agents[0]} index={0} isFocused={agents[0].id === focusedId}
-              compact onFocus={() => onFocus(agents[0].id)} onClose={() => onClose(agents[0].id)}
+              compact onFocus={agentCallbacks[0].onFocus} onClose={agentCallbacks[0].onClose}
               onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={0}
             />
           </div>
@@ -313,24 +333,24 @@ export default function AgentGrid({
           <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
             <div
               style={{ width: `${hSplit}%`, overflow: 'hidden', minWidth: 0 }}
-              onDragOver={e => e.preventDefault()}
-              onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('text/plain')); if (from !== 1) onReorder(from, 1) }}
+              onDragOver={handleDragOver}
+              onDrop={agentCallbacks[1].onDrop}
             >
               <AgentCell
                 descriptor={agents[1]} index={1} isFocused={agents[1].id === focusedId}
-                compact onFocus={() => onFocus(agents[1].id)} onClose={() => onClose(agents[1].id)}
+                compact onFocus={agentCallbacks[1].onFocus} onClose={agentCallbacks[1].onClose}
                 onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={1}
               />
             </div>
             <Divider direction="vertical" onDrag={handleHDrag} />
             <div
               style={{ flex: 1, overflow: 'hidden', minWidth: 0 }}
-              onDragOver={e => e.preventDefault()}
-              onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('text/plain')); if (from !== 2) onReorder(from, 2) }}
+              onDragOver={handleDragOver}
+              onDrop={agentCallbacks[2].onDrop}
             >
               <AgentCell
                 descriptor={agents[2]} index={2} isFocused={agents[2].id === focusedId}
-                compact onFocus={() => onFocus(agents[2].id)} onClose={() => onClose(agents[2].id)}
+                compact onFocus={agentCallbacks[2].onFocus} onClose={agentCallbacks[2].onClose}
                 onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={2}
               />
             </div>
@@ -341,29 +361,29 @@ export default function AgentGrid({
 
       {/* 4 agents: 2x2 with both dividers */}
       {n === 4 && (
-        <div key={4} className="layout-enter" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <div className="layout-enter" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           {/* Top row */}
           <div style={{ height: `${vSplit}%`, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
             <div
               style={{ width: `${hSplit}%`, overflow: 'hidden', minWidth: 0 }}
-              onDragOver={e => e.preventDefault()}
-              onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('text/plain')); if (from !== 0) onReorder(from, 0) }}
+              onDragOver={handleDragOver}
+              onDrop={agentCallbacks[0].onDrop}
             >
               <AgentCell
                 descriptor={agents[0]} index={0} isFocused={agents[0].id === focusedId}
-                compact onFocus={() => onFocus(agents[0].id)} onClose={() => onClose(agents[0].id)}
+                compact onFocus={agentCallbacks[0].onFocus} onClose={agentCallbacks[0].onClose}
                 onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={0}
               />
             </div>
             <Divider direction="vertical" onDrag={handleHDrag} />
             <div
               style={{ flex: 1, overflow: 'hidden', minWidth: 0 }}
-              onDragOver={e => e.preventDefault()}
-              onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('text/plain')); if (from !== 1) onReorder(from, 1) }}
+              onDragOver={handleDragOver}
+              onDrop={agentCallbacks[1].onDrop}
             >
               <AgentCell
                 descriptor={agents[1]} index={1} isFocused={agents[1].id === focusedId}
-                compact onFocus={() => onFocus(agents[1].id)} onClose={() => onClose(agents[1].id)}
+                compact onFocus={agentCallbacks[1].onFocus} onClose={agentCallbacks[1].onClose}
                 onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={1}
               />
             </div>
@@ -373,24 +393,24 @@ export default function AgentGrid({
           <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
             <div
               style={{ width: `${hSplit}%`, overflow: 'hidden', minWidth: 0 }}
-              onDragOver={e => e.preventDefault()}
-              onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('text/plain')); if (from !== 2) onReorder(from, 2) }}
+              onDragOver={handleDragOver}
+              onDrop={agentCallbacks[2].onDrop}
             >
               <AgentCell
                 descriptor={agents[2]} index={2} isFocused={agents[2].id === focusedId}
-                compact onFocus={() => onFocus(agents[2].id)} onClose={() => onClose(agents[2].id)}
+                compact onFocus={agentCallbacks[2].onFocus} onClose={agentCallbacks[2].onClose}
                 onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={2}
               />
             </div>
             <Divider direction="vertical" onDrag={handleHDrag} />
             <div
               style={{ flex: 1, overflow: 'hidden', minWidth: 0 }}
-              onDragOver={e => e.preventDefault()}
-              onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('text/plain')); if (from !== 3) onReorder(from, 3) }}
+              onDragOver={handleDragOver}
+              onDrop={agentCallbacks[3].onDrop}
             >
               <AgentCell
                 descriptor={agents[3]} index={3} isFocused={agents[3].id === focusedId}
-                compact onFocus={() => onFocus(agents[3].id)} onClose={() => onClose(agents[3].id)}
+                compact onFocus={agentCallbacks[3].onFocus} onClose={agentCallbacks[3].onClose}
                 onSlashCommand={onSlashCommand} onRename={onRename} draggable onDragStart={3}
               />
             </div>
@@ -402,7 +422,7 @@ export default function AgentGrid({
       {n >= 5 && (() => {
         const rows = Math.ceil(n / 3)
         return (
-          <div key={n} className="layout-enter" style={{
+          <div className="layout-enter" style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(3, 1fr)',
             gridTemplateRows: `repeat(${rows}, 1fr)`,
@@ -418,23 +438,17 @@ export default function AgentGrid({
                   minWidth: 0,
                   minHeight: 0,
                   background: colors.bg,
-                  // Last row: if fewer than 3 items, let them fill naturally
-                  ...(i >= n - (n % 3 || 3) && n % 3 !== 0 ? {} : {}),
                 }}
-                onDragOver={e => e.preventDefault()}
-                onDrop={e => {
-                  e.preventDefault()
-                  const from = parseInt(e.dataTransfer.getData('text/plain'))
-                  if (from !== i) onReorder(from, i)
-                }}
+                onDragOver={handleDragOver}
+                onDrop={agentCallbacks[i].onDrop}
               >
                 <AgentCell
                   descriptor={agent}
                   index={i}
                   isFocused={agent.id === focusedId}
                   compact
-                  onFocus={() => onFocus(agent.id)}
-                  onClose={() => onClose(agent.id)}
+                  onFocus={agentCallbacks[i].onFocus}
+                  onClose={agentCallbacks[i].onClose}
                   onSlashCommand={onSlashCommand}
                   onRename={onRename}
                   draggable
