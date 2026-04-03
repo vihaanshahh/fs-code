@@ -179,6 +179,7 @@ pub fn render_status_bar(
     area: Rect,
     agents: &[AgentDescriptor],
     focused: usize,
+    status_msg: Option<&str>,
 ) {
     let mut spans = vec![
         Span::styled(" FluidState ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -198,8 +199,16 @@ pub fn render_status_bar(
         }
     }
 
+    // Status message (if any)
+    if let Some(msg) = status_msg {
+        spans.push(Span::styled(
+            format!(" │ {} ", msg),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
     // Right-align shortcuts hint
-    let hint = " Ctrl+K palette │ Ctrl+Q quit ";
+    let hint = " ^O open │ ^D diff │ ^R replace │ ^K palette ";
     let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
     let padding = (area.width as usize).saturating_sub(left_len + hint.len());
     spans.push(Span::raw(" ".repeat(padding)));
