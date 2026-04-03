@@ -7,7 +7,9 @@
 //!   - Context lines in default color
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+
+use crate::theme::Theme;
 
 // ---------------------------------------------------------------------------
 // Diff types
@@ -149,6 +151,7 @@ pub struct DiffViewer {
     pub scroll: usize,
     pub active_file: usize,
     open: bool,
+    viewport_height: usize,
 }
 
 impl DiffViewer {
@@ -158,11 +161,8 @@ impl DiffViewer {
             scroll: 0,
             active_file: 0,
             open: false,
+            viewport_height: 0,
         }
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.open
     }
 
     pub fn open_with(&mut self, diff_text: &str) {
@@ -182,7 +182,8 @@ impl DiffViewer {
     }
 
     pub fn scroll_down(&mut self, n: usize) {
-        let max = self.total_lines().saturating_sub(1);
+        let total = self.total_lines();
+        let max = total.saturating_sub(self.viewport_height.max(1));
         self.scroll = (self.scroll + n).min(max);
     }
 
@@ -200,6 +201,20 @@ impl DiffViewer {
         }
     }
 
+    /// Returns the source file line number (0-indexed) at the current scroll position.
+    pub fn current_source_line(&self) -> usize {
+        let diff = match self.diffs.get(self.active_file) {
+            Some(d) => d,
+            None => return 0,
+        };
+        for line in diff.lines[self.scroll..].iter() {
+            if let Some(n) = line.new_num.or(line.old_num) {
+                return n.saturating_sub(1);
+            }
+        }
+        0
+    }
+
     fn total_lines(&self) -> usize {
         self.diffs
             .get(self.active_file)
@@ -207,7 +222,7 @@ impl DiffViewer {
             .unwrap_or(0)
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let diff = match self.diffs.get(self.active_file) {
             Some(d) => d,
             None => {
@@ -219,31 +234,26 @@ impl DiffViewer {
             }
         };
 
-        // Title with file info and navigation
         let title = format!(
             " {} (+{} -{}) [{}/{}] ",
-            diff.path,
-            diff.additions,
-            diff.deletions,
-            self.active_file + 1,
-            self.diffs.len(),
+            diff.path, diff.additions, diff.deletions,
+            self.active_file + 1, self.diffs.len(),
         );
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
+            .border_style(Style::default().fg(theme.text))
             .title(Span::styled(
                 title,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ))
             .title_bottom(Span::styled(
-                " ←/→ files │ ↑/↓ scroll │ Esc close ",
-                Style::default().fg(Color::DarkGray),
+                " ←/→ files │ ^↑/↓ line │ j/k×5 │ PgUp/Dn×40 │ e edit │ Esc close ",
+                Style::default().fg(theme.text_muted),
             ));
 
         let inner = block.inner(area);
+        frame.render_widget(Clear, area);
         frame.render_widget(block, area);
 
         if inner.height == 0 {
@@ -255,6 +265,7 @@ impl DiffViewer {
         let content_w = inner.width.saturating_sub(gutter_w);
 
         let visible_lines = inner.height as usize;
+        self.viewport_height = visible_lines;
         let start = self.scroll;
         let end = (start + visible_lines).min(diff.lines.len());
 
@@ -269,17 +280,17 @@ impl DiffViewer {
                 _ => "     │ ".to_string(),
             };
 
-            let gutter_style = Style::default().fg(Color::DarkGray);
+            let gutter_style = Style::default().fg(theme.text_muted);
             frame
                 .buffer_mut()
                 .set_string(inner.x, y, &gutter_text, gutter_style);
 
             // Content with diff coloring
             let (fg, bg, prefix) = match line.kind {
-                DiffLineKind::Added => (Color::Green, Color::Rgb(0, 40, 0), "+"),
-                DiffLineKind::Removed => (Color::Red, Color::Rgb(40, 0, 0), "-"),
-                DiffLineKind::Header => (Color::Cyan, Color::Reset, "@"),
-                DiffLineKind::Context => (Color::White, Color::Reset, " "),
+                DiffLineKind::Added   => (theme.green,          theme.diff_add_bg,    "+"),
+                DiffLineKind::Removed => (theme.red,            theme.diff_remove_bg, "-"),
+                DiffLineKind::Header  => (theme.text_muted,      Color::Reset,         "@"),
+                DiffLineKind::Context => (theme.text,            Color::Reset,         " "),
             };
 
             let display = format!("{}{}", prefix, line.content);

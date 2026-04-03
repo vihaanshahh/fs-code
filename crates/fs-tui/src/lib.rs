@@ -5,11 +5,14 @@
 //! and diff view.
 
 mod app;
+mod deps;
 mod diff;
 mod editor;
 mod file_picker;
+mod file_tree;
 mod grid;
 mod palette;
 mod render;
+pub mod theme;
 
 pub use app::App;

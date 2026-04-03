@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use alacritty_terminal::grid::Dimensions;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyboardEnhancementFlags, KeyModifiers, MouseEvent, MouseEventKind, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 
@@ -13,12 +15,15 @@ use fs_agent;
 use fs_core::{uid, AgentDescriptor, AgentId, Config, KeyAction};
 use fs_pty::TerminalManager;
 
+use crate::deps::DepsViewer;
 use crate::diff::DiffViewer;
 use crate::editor::Editor;
 use crate::file_picker::{FilePicker, PickerMode};
+use crate::file_tree::{FileTree, SIDEBAR_WIDTH};
 use crate::grid;
 use crate::palette::Palette;
 use crate::render;
+use crate::theme::{self, Theme, ThemeMode};
 
 // ---------------------------------------------------------------------------
 // Active overlay — only one overlay can be open at a time
@@ -31,6 +36,7 @@ enum Overlay {
     FilePicker,
     Editor,
     Diff,
+    Deps,
 }
 
 // ---------------------------------------------------------------------------
@@ -42,16 +48,23 @@ pub struct App {
     terminal_mgr: TerminalManager,
     /// Maps agent ID → terminal ID
     agent_terminals: HashMap<AgentId, String>,
+    /// Maps agent ID → scroll offset (lines scrolled back from live view)
+    scroll_offsets: HashMap<AgentId, usize>,
     focused: usize,
     config: Config,
     palette: Palette,
     file_picker: FilePicker,
+    file_tree: FileTree,
     editor: Editor,
     diff_viewer: DiffViewer,
+    deps_viewer: DepsViewer,
     overlay: Overlay,
+    sidebar_open: bool,
+    sidebar_focused: bool,
     /// Status message shown briefly in the status bar
     status_msg: Option<(String, std::time::Instant)>,
     should_quit: bool,
+    theme: Theme,
 }
 
 impl App {
@@ -60,15 +73,21 @@ impl App {
             agents: Vec::new(),
             terminal_mgr: TerminalManager::new(),
             agent_terminals: HashMap::new(),
+            scroll_offsets: HashMap::new(),
             focused: 0,
             config: Config::default(),
             palette: Palette::new(),
             file_picker: FilePicker::new(),
+            file_tree: FileTree::new(),
             editor: Editor::new(),
             diff_viewer: DiffViewer::new(),
+            deps_viewer: DepsViewer::new(),
             overlay: Overlay::None,
+            sidebar_open: false,
+            sidebar_focused: false,
             status_msg: None,
             should_quit: false,
+            theme: theme::theme(ThemeMode::default()),
         }
     }
 
@@ -76,12 +95,23 @@ impl App {
     pub async fn run(&mut self) -> anyhow::Result<()> {
         terminal::enable_raw_mode()?;
         io::stdout().execute(EnterAlternateScreen)?;
+        io::stdout().execute(EnableMouseCapture)?;
+        let supports_enhancement = terminal::supports_keyboard_enhancement().unwrap_or(false);
+        if supports_enhancement {
+            io::stdout().execute(PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+            ))?;
+        }
         let backend = CrosstermBackend::new(io::stdout());
         let mut term = Terminal::new(backend)?;
         term.clear()?;
 
         let result = self.event_loop(&mut term).await;
 
+        if supports_enhancement {
+            io::stdout().execute(PopKeyboardEnhancementFlags)?;
+        }
+        io::stdout().execute(DisableMouseCapture)?;
         terminal::disable_raw_mode()?;
         io::stdout().execute(LeaveAlternateScreen)?;
         self.terminal_mgr.close_all();
@@ -127,7 +157,37 @@ impl App {
         match ev {
             Event::Key(key) => self.handle_key(key)?,
             Event::Resize(cols, rows) => self.handle_resize(cols, rows)?,
-            Event::Mouse(_) => {}
+            Event::Mouse(mouse) => self.handle_mouse(mouse)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
+        match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let delta = if mouse.kind == MouseEventKind::ScrollUp { -3 } else { 3 };
+                if self.overlay == Overlay::Diff {
+                    if delta < 0 {
+                        self.diff_viewer.scroll_up((-delta) as usize);
+                    } else {
+                        self.diff_viewer.scroll_down(delta as usize);
+                    }
+                } else if self.overlay == Overlay::None && !self.agents.is_empty() {
+                    // Focus whichever pane the cursor is over, then scroll it
+                    let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+                    let main_area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
+                    let pane_areas = grid::compute_grid(main_area, self.agents.len());
+                    let hovered = pane_areas.iter().position(|a| {
+                        mouse.column >= a.x && mouse.column < a.x + a.width
+                            && mouse.row >= a.y && mouse.row < a.y + a.height
+                    });
+                    if let Some(idx) = hovered {
+                        self.focused = idx;
+                    }
+                    self.scroll_focused(delta);
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -140,7 +200,22 @@ impl App {
             Overlay::FilePicker => return self.handle_picker_key(key),
             Overlay::Editor => return self.handle_editor_key(key),
             Overlay::Diff => return self.handle_diff_key(key),
+            Overlay::Deps => return self.handle_deps_key(key),
             Overlay::None => {}
+        }
+
+        // Sidebar gets keys when it has focus
+        if self.sidebar_focused {
+            return self.handle_sidebar_key(key);
+        }
+
+        // Tab into the editor when it's open but not currently focused
+        if key.code == KeyCode::Tab
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && self.editor.is_open()
+        {
+            self.overlay = Overlay::Editor;
+            return Ok(());
         }
 
         let action = Self::map_key(key);
@@ -148,7 +223,15 @@ impl App {
         match action {
             KeyAction::Quit => self.should_quit = true,
             KeyAction::NewAgent => self.add_agent()?,
-            KeyAction::CloseAgent => self.close_focused_agent(),
+            KeyAction::CloseAgent => {
+                if self.editor.is_open() {
+                    // Ctrl+W closes the editor panel first, agent on next press
+                    self.editor.close();
+                    self.overlay = Overlay::None;
+                } else {
+                    self.close_focused_agent();
+                }
+            }
             KeyAction::FocusAgent(idx) => {
                 if idx < self.agents.len() {
                     self.focused = idx;
@@ -174,23 +257,45 @@ impl App {
                 };
             }
             KeyAction::None => {
-                // Check for new overlay shortcuts before forwarding to terminal
+                // Check for overlay / sidebar shortcuts before forwarding to terminal
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                match (ctrl, key.code) {
-                    (true, KeyCode::Char('o')) => {
+                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                match (ctrl, shift, key.code) {
+                    // Sidebar toggle — Ctrl+E
+                    (true, _, KeyCode::Char('e')) => {
+                        self.toggle_sidebar();
+                    }
+                    (true, _, KeyCode::Char('o')) => {
                         let cwd = self.current_cwd();
                         self.file_picker.open(&cwd, PickerMode::Open);
                         self.overlay = Overlay::FilePicker;
                     }
-                    (true, KeyCode::Char('d')) => {
+                    (true, _, KeyCode::Char('d')) => {
                         let cwd = self.current_cwd();
                         self.file_picker.open(&cwd, PickerMode::Diff);
                         self.overlay = Overlay::FilePicker;
                     }
-                    (true, KeyCode::Char('r')) => {
-                        self.replace_focused_agent()?;
+                    // Ctrl+F: focus the editor panel (if a file is open)
+                    (true, _, KeyCode::Char('f')) => {
+                        if self.editor.is_open() {
+                            self.overlay = Overlay::Editor;
+                        }
                     }
+                    // Ctrl+I: inspect deps for the open editor file (or selected sidebar file)
+                    (true, _, KeyCode::Char('i')) => {
+                        self.open_deps_viewer();
+                    }
+                    // Shift+Up/Down: scroll one line
+                    (_, true, KeyCode::Up) => self.scroll_focused(-1),
+                    (_, true, KeyCode::Down) => self.scroll_focused(1),
+                    // Shift+PageUp/PageDown: scroll a page
+                    (_, true, KeyCode::PageUp) => self.scroll_focused(-20),
+                    (_, true, KeyCode::PageDown) => self.scroll_focused(20),
                     _ => {
+                        // Any regular keypress snaps back to live view
+                        if let Some(agent) = self.agents.get(self.focused) {
+                            self.scroll_offsets.insert(agent.id.clone(), 0);
+                        }
                         self.forward_key_to_terminal(key)?;
                     }
                 }
@@ -215,11 +320,19 @@ impl App {
             }
         }
 
-        match key.code {
-            KeyCode::Tab if !ctrl => KeyAction::FocusNext,
-            KeyCode::BackTab => KeyAction::FocusPrev,
-            _ => KeyAction::None,
+        if ctrl {
+            match key.code {
+                KeyCode::Right | KeyCode::Down => return KeyAction::FocusNext,
+                KeyCode::Left | KeyCode::Up => return KeyAction::FocusPrev,
+                _ => {}
+            }
         }
+
+        if key.code == KeyCode::Tab {
+            return KeyAction::FocusNext;
+        }
+
+        KeyAction::None
     }
 
     fn forward_key_to_terminal(&self, key: KeyEvent) -> anyhow::Result<()> {
@@ -260,7 +373,6 @@ impl App {
                     match cmd.as_str() {
                         "new" => self.add_agent()?,
                         "close" => self.close_focused_agent(),
-                        "replace" => self.replace_focused_agent()?,
                         "open" => {
                             let cwd = self.current_cwd();
                             self.file_picker.open(&cwd, PickerMode::Open);
@@ -270,6 +382,9 @@ impl App {
                             let cwd = self.current_cwd();
                             self.file_picker.open(&cwd, PickerMode::Diff);
                             self.overlay = Overlay::FilePicker;
+                        }
+                        "deps" => {
+                            self.open_deps_viewer();
                         }
                         "quit" => self.should_quit = true,
                         _ => {}
@@ -331,7 +446,14 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         match (ctrl, key.code) {
+            // Esc: unfocus editor, return focus to agents (panel stays open)
             (_, KeyCode::Esc) => {
+                self.overlay = Overlay::None;
+            }
+            // Ctrl+W / Ctrl+X: close the editor panel entirely
+            // (Ctrl+X is the fallback since some terminals intercept Ctrl+W)
+            (true, KeyCode::Char('w')) | (true, KeyCode::Char('W'))
+            | (true, KeyCode::Char('x')) | (true, KeyCode::Char('X')) => {
                 self.editor.close();
                 self.overlay = Overlay::None;
             }
@@ -364,17 +486,215 @@ impl App {
     // -----------------------------------------------------------------------
 
     fn handle_diff_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (ctrl, key.code) {
+            (_, KeyCode::Esc) | (_, KeyCode::Char('q')) => {
                 self.diff_viewer.close();
                 self.overlay = Overlay::None;
             }
-            KeyCode::Up | KeyCode::Char('k') => self.diff_viewer.scroll_up(1),
-            KeyCode::Down | KeyCode::Char('j') => self.diff_viewer.scroll_down(1),
-            KeyCode::PageUp => self.diff_viewer.scroll_up(20),
-            KeyCode::PageDown => self.diff_viewer.scroll_down(20),
-            KeyCode::Left | KeyCode::Char('h') => self.diff_viewer.prev_file(),
-            KeyCode::Right | KeyCode::Char('l') => self.diff_viewer.next_file(),
+            // Single-line scroll
+            (true, KeyCode::Up) => self.diff_viewer.scroll_up(1),
+            (true, KeyCode::Down) => self.diff_viewer.scroll_down(1),
+            // Fast scroll (5 lines)
+            (false, KeyCode::Up) | (false, KeyCode::Char('k')) => self.diff_viewer.scroll_up(5),
+            (false, KeyCode::Down) | (false, KeyCode::Char('j')) => self.diff_viewer.scroll_down(5),
+            (_, KeyCode::PageUp) => self.diff_viewer.scroll_up(40),
+            (_, KeyCode::PageDown) => self.diff_viewer.scroll_down(40),
+            (false, KeyCode::Left) | (false, KeyCode::Char('h')) => self.diff_viewer.prev_file(),
+            (false, KeyCode::Right) | (false, KeyCode::Char('l')) => self.diff_viewer.next_file(),
+            (false, KeyCode::Char('e')) => {
+                let source_line = self.diff_viewer.current_source_line();
+                let path = self.diff_viewer.diffs
+                    .get(self.diff_viewer.active_file)
+                    .map(|d| format!("{}/{}", self.current_cwd(), d.path));
+                if let Some(path) = path {
+                    self.diff_viewer.close();
+                    match self.editor.open_file(&path) {
+                        Ok(()) => {
+                            self.editor.goto_line(source_line);
+                            self.overlay = Overlay::Editor;
+                            self.set_status(format!("Editing {} :{}", path, source_line + 1));
+                        }
+                        Err(e) => {
+                            self.overlay = Overlay::None;
+                            self.set_status(format!("Error: {}", e));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Overlay: Deps Viewer
+    // -----------------------------------------------------------------------
+
+    fn open_deps_viewer(&mut self) {
+        // Prefer the currently open editor file, then the selected sidebar file.
+        let file_path = if self.editor.is_open() && !self.editor.path.is_empty() {
+            Some(self.editor.path.clone())
+        } else if self.sidebar_open {
+            self.file_tree
+                .selected_path()
+                .filter(|p| !p.is_dir())
+                .map(|p| p.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        if let Some(path) = file_path {
+            let cwd = self.current_cwd();
+            self.deps_viewer.open_for(&path, &cwd);
+            let broken = self.deps_viewer.broken_count();
+            if broken > 0 {
+                self.set_status(format!(
+                    "Deps: {} imports, {} broken",
+                    self.deps_viewer.imports.len(),
+                    broken
+                ));
+            } else {
+                self.set_status(format!(
+                    "Deps: {} imports, {} importers",
+                    self.deps_viewer.imports.len(),
+                    self.deps_viewer.imported_by.len(),
+                ));
+            }
+            self.overlay = Overlay::Deps;
+        } else {
+            self.set_status("No file selected — open a file or select one in the tree (Ctrl+E)");
+        }
+    }
+
+    fn handle_deps_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.deps_viewer.close();
+                self.overlay = Overlay::None;
+            }
+            KeyCode::Tab => {
+                self.deps_viewer.toggle_section();
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.deps_viewer.scroll_up(1),
+            KeyCode::Down | KeyCode::Char('j') => self.deps_viewer.scroll_down(1),
+            KeyCode::PageUp => self.deps_viewer.scroll_up(10),
+            KeyCode::PageDown => self.deps_viewer.scroll_down(10),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Sidebar
+    // -----------------------------------------------------------------------
+
+    fn toggle_sidebar(&mut self) {
+        if !self.sidebar_open {
+            // Open and focus
+            let cwd = self.current_cwd();
+            self.file_tree.load(&cwd);
+            self.sidebar_open = true;
+            self.sidebar_focused = true;
+        } else if self.sidebar_focused {
+            // Already focused → close it
+            self.sidebar_open = false;
+            self.sidebar_focused = false;
+        } else {
+            // Open but unfocused → focus it
+            self.sidebar_focused = true;
+        }
+        // Sidebar changes available width — resize all agent panes.
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        self.handle_resize(term_cols, term_rows).ok();
+    }
+
+    fn handle_sidebar_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (ctrl, key.code) {
+            // Ctrl+E or Esc/Tab: unfocus sidebar (or close if ctrl)
+            (true, KeyCode::Char('e')) => {
+                self.sidebar_open = false;
+                self.sidebar_focused = false;
+            }
+            (_, KeyCode::Esc) | (_, KeyCode::Tab) => {
+                self.sidebar_focused = false;
+            }
+            // Navigation
+            (_, KeyCode::Up) | (_, KeyCode::Char('k')) => self.file_tree.move_up(),
+            (_, KeyCode::Down) | (_, KeyCode::Char('j')) => self.file_tree.move_down(),
+            // Activate: expand dir or open file
+            (_, KeyCode::Enter) | (_, KeyCode::Char(' ')) => {
+                if let Some(path) = self.file_tree.activate_selected() {
+                    let path_str = path.to_string_lossy().to_string();
+                    match self.editor.open_file(&path_str) {
+                        Ok(()) => {
+                            self.sidebar_focused = false;
+                            self.overlay = Overlay::Editor;
+                            self.set_status(format!("Opened {}", path_str));
+                        }
+                        Err(e) => self.set_status(format!("Error: {}", e)),
+                    }
+                }
+            }
+            // 'e' — explicitly open selected file in editor
+            (_, KeyCode::Char('e')) => {
+                if let Some(path) = self.file_tree.selected_path() {
+                    if !path.is_dir() {
+                        let path_str = path.to_string_lossy().to_string();
+                        match self.editor.open_file(&path_str) {
+                            Ok(()) => {
+                                self.sidebar_focused = false;
+                                self.overlay = Overlay::Editor;
+                                self.set_status(format!("Opened {}", path_str));
+                            }
+                            Err(e) => self.set_status(format!("Error: {}", e)),
+                        }
+                    }
+                }
+            }
+            // 'd' — open diff for selected file
+            (_, KeyCode::Char('d')) => {
+                if let Some(path) = self.file_tree.selected_path() {
+                    if !path.is_dir() {
+                        let path_str = path.to_string_lossy().to_string();
+                        self.sidebar_focused = false;
+                        self.open_diff_for_file(&path_str);
+                    }
+                }
+            }
+            // 'i' — inspect deps for selected file
+            (_, KeyCode::Char('i')) => {
+                if let Some(path) = self.file_tree.selected_path() {
+                    if !path.is_dir() {
+                        let path_str = path.to_string_lossy().to_string();
+                        let cwd = self.current_cwd();
+                        self.sidebar_focused = false;
+                        self.deps_viewer.open_for(&path_str, &cwd);
+                        let broken = self.deps_viewer.broken_count();
+                        if broken > 0 {
+                            self.set_status(format!(
+                                "Deps: {} import{}, {} broken",
+                                self.deps_viewer.imports.len(),
+                                if self.deps_viewer.imports.len() == 1 { "" } else { "s" },
+                                broken
+                            ));
+                        } else {
+                            self.set_status(format!(
+                                "Deps: {} import{}",
+                                self.deps_viewer.imports.len(),
+                                if self.deps_viewer.imports.len() == 1 { "" } else { "s" }
+                            ));
+                        }
+                        self.overlay = Overlay::Deps;
+                    }
+                }
+            }
+            // 'r' — refresh tree
+            (_, KeyCode::Char('r')) => {
+                self.file_tree.refresh();
+                self.set_status("Tree refreshed");
+            }
             _ => {}
         }
         Ok(())
@@ -415,8 +735,10 @@ impl App {
     }
 
     fn handle_resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        let sidebar_w = if self.sidebar_open { SIDEBAR_WIDTH } else { 0 };
+        let available_cols = cols.saturating_sub(sidebar_w);
         let areas = grid::compute_grid(
-            Rect::new(0, 0, cols, rows.saturating_sub(1)),
+            Rect::new(0, 0, available_cols, rows.saturating_sub(1)),
             self.agents.len(),
         );
 
@@ -433,6 +755,37 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Theme
+    // -----------------------------------------------------------------------
+
+    /// Scroll the focused pane. Negative delta = scroll up (into history), positive = toward live.
+    fn scroll_focused(&mut self, delta: i32) {
+        let Some(agent) = self.agents.get(self.focused) else { return };
+        let terminal_id = match self.agent_terminals.get(&agent.id) {
+            Some(tid) => tid.clone(),
+            None => return,
+        };
+        let Some(instance) = self.terminal_mgr.get(&terminal_id) else { return };
+        let max_scroll = instance.term.lock()
+            .map(|t| t.grid().history_size())
+            .unwrap_or(0);
+
+        let current = *self.scroll_offsets.get(&agent.id).unwrap_or(&0);
+        let new_offset = if delta < 0 {
+            (current + (-delta) as usize).min(max_scroll)
+        } else {
+            current.saturating_sub(delta as usize)
+        };
+        self.scroll_offsets.insert(agent.id.clone(), new_offset);
+
+        if new_offset > 0 {
+            self.set_status(format!("Scrolled back {} lines (Shift+↓ to return)", new_offset));
+        } else {
+            self.status_msg = None;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -463,6 +816,7 @@ impl App {
 
         let env = fs_agent::build_clean_env();
 
+        // Start with a placeholder size; handle_resize will correct all panes after layout.
         self.terminal_mgr.create(
             terminal_id.clone(),
             &program,
@@ -470,7 +824,7 @@ impl App {
             &cwd,
             env,
             80,
-            24,
+            22,
         )?;
 
         self.agent_terminals.insert(id.clone(), terminal_id);
@@ -483,11 +837,16 @@ impl App {
         });
 
         self.focused = self.agents.len() - 1;
+
+        // Resize all panes (existing + new) to fit the updated grid layout.
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        self.handle_resize(term_cols, term_rows)?;
+
         self.set_status("Agent created");
         Ok(())
     }
 
-    /// Close the focused agent and remove its pane.
+    /// Close the focused agent and remove its pane, renumbering the rest.
     fn close_focused_agent(&mut self) {
         if self.agents.is_empty() {
             return;
@@ -495,72 +854,26 @@ impl App {
 
         let idx = self.focused;
         let agent = self.agents.remove(idx);
-        let name = agent.name.clone();
 
         if let Some(tid) = self.agent_terminals.remove(&agent.id) {
             self.terminal_mgr.close(&tid);
         }
+        self.scroll_offsets.remove(&agent.id);
+
+        // Renumber remaining agents
+        for (i, a) in self.agents.iter_mut().enumerate() {
+            a.name = format!("Agent {}", i + 1);
+        }
 
         if !self.agents.is_empty() {
             self.focused = self.focused.min(self.agents.len() - 1);
+            // Resize remaining panes to fill the now-larger grid slots.
+            let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+            self.handle_resize(term_cols, term_rows).ok();
         } else {
             self.focused = 0;
         }
-        self.set_status(format!("{} closed", name));
-    }
-
-    /// Replace the focused agent — close it and spawn a fresh one in its slot.
-    fn replace_focused_agent(&mut self) -> anyhow::Result<()> {
-        if self.agents.is_empty() {
-            return self.add_agent();
-        }
-
-        let idx = self.focused;
-        let old = self.agents.remove(idx);
-        let cwd = old.cwd.clone();
-
-        if let Some(tid) = self.agent_terminals.remove(&old.id) {
-            self.terminal_mgr.close(&tid);
-        }
-
-        // Create replacement
-        let id = uid();
-        let terminal_id = uid();
-        let name = old.name.clone();
-
-        let (program, args) = if let Some(cli) = fs_agent::find_claude_cli() {
-            (
-                cli.to_string_lossy().to_string(),
-                fs_agent::claude_args(None),
-            )
-        } else {
-            (self.config.default_shell.clone(), vec![])
-        };
-
-        let env = fs_agent::build_clean_env();
-
-        self.terminal_mgr.create(
-            terminal_id.clone(),
-            &program,
-            &args,
-            &cwd,
-            env,
-            80,
-            24,
-        )?;
-
-        self.agent_terminals.insert(id.clone(), terminal_id.clone());
-        let desc = AgentDescriptor {
-            id,
-            name: name.clone(),
-            cwd,
-            is_active: true,
-            provider: "claude".into(),
-        };
-        self.agents.insert(idx, desc);
-        self.focused = idx;
-        self.set_status(format!("{} replaced", name));
-        Ok(())
+        self.set_status("Agent closed");
     }
 
     fn current_cwd(&self) -> String {
@@ -581,7 +894,7 @@ impl App {
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
-        // Split: main area + 1-row status bar at bottom
+        // Split vertically: main content + 1-row status bar
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -590,20 +903,74 @@ impl App {
         let main_area = chunks[0];
         let status_area = chunks[1];
 
-        if self.agents.is_empty() {
-            render::render_welcome(frame, main_area);
+        // Split horizontally: optional sidebar + content area
+        let (sidebar_area, content_area) = if self.sidebar_open {
+            let h = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)])
+                .split(main_area);
+            (Some(h[0]), h[1])
         } else {
-            let pane_areas = grid::compute_grid(main_area, self.agents.len());
+            (None, main_area)
+        };
+
+        // Render sidebar
+        if let Some(sa) = sidebar_area {
+            self.file_tree.render(frame, sa, &self.theme, self.sidebar_focused);
+        }
+
+        // Split content: agent grid on left, editor panel on right (when open)
+        let (agent_area, editor_panel_area) = if self.editor.is_open() {
+            let h = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(content_area);
+            (h[0], Some(h[1]))
+        } else {
+            (content_area, None)
+        };
+
+        // Render agent grid (or welcome screen)
+        let agent_focused = !self.sidebar_focused && self.overlay != Overlay::Editor;
+        if self.agents.is_empty() {
+            render::render_welcome(frame, agent_area, &self.theme);
+        } else {
+            let pane_areas = grid::compute_grid(agent_area, self.agents.len());
             for (i, agent) in self.agents.iter().enumerate() {
                 if let Some(&pane_area) = pane_areas.get(i) {
-                    let is_focused = i == self.focused;
+                    let is_focused = i == self.focused && agent_focused;
                     let terminal_id = self.agent_terminals.get(&agent.id);
                     let instance =
                         terminal_id.and_then(|tid| self.terminal_mgr.get(tid));
-                    render::render_pane(frame, pane_area, agent, is_focused, instance);
+                    let scroll = self.scroll_offsets.get(&agent.id).copied().unwrap_or(0);
+                    render::render_pane(frame, pane_area, agent, is_focused, instance, scroll, &self.theme);
                 }
             }
         }
+
+        // Render editor side panel (always visible when a file is open)
+        if let Some(ea) = editor_panel_area {
+            self.editor.render(frame, ea, &self.theme);
+        }
+
+        let hint = match self.overlay {
+            Overlay::Editor =>
+                " ^S save │ ^W close │ Esc unfocus editor ",
+            Overlay::Diff =>
+                " ↑↓/jk scroll │ ←→/hl prev/next file │ e edit │ q close ",
+            Overlay::FilePicker =>
+                " ↑↓ navigate │ Enter open │ Esc cancel ",
+            Overlay::Palette =>
+                " ↑↓ navigate │ Enter run │ Esc cancel ",
+            Overlay::Deps =>
+                " Tab switch │ j/k scroll │ PgUp/Dn │ q/Esc close ",
+            Overlay::None if self.sidebar_focused =>
+                " ↑↓/jk navigate │ Enter expand/open │ e edit │ d diff │ i deps │ r refresh │ Esc unfocus ",
+            Overlay::None if self.editor.is_open() =>
+                " ^F focus editor │ ^W close │ Tab cycle │ ^E tree │ ^D diff │ ^I deps │ ^K palette ",
+            Overlay::None =>
+                " ^N new │ ^W close │ Tab cycle │ ^E tree │ ^O open │ ^D diff │ ^I deps │ ^K palette │ ^Q quit ",
+        };
 
         render::render_status_bar(
             frame,
@@ -611,15 +978,18 @@ impl App {
             &self.agents,
             self.focused,
             self.status_msg.as_ref().map(|(m, _)| m.as_str()),
+            hint,
+            &self.theme,
         );
 
-        // Overlays (rendered on top of everything)
+        // Overlays (rendered on top of everything — editor is now a side panel, not here)
         match self.overlay {
-            Overlay::Palette => self.palette.render(frame, area),
-            Overlay::FilePicker => self.file_picker.render(frame, area),
-            Overlay::Editor => self.editor.render(frame, main_area),
-            Overlay::Diff => self.diff_viewer.render(frame, main_area),
-            Overlay::None => {}
+            Overlay::Palette    => self.palette.render(frame, area, &self.theme),
+            Overlay::FilePicker => self.file_picker.render(frame, area, &self.theme),
+            Overlay::Editor     => {} // rendered inline as side panel above
+            Overlay::Diff       => self.diff_viewer.render(frame, main_area, &self.theme),
+            Overlay::Deps       => self.deps_viewer.render(frame, main_area, &self.theme),
+            Overlay::None       => {}
         }
     }
 }

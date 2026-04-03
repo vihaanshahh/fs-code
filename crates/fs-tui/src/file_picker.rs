@@ -9,6 +9,8 @@ use std::path::Path;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
+use crate::theme::Theme;
+
 // ---------------------------------------------------------------------------
 // Ignore patterns
 // ---------------------------------------------------------------------------
@@ -46,6 +48,9 @@ pub struct FilePicker {
     pub mode: PickerMode,
     input: String,
     files: Vec<String>,
+    /// Git status char per file ('M', 'A', 'D', '?', or ' ').
+    /// Only populated in Diff mode; used to pick the display color.
+    file_statuses: Vec<char>,
     filtered: Vec<usize>, // indices into files
     selected: usize,
     cwd: String,
@@ -58,22 +63,30 @@ impl FilePicker {
             mode: PickerMode::Open,
             input: String::new(),
             files: Vec::new(),
+            file_statuses: Vec::new(),
             filtered: Vec::new(),
             selected: 0,
             cwd: String::new(),
         }
     }
 
-    pub fn is_open(&self) -> bool {
-        self.open
-    }
 
     pub fn open(&mut self, cwd: &str, mode: PickerMode) {
         self.cwd = cwd.to_string();
         self.mode = mode;
         self.input.clear();
         self.selected = 0;
-        self.files = collect_files(cwd, 3); // max depth 3
+        match mode {
+            PickerMode::Diff => {
+                let (files, statuses) = collect_git_files(cwd);
+                self.files = files;
+                self.file_statuses = statuses;
+            }
+            PickerMode::Open => {
+                self.files = collect_files(cwd, 3);
+                self.file_statuses = vec![' '; self.files.len()];
+            }
+        }
         self.refilter();
         self.open = true;
     }
@@ -128,7 +141,7 @@ impl FilePicker {
             .collect();
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let w = 60u16.min(area.width.saturating_sub(4));
         let h = 20u16.min(area.height.saturating_sub(4));
         let x = area.x + (area.width.saturating_sub(w)) / 2;
@@ -144,12 +157,10 @@ impl FilePicker {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Magenta))
+            .border_style(Style::default().fg(theme.text))
             .title(Span::styled(
                 format!(" {} ", mode_label),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ));
 
         let inner = block.inner(picker_area);
@@ -165,7 +176,7 @@ impl FilePicker {
         let total = self.files.len();
         let prompt = format!("❯ {}  ({}/{})", self.input, count, total);
         frame.render_widget(
-            Paragraph::new(prompt).style(Style::default().fg(Color::White)),
+            Paragraph::new(prompt).style(Style::default().fg(theme.text)),
             input_area,
         );
 
@@ -181,24 +192,96 @@ impl FilePicker {
             .map(|(i, &file_idx)| {
                 let path = &self.files[file_idx];
                 let is_selected = i == self.selected;
-                let style = if is_selected {
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD)
+
+                let (prefix, style) = if is_selected {
+                    ("▸ ", Style::default().fg(theme.text).add_modifier(Modifier::BOLD | Modifier::REVERSED))
                 } else {
-                    Style::default().fg(Color::White)
+                    let status = self.file_statuses.get(file_idx).copied().unwrap_or(' ');
+                    let fg = match status {
+                        'M' | 'm' => theme.amber,
+                        'A' | 'a' => theme.green,
+                        'D' | 'd' => theme.red,
+                        '?' => theme.text_muted,
+                        _ => theme.text,
+                    };
+                    ("  ", Style::default().fg(fg))
                 };
 
-                let prefix = if is_selected { "▸ " } else { "  " };
+                // In diff mode, show the status char as a prefix badge
+                let label = if self.mode == PickerMode::Diff {
+                    let status = self.file_statuses.get(file_idx).copied().unwrap_or(' ');
+                    format!("{} {}", status, path)
+                } else {
+                    path.clone()
+                };
+
                 ListItem::new(Line::from(vec![
                     Span::styled(prefix, style),
-                    Span::styled(path.as_str(), style),
+                    Span::styled(label, style),
                 ]))
             })
             .collect();
 
         frame.render_widget(List::new(items), list_area);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Git-changed file collection — for Diff mode
+// ---------------------------------------------------------------------------
+
+/// Returns (paths, status_chars) from `git status --porcelain`.
+/// Status chars: 'M' modified, 'A' added, 'D' deleted, '?' untracked.
+fn collect_git_files(cwd: &str) -> (Vec<String>, Vec<char>) {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(cwd)
+        .output();
+
+    if let Ok(out) = output {
+        parse_git_status(&String::from_utf8_lossy(&out.stdout))
+    } else {
+        (Vec::new(), Vec::new())
+    }
+}
+
+/// Parse the text output of `git status --porcelain` into (paths, status_chars).
+fn parse_git_status(porcelain: &str) -> (Vec<String>, Vec<char>) {
+    let mut files = Vec::new();
+    let mut statuses = Vec::new();
+
+    for line in porcelain.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let xy = line.as_bytes();
+        // XY format: index status (xy[0]) + worktree status (xy[1])
+        let x = xy[0] as char;
+        let y = xy[1] as char;
+        let path_part = &line[3..];
+
+        // For renames "old -> new", take the new path
+        let path = if path_part.contains(" -> ") {
+            path_part.split(" -> ").nth(1).unwrap_or(path_part).trim_matches('"').to_string()
+        } else {
+            path_part.trim_matches('"').to_string()
+        };
+
+        // Resolve status: prefer index, fall back to worktree
+        let status = match (x, y) {
+            ('?', '?') => '?',
+            ('D', _) | (_, 'D') => 'D',
+            ('A', _) | (_, 'A') => 'A',
+            ('R', _) | (_, 'R') => 'M', // treat rename as modified
+            ('M', _) | (_, 'M') => 'M',
+            _ => 'M',
+        };
+
+        files.push(path);
+        statuses.push(status);
+    }
+
+    (files, statuses)
 }
 
 // ---------------------------------------------------------------------------
@@ -282,5 +365,66 @@ mod tests {
         assert!(fuzzy_match("src/main.rs", "smr"));
         assert!(fuzzy_match("src/main.rs", "src/main.rs"));
         assert!(!fuzzy_match("src/main.rs", "xyz"));
+    }
+
+    #[test]
+    fn git_status_modified() {
+        let input = " M crates/fs-tui/src/app.rs\n";
+        let (files, statuses) = parse_git_status(input);
+        assert_eq!(files, vec!["crates/fs-tui/src/app.rs"]);
+        assert_eq!(statuses, vec!['M']);
+    }
+
+    #[test]
+    fn git_status_staged_modified() {
+        let input = "M  crates/fs-tui/src/app.rs\n";
+        let (_files, statuses) = parse_git_status(input);
+        assert_eq!(statuses, vec!['M']);
+    }
+
+    #[test]
+    fn git_status_added() {
+        let input = "A  new_file.rs\n";
+        let (files, statuses) = parse_git_status(input);
+        assert_eq!(files, vec!["new_file.rs"]);
+        assert_eq!(statuses, vec!['A']);
+    }
+
+    #[test]
+    fn git_status_deleted() {
+        let input = "D  old_file.rs\n";
+        let (_files, statuses) = parse_git_status(input);
+        assert_eq!(statuses, vec!['D']);
+    }
+
+    #[test]
+    fn git_status_untracked() {
+        let input = "?? untracked.rs\n";
+        let (files, statuses) = parse_git_status(input);
+        assert_eq!(files, vec!["untracked.rs"]);
+        assert_eq!(statuses, vec!['?']);
+    }
+
+    #[test]
+    fn git_status_rename() {
+        let input = "R  old.rs -> new.rs\n";
+        let (files, statuses) = parse_git_status(input);
+        assert_eq!(files, vec!["new.rs"]);
+        assert_eq!(statuses, vec!['M']);
+    }
+
+    #[test]
+    fn git_status_mixed() {
+        let input = " M src/app.rs\nA  src/new.rs\nD  src/old.rs\n?? scratch.rs\n";
+        let (files, statuses) = parse_git_status(input);
+        assert_eq!(files, vec!["src/app.rs", "src/new.rs", "src/old.rs", "scratch.rs"]);
+        assert_eq!(statuses, vec!['M', 'A', 'D', '?']);
+    }
+
+    #[test]
+    fn git_status_empty() {
+        let (files, statuses) = parse_git_status("");
+        assert!(files.is_empty());
+        assert!(statuses.is_empty());
     }
 }

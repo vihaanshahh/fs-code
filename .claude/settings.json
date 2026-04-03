@@ -5,42 +5,6 @@
     ]
   },
   "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node '/Users/vihaanshah/Documents/GitHub/fs-code/scripts/claude-journey-hook.cjs'",
-            "timeout": 2000
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node '/Users/vihaanshah/Documents/GitHub/fs-code/scripts/claude-journey-hook.cjs'",
-            "timeout": 2000
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node '/Users/vihaanshah/Documents/GitHub/fs-code/scripts/claude-journey-hook.cjs'",
-            "timeout": 2000
-          }
-        ]
-      }
-    ],
     "SessionStart": [
       {
         "matcher": "",
@@ -63,16 +27,6 @@
             "timeout": 3000
           }
         ]
-      },
-      {
-        "matcher": "Write|Edit|MultiEdit|Bash|Grep|Glob|Agent|Skill|WebSearch|WebFetch",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node '/Users/vihaanshah/Documents/GitHub/fs-code/scripts/claude-journey-hook.cjs'",
-            "timeout": 2000
-          }
-        ]
       }
     ],
     "PostToolUse": [
@@ -83,16 +37,6 @@
             "type": "command",
             "command": "claude-ex post-edit \"$(jq -r '.tool_input.file_path')\"",
             "timeout": 5000
-          }
-        ]
-      },
-      {
-        "matcher": "Write|Edit|MultiEdit|Bash|Grep|Glob|Agent|Skill|WebSearch|WebFetch",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node '/Users/vihaanshah/Documents/GitHub/fs-code/scripts/claude-journey-hook.cjs'",
-            "timeout": 2000
           }
         ]
       }

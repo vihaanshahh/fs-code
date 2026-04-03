@@ -1,148 +1,89 @@
-# FluidState (fs-code)
+# fluidstate
 
-A native desktop IDE built on the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk). Everything Claude Code does, but with a real visual interface instead of the terminal — plus multi-provider support, built-in code intelligence, source control, and more.
+Multi-agent coding in your terminal. Run parallel Claude agents across your codebase, monitor progress in real-time, and only get interrupted when something actually needs you.
 
-## What you need
+→ [fluidstate.ai](https://fluidstate.ai)
 
-1. **Node.js 18+** — [nodejs.org](https://nodejs.org)
-2. **Claude Code CLI** — install and log in:
-   ```bash
-   npm install -g @anthropic-ai/claude-code
-   claude auth login
-   ```
-3. **Bun** (recommended) or npm — [bun.sh](https://bun.sh)
+## Install
 
-## Quick start
+```sh
+curl -fsSL https://fluidstate.ai/install.sh | bash
+```
 
-```bash
-# Clone
+Or with Homebrew:
+
+```sh
+brew install vihaanshahh/fluidstate/fluidstate
+```
+
+Then run it in any project:
+
+```sh
+cd your-project
+fluidstate
+```
+
+Requires Claude Code to be installed and logged in (`claude auth login`).
+
+## What it is
+
+A pure Rust TUI built on ratatui and alacritty_terminal. No Electron, no Node, no webview — a single binary that runs anywhere you have a terminal.
+
+- **Multi-agent grid** — open multiple Claude agents side-by-side, each with full context in its own pane
+- **Live terminal emulation** — real pty, real keystrokes, scrollback, not a log viewer
+- **File picker / editor / diff viewer** — browse, open, and diff files without leaving the TUI
+- **Command palette** — fuzzy-search everything with a single keypress
+- **File tree sidebar** — project navigator with git status indicators
+- **Journey bar** — visualizes agent phase (planning → coding → testing → done) across all panes
+
+## Keyboard shortcuts
+
+| Key | Action |
+|---|---|
+| `Ctrl+N` | New agent pane |
+| `Ctrl+W` | Close focused pane |
+| `Tab` / `Shift+Tab` | Cycle focus between panes |
+| `Ctrl+P` | Command palette |
+| `Ctrl+O` | File picker |
+| `Ctrl+D` | Diff viewer |
+| `Ctrl+E` | Open file in editor |
+| `Ctrl+B` | Toggle file tree sidebar |
+| `Ctrl+T` | Cycle theme |
+| `Ctrl+Q` | Quit |
+| `PageUp` / `PageDown` | Scroll terminal output |
+
+## Build from source
+
+```sh
 git clone https://github.com/vihaanshahh/fs-code.git
 cd fs-code
-
-# Install dependencies
-bun install
-# or: npm install
-
-# Run the app (opens Electron window)
-bun run dev
-# or: npm run dev
+cargo build --release
+./target/release/fluidstate
 ```
 
-## Features
+Requires Rust 1.78+.
 
-### Multi-provider AI
-
-Switch between AI backends without changing your workflow:
-
-- **Claude** — via the Agent SDK (default)
-- **OpenAI Codex** — via `codex` CLI
-- **Google Gemini** — via `gemini` CLI
-- **GitHub Copilot** — via `github-copilot-cli`
-
-Configure providers and API keys in Settings.
-
-### Multi-agent workspace
-
-Run multiple agents side-by-side in a resizable grid. Each agent gets its own pane with independent context, and agents can be minimized to a floating pill to save space.
-
-### Code intelligence (Codex)
-
-A built-in code index that runs automatically in the background:
-
-- **Symbol search** — find functions, classes, and types by name (PageRank-ranked)
-- **Dependency tracking** — callers, dependents, imports
-- **Live reindex** — file watcher keeps the index fresh as you edit
-- **MCP server** — 14 structural analysis tools available to agents during conversations
-- **11 languages** — TypeScript, JavaScript, Python, Rust, Go, Bash, C, C++, JSON, CSS, HTML
-
-### Source control
-
-Inline diff viewer with git integration:
-
-- Per-file status (modified, added, deleted, untracked)
-- Hunk-based diff visualization
-- Stage, unstage, and discard changes from the UI
-
-### Command palette
-
-80+ slash commands across 11 categories. Open with the palette shortcut, search by name, and execute — session management, agent control, view toggles, and more.
-
-### Themes
-
-Seven color themes: Charcoal, Light, Midnight, Rose, Forest, Clay, and Claude. Each includes tuned palettes for phases, diffs, and UI elements.
-
-### Journey bar
-
-Visualizes agent progress through five phases — Thinking, Searching, Planning, Coding, Testing — so you can see at a glance what the agent is doing.
-
-### Auto-updates
-
-Checks GitHub Releases every 30 minutes. Downloads on request, installs on quit. SHA-512 verified.
-
-## Auth
-
-FluidState uses your existing Claude Code login. If you've already run `claude auth login`, you're set — the Agent SDK picks up your credentials automatically.
-
-For other providers, add API keys in Settings. Keys are encrypted via Electron `safeStorage`.
-
-GitHub tokens for private repo access can also be stored in the keystore.
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `bun run dev` | Run in dev mode with hot reload |
-| `bun run build` | Build for production |
-| `bun run start` | Run the production build |
-| `bun run test` | Run tests |
-
-## How it works
-
-The main process imports `@anthropic-ai/claude-agent-sdk` and calls `query()` with streaming for multi-turn conversations. All SDK messages (text, tool calls, permissions, results) are forwarded to the React renderer via IPC.
-
-- **Streaming** — tokens appear in real-time as Claude thinks
-- **Tool calls** — Bash, Read, Edit, Grep, etc. shown as expandable cards
-- **Permissions** — Allow/Deny dialog when the agent wants to run something
-- **Session cost** — tracked and displayed per conversation
-
-## Project structure
+## Architecture
 
 ```
-src/
-├── main/                  # Electron main process
-│   ├── index.ts           # Window, lifecycle
-│   ├── agent.ts           # Agent SDK integration (streaming, permissions)
-│   ├── ipc.ts             # IPC handlers
-│   ├── file-system.ts     # File ops + git integration
-│   ├── terminal.ts        # Shell process (node-pty)
-│   ├── updater.ts         # Auto-update logic
-│   ├── auth.ts            # Claude CLI auth + GitHub tokens
-│   ├── keystore.ts        # Encrypted API key storage
-│   ├── providers/         # AI provider drivers (Claude, OpenAI, Gemini, Copilot)
-│   └── codex/             # Code intelligence engine
-│       ├── db.ts          # SQLite index database
-│       ├── parser.ts      # Tree-sitter AST extraction
-│       ├── indexer.ts      # Full + incremental indexing with PageRank
-│       ├── query.ts       # 17 query functions (search, callers, deps, etc.)
-│       ├── watcher.ts     # Live file watcher for reindex
-│       └── mcp-server.ts  # MCP server with 14 code analysis tools
-├── preload/
-│   └── index.ts           # contextBridge (secure IPC bridge)
-├── renderer/              # React UI
-│   ├── App.tsx            # Layout
-│   ├── theme.ts           # 7 color themes
-│   ├── ThemeContext.tsx    # Theme provider + hook
-│   ├── components/
-│   │   ├── grid/          # Multi-agent workspace (resizable panes)
-│   │   ├── chat/          # Conversation panel + markdown rendering
-│   │   ├── scm/           # Source control sidebar + diff viewer
-│   │   ├── journey/       # Agent progress visualization
-│   │   ├── palette/       # Command palette + shortcuts
-│   │   ├── settings/      # Settings panel (providers, themes, updates)
-│   │   ├── activity/      # File activity sidebar
-│   │   ├── terminal/      # Terminal drawer (xterm.js)
-│   │   └── shared/        # Reusable components (diff display, dialogs)
-│   └── hooks/             # useAgent, useAgentManager, useAuth, useTheme, etc.
-└── shared/
-    └── types.ts           # IPC channel types shared across processes
+crates/
+├── fs-app/      # Binary entry point (main.rs)
+├── fs-tui/      # ratatui UI — app loop, grid, palette, overlays, theme
+├── fs-agent/    # Claude agent runner (streaming, permissions, tools)
+├── fs-pty/      # PTY management via alacritty_terminal + portable-pty
+└── fs-core/     # Shared types (AgentDescriptor, Config, KeyAction)
 ```
+
+Runtime dependencies: none. The binary links only against system libc on Linux. On macOS it is fully self-contained.
+
+## Logging
+
+Logs go to stderr. Set `RUST_LOG=info` (or `debug`) for verbose output:
+
+```sh
+RUST_LOG=info fluidstate 2>fluidstate.log
+```
+
+## License
+
+MIT

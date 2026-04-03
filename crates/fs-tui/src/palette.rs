@@ -3,6 +3,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
+use crate::theme::Theme;
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -14,12 +16,13 @@ struct PaletteEntry {
 }
 
 const COMMANDS: &[PaletteEntry] = &[
-    PaletteEntry { id: "new", label: "New Agent", shortcut: "Ctrl+N" },
-    PaletteEntry { id: "close", label: "Close Agent", shortcut: "Ctrl+W" },
-    PaletteEntry { id: "replace", label: "Replace Agent", shortcut: "Ctrl+R" },
-    PaletteEntry { id: "open", label: "Open File", shortcut: "Ctrl+O" },
-    PaletteEntry { id: "diff", label: "View Diff", shortcut: "Ctrl+D" },
-    PaletteEntry { id: "quit", label: "Quit", shortcut: "Ctrl+Q" },
+    PaletteEntry { id: "new",    label: "New Agent",      shortcut: "Ctrl+N" },
+    PaletteEntry { id: "close",  label: "Close Agent",    shortcut: "Ctrl+W" },
+    PaletteEntry { id: "replace",label: "Replace Agent",  shortcut: "Ctrl+R" },
+    PaletteEntry { id: "open",   label: "Open File",      shortcut: "Ctrl+O" },
+    PaletteEntry { id: "diff",   label: "View Diff",      shortcut: "Ctrl+D" },
+    PaletteEntry { id: "deps",   label: "Inspect Deps",   shortcut: "Ctrl+I" },
+    PaletteEntry { id: "quit",   label: "Quit",           shortcut: "Ctrl+Q" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -34,21 +37,13 @@ pub struct Palette {
 
 impl Palette {
     pub fn new() -> Self {
-        Self {
-            open: false,
-            input: String::new(),
-            selected: 0,
-        }
+        Self { open: false, input: String::new(), selected: 0 }
     }
 
-    pub fn is_open(&self) -> bool {
-        self.open
-    }
+    pub fn is_open(&self) -> bool { self.open }
 
     pub fn toggle(&mut self) {
-        if self.open {
-            self.close();
-        } else {
+        if self.open { self.close(); } else {
             self.open = true;
             self.input.clear();
             self.selected = 0;
@@ -72,9 +67,7 @@ impl Palette {
 
     pub fn move_selection(&mut self, delta: i32) {
         let filtered = self.filtered_commands();
-        if filtered.is_empty() {
-            return;
-        }
+        if filtered.is_empty() { return; }
         let new = self.selected as i32 + delta;
         self.selected = new.clamp(0, filtered.len() as i32 - 1) as usize;
     }
@@ -94,38 +87,33 @@ impl Palette {
             .collect()
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
-        // Center the palette: 40 cols wide, up to 10 rows tall
-        let w = 40u16.min(area.width.saturating_sub(4));
-        let h = 10u16.min(area.height.saturating_sub(4));
+    pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let w = 44u16.min(area.width.saturating_sub(4));
+        let h = 12u16.min(area.height.saturating_sub(4));
         let x = area.x + (area.width.saturating_sub(w)) / 2;
-        let y = area.y + (area.height.saturating_sub(h)) / 3; // slightly above center
+        let y = area.y + (area.height.saturating_sub(h)) / 3;
 
         let palette_area = Rect::new(x, y, w, h);
-
-        // Clear background
         frame.render_widget(Clear, palette_area);
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(theme.text))
             .title(Span::styled(
                 " Command Palette ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ));
 
         let inner = block.inner(palette_area);
         frame.render_widget(block, palette_area);
 
-        if inner.height < 2 {
-            return;
-        }
+        if inner.height < 2 { return; }
 
         // Input line
         let input_area = Rect::new(inner.x, inner.y, inner.width, 1);
         let prompt = format!("❯ {}", self.input);
         frame.render_widget(
-            Paragraph::new(prompt).style(Style::default().fg(Color::White)),
+            Paragraph::new(prompt).style(Style::default().fg(theme.text)),
             input_area,
         );
 
@@ -137,20 +125,20 @@ impl Palette {
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                let style = if i == self.selected {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                let is_sel = i == self.selected;
+                let label_style = if is_sel {
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD | Modifier::REVERSED)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(theme.text)
                 };
+                let shortcut_style = Style::default().fg(theme.text_muted);
                 let line = Line::from(vec![
+                    Span::styled(if is_sel { "▸ " } else { "  " }, label_style),
+                    Span::styled(entry.label, label_style),
                     Span::styled(
-                        if i == self.selected { "▸ " } else { "  " },
-                        style,
-                    ),
-                    Span::styled(entry.label, style),
-                    Span::styled(
-                        format!("  {}", entry.shortcut),
-                        Style::default().fg(Color::DarkGray),
+                        format!("{:>width$}", entry.shortcut,
+                            width = (inner.width as usize).saturating_sub(entry.label.len() + 4)),
+                        shortcut_style,
                     ),
                 ]);
                 ListItem::new(line)

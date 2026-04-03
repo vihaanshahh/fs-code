@@ -11,6 +11,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
+use crate::theme::Theme;
+
 // ---------------------------------------------------------------------------
 // Editor state
 // ---------------------------------------------------------------------------
@@ -219,31 +221,32 @@ impl Editor {
         }
     }
 
-    pub fn line_count(&self) -> usize {
-        self.lines.len()
+
+    pub fn goto_line(&mut self, line: usize) {
+        self.cursor.0 = line.min(self.lines.len().saturating_sub(1));
+        self.clamp_col();
+        self.ensure_visible();
     }
 
     // -----------------------------------------------------------------------
     // Rendering
     // -----------------------------------------------------------------------
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let filename = self.path.rsplit('/').next().unwrap_or(&self.path);
         let dirty_marker = if self.dirty { " ●" } else { "" };
         let title = format!(" {}{} — {}/{} ", filename, dirty_marker, self.cursor.0 + 1, self.lines.len());
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Magenta))
+            .border_style(Style::default().fg(theme.text))
             .title(Span::styled(
                 title,
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ))
             .title_bottom(Span::styled(
-                " Ctrl+S save │ ↑↓←→ navigate │ Esc close ",
-                Style::default().fg(Color::DarkGray),
+                " Ctrl+S save │ ↑↓←→ navigate │ Esc unfocus │ Ctrl+W/X close ",
+                Style::default().fg(theme.text_muted),
             ));
 
         let inner = block.inner(area);
@@ -268,9 +271,9 @@ impl Editor {
             // Gutter
             let gutter = format!("{:>width$} │ ", line_idx + 1, width = (gutter_w - 3) as usize);
             let gutter_style = if is_cursor_line {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(theme.amber)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(theme.text_muted)
             };
             frame.buffer_mut().set_string(inner.x, y, &gutter, gutter_style);
 
@@ -279,9 +282,9 @@ impl Editor {
             let display: String = line.chars().skip(0).take(content_w as usize).collect();
 
             let line_style = if is_cursor_line {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.text)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(theme.text_secondary)
             };
             frame.buffer_mut().set_string(inner.x + gutter_w, y, &display, line_style);
 
@@ -297,7 +300,7 @@ impl Editor {
                         cursor_x,
                         y,
                         &cursor_char.to_string(),
-                        Style::default().bg(Color::White).fg(Color::Black),
+                        Style::default().bg(theme.text).fg(theme.bg),
                     );
                 }
             }
