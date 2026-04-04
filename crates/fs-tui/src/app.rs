@@ -5,7 +5,7 @@ use std::io;
 use std::time::Duration;
 
 use alacritty_terminal::grid::Dimensions;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyboardEnhancementFlags, KeyModifiers, MouseEvent, MouseEventKind, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyboardEnhancementFlags, KeyModifiers, MouseEvent, MouseEventKind, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags, EnableBracketedPaste, DisableBracketedPaste};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::ExecutableCommand;
@@ -96,6 +96,7 @@ impl App {
         terminal::enable_raw_mode()?;
         io::stdout().execute(EnterAlternateScreen)?;
         io::stdout().execute(EnableMouseCapture)?;
+        io::stdout().execute(EnableBracketedPaste)?;
         let supports_enhancement = terminal::supports_keyboard_enhancement().unwrap_or(false);
         if supports_enhancement {
             io::stdout().execute(PushKeyboardEnhancementFlags(
@@ -111,6 +112,7 @@ impl App {
         if supports_enhancement {
             io::stdout().execute(PopKeyboardEnhancementFlags)?;
         }
+        io::stdout().execute(DisableBracketedPaste)?;
         io::stdout().execute(DisableMouseCapture)?;
         terminal::disable_raw_mode()?;
         io::stdout().execute(LeaveAlternateScreen)?;
@@ -156,8 +158,41 @@ impl App {
     fn handle_event(&mut self, ev: Event) -> anyhow::Result<()> {
         match ev {
             Event::Key(key) => self.handle_key(key)?,
+            Event::Paste(text) => self.handle_paste(&text)?,
             Event::Resize(cols, rows) => self.handle_resize(cols, rows)?,
             Event::Mouse(mouse) => self.handle_mouse(mouse)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_paste(&mut self, text: &str) -> anyhow::Result<()> {
+        match self.overlay {
+            Overlay::Editor => {
+                self.editor.insert_text(text);
+            }
+            Overlay::Palette => {
+                // Insert into palette search box (strip newlines)
+                for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
+                    self.palette.input(c);
+                }
+            }
+            Overlay::FilePicker => {
+                for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
+                    self.file_picker.input(c);
+                }
+            }
+            Overlay::None => {
+                // Forward the full paste to the focused terminal as a single write
+                if !self.agents.is_empty() {
+                    let agent = &self.agents[self.focused];
+                    if let Some(tid) = self.agent_terminals.get(&agent.id) {
+                        if let Some(inst) = self.terminal_mgr.get(tid) {
+                            inst.write(text.as_bytes())?;
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -444,38 +479,54 @@ impl App {
 
     fn handle_editor_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-        match (ctrl, key.code) {
+        match (ctrl, shift, key.code) {
             // Esc: unfocus editor, return focus to agents (panel stays open)
-            (_, KeyCode::Esc) => {
+            (_, _, KeyCode::Esc) => {
                 self.overlay = Overlay::None;
             }
             // Ctrl+W / Ctrl+X: close the editor panel entirely
-            // (Ctrl+X is the fallback since some terminals intercept Ctrl+W)
-            (true, KeyCode::Char('w')) | (true, KeyCode::Char('W'))
-            | (true, KeyCode::Char('x')) | (true, KeyCode::Char('X')) => {
+            (true, _, KeyCode::Char('w')) | (true, _, KeyCode::Char('W'))
+            | (true, _, KeyCode::Char('x')) | (true, _, KeyCode::Char('X')) => {
                 self.editor.close();
                 self.overlay = Overlay::None;
             }
-            (true, KeyCode::Char('s')) => {
+            (true, _, KeyCode::Char('s')) => {
                 match self.editor.save() {
                     Ok(()) => self.set_status("Saved"),
                     Err(e) => self.set_status(format!("Save failed: {}", e)),
                 }
             }
-            (false, KeyCode::Up) => self.editor.move_up(),
-            (false, KeyCode::Down) => self.editor.move_down(),
-            (false, KeyCode::Left) => self.editor.move_left(),
-            (false, KeyCode::Right) => self.editor.move_right(),
-            (false, KeyCode::Home) => self.editor.move_home(),
-            (false, KeyCode::End) => self.editor.move_end(),
-            (false, KeyCode::PageUp) => self.editor.page_up(),
-            (false, KeyCode::PageDown) => self.editor.page_down(),
-            (false, KeyCode::Enter) => self.editor.insert_newline(),
-            (false, KeyCode::Backspace) => self.editor.backspace(),
-            (false, KeyCode::Delete) => self.editor.delete_char(),
-            (false, KeyCode::Tab) => self.editor.insert_char('\t'),
-            (false, KeyCode::Char(c)) => self.editor.insert_char(c),
+            // Ctrl+D: delete line / Ctrl+Shift+D: duplicate line
+            (true, true, KeyCode::Char('d')) | (true, true, KeyCode::Char('D')) => {
+                self.editor.duplicate_line();
+            }
+            (true, false, KeyCode::Char('d')) => {
+                self.editor.delete_line();
+            }
+            // Fast navigation — Ctrl+Arrow jumps by word / 5 lines
+            (true, _, KeyCode::Up) => self.editor.jump_up(),
+            (true, _, KeyCode::Down) => self.editor.jump_down(),
+            (true, _, KeyCode::Left) => self.editor.word_left(),
+            (true, _, KeyCode::Right) => self.editor.word_right(),
+            // Ctrl+Home/End: top/bottom of file
+            (true, _, KeyCode::Home) => self.editor.goto_top(),
+            (true, _, KeyCode::End) => self.editor.goto_bottom(),
+            // Normal movement
+            (false, _, KeyCode::Up) => self.editor.move_up(),
+            (false, _, KeyCode::Down) => self.editor.move_down(),
+            (false, _, KeyCode::Left) => self.editor.move_left(),
+            (false, _, KeyCode::Right) => self.editor.move_right(),
+            (false, _, KeyCode::Home) => self.editor.move_home(),
+            (false, _, KeyCode::End) => self.editor.move_end(),
+            (false, _, KeyCode::PageUp) => self.editor.page_up(),
+            (false, _, KeyCode::PageDown) => self.editor.page_down(),
+            (false, _, KeyCode::Enter) => self.editor.insert_newline(),
+            (false, _, KeyCode::Backspace) => self.editor.backspace(),
+            (false, _, KeyCode::Delete) => self.editor.delete_char(),
+            (false, _, KeyCode::Tab) => self.editor.insert_char('\t'),
+            (false, _, KeyCode::Char(c)) => self.editor.insert_char(c),
             _ => {}
         }
         Ok(())
@@ -950,7 +1001,7 @@ impl App {
 
         // Render editor side panel (always visible when a file is open)
         if let Some(ea) = editor_panel_area {
-            self.editor.render(frame, ea, &self.theme);
+            self.editor.render(frame, ea, self.overlay == Overlay::Editor, &self.theme);
         }
 
         let hint = match self.overlay {

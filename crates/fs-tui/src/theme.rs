@@ -65,14 +65,14 @@ pub fn theme(_mode: ThemeMode) -> Theme {
         // transparent — use whatever the terminal background is
         bg:             Color::Reset,
         bg_surface:     Color::Reset,
-        // black text hierarchy
-        text:           Color::Black,
-        text_secondary: Color::Black,
+        // use terminal default foreground so it works on both light and dark backgrounds
+        text:           Color::Reset,
+        text_secondary: Color::Reset,
         text_muted:     Color::DarkGray,
         // borders
         border:         Color::DarkGray,
-        // accent for focus highlights (inverted: white-on-black)
-        accent:         Color::Black,
+        // accent for focus highlights
+        accent:         Color::Reset,
         // semantic colors — standard terminal palette
         green:          Color::Green,
         red:            Color::Red,

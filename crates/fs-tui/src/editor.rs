@@ -9,8 +9,9 @@
 //!   - Scrolling with viewport tracking
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Block, BorderType, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
+use crate::highlight::{self, Lang};
 use crate::theme::Theme;
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,8 @@ pub struct Editor {
     open: bool,
     /// Viewport dimensions (set on render)
     viewport_height: usize,
+    /// Detected language for syntax highlighting
+    lang: Lang,
 }
 
 impl Editor {
@@ -44,6 +47,7 @@ impl Editor {
             dirty: false,
             open: false,
             viewport_height: 20,
+            lang: Lang::Generic,
         }
     }
 
@@ -55,6 +59,7 @@ impl Editor {
     pub fn open_file(&mut self, path: &str) -> Result<(), String> {
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         self.path = path.to_string();
+        self.lang = Lang::from_path(path);
         self.lines = content.lines().map(|l| l.to_string()).collect();
         if self.lines.is_empty() {
             self.lines.push(String::new());
@@ -141,6 +146,84 @@ impl Editor {
         self.ensure_visible();
     }
 
+    /// Jump 5 lines up (Ctrl+Up) — fast vertical movement.
+    pub fn jump_up(&mut self) {
+        self.cursor.0 = self.cursor.0.saturating_sub(5);
+        self.clamp_col();
+        self.ensure_visible();
+    }
+
+    /// Jump 5 lines down (Ctrl+Down) — fast vertical movement.
+    pub fn jump_down(&mut self) {
+        self.cursor.0 = (self.cursor.0 + 5).min(self.lines.len().saturating_sub(1));
+        self.clamp_col();
+        self.ensure_visible();
+    }
+
+    /// Jump one word left (Ctrl+Left).
+    pub fn word_left(&mut self) {
+        let line = &self.lines[self.cursor.0];
+        let bytes = line.as_bytes();
+        if self.cursor.1 == 0 {
+            // Wrap to end of previous line
+            if self.cursor.0 > 0 {
+                self.cursor.0 -= 1;
+                self.cursor.1 = self.current_line_len();
+                self.ensure_visible();
+            }
+            return;
+        }
+        let mut col = self.cursor.1.min(line.len());
+        // Skip whitespace/punctuation backwards
+        while col > 0 && !bytes[col - 1].is_ascii_alphanumeric() && bytes[col - 1] != b'_' {
+            col -= 1;
+        }
+        // Skip word chars backwards
+        while col > 0 && (bytes[col - 1].is_ascii_alphanumeric() || bytes[col - 1] == b'_') {
+            col -= 1;
+        }
+        self.cursor.1 = col;
+    }
+
+    /// Jump one word right (Ctrl+Right).
+    pub fn word_right(&mut self) {
+        let line = &self.lines[self.cursor.0];
+        let len = line.len();
+        let bytes = line.as_bytes();
+        if self.cursor.1 >= len {
+            // Wrap to start of next line
+            if self.cursor.0 < self.lines.len() - 1 {
+                self.cursor.0 += 1;
+                self.cursor.1 = 0;
+                self.ensure_visible();
+            }
+            return;
+        }
+        let mut col = self.cursor.1;
+        // Skip current word chars
+        while col < len && (bytes[col].is_ascii_alphanumeric() || bytes[col] == b'_') {
+            col += 1;
+        }
+        // Skip whitespace/punctuation
+        while col < len && !bytes[col].is_ascii_alphanumeric() && bytes[col] != b'_' {
+            col += 1;
+        }
+        self.cursor.1 = col;
+    }
+
+    /// Jump to first line (Ctrl+Home).
+    pub fn goto_top(&mut self) {
+        self.cursor = (0, 0);
+        self.scroll = 0;
+    }
+
+    /// Jump to last line (Ctrl+End).
+    pub fn goto_bottom(&mut self) {
+        self.cursor.0 = self.lines.len().saturating_sub(1);
+        self.cursor.1 = 0;
+        self.ensure_visible();
+    }
+
     // -----------------------------------------------------------------------
     // Editing
     // -----------------------------------------------------------------------
@@ -152,14 +235,59 @@ impl Editor {
         self.dirty = true;
     }
 
+    /// Insert a multi-character string (e.g. from a paste operation).
+    pub fn insert_text(&mut self, text: &str) {
+        for c in text.chars() {
+            if c == '\n' || c == '\r' {
+                self.insert_newline();
+            } else {
+                self.insert_char(c);
+            }
+        }
+    }
+
     pub fn insert_newline(&mut self) {
         let line = self.cursor.0;
         let col = self.cursor.1.min(self.lines[line].len());
+        // Capture leading whitespace from current line for auto-indent.
+        let indent: String = self.lines[line]
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
         let rest = self.lines[line][col..].to_string();
         self.lines[line].truncate(col);
-        self.lines.insert(line + 1, rest);
+        let new_line = format!("{}{}", indent, rest);
+        let indent_len = indent.len();
+        self.lines.insert(line + 1, new_line);
         self.cursor.0 += 1;
-        self.cursor.1 = 0;
+        self.cursor.1 = indent_len;
+        self.dirty = true;
+        self.ensure_visible();
+    }
+
+    /// Delete the entire current line (Ctrl+D).
+    pub fn delete_line(&mut self) {
+        if self.lines.len() > 1 {
+            self.lines.remove(self.cursor.0);
+            if self.cursor.0 >= self.lines.len() {
+                self.cursor.0 = self.lines.len() - 1;
+            }
+            self.clamp_col();
+            self.dirty = true;
+            self.ensure_visible();
+        } else {
+            // Last line — just clear it
+            self.lines[0].clear();
+            self.cursor.1 = 0;
+            self.dirty = true;
+        }
+    }
+
+    /// Duplicate the current line below (Ctrl+Shift+D).
+    pub fn duplicate_line(&mut self) {
+        let dup = self.lines[self.cursor.0].clone();
+        self.lines.insert(self.cursor.0 + 1, dup);
+        self.cursor.0 += 1;
         self.dirty = true;
         self.ensure_visible();
     }
@@ -232,22 +360,40 @@ impl Editor {
     // Rendering
     // -----------------------------------------------------------------------
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, is_focused: bool, theme: &Theme) {
         let filename = self.path.rsplit('/').next().unwrap_or(&self.path);
         let dirty_marker = if self.dirty { " ●" } else { "" };
         let title = format!(" {}{} — {}/{} ", filename, dirty_marker, self.cursor.0 + 1, self.lines.len());
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.text))
-            .title(Span::styled(
-                title,
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            ))
-            .title_bottom(Span::styled(
-                " Ctrl+S save │ ↑↓←→ navigate │ Esc unfocus │ Ctrl+W/X close ",
-                Style::default().fg(theme.text_muted),
-            ));
+        let block = if is_focused {
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Thick)
+                .border_style(Style::default().fg(theme.text))
+                .title(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(theme.text)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .title_bottom(Span::styled(
+                    " Ctrl+S save │ C-↑↓ jump │ C-←→ word │ C-D del line │ Esc unfocus ",
+                    Style::default().fg(theme.text_muted),
+                ))
+        } else {
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border))
+                .title(Span::styled(
+                    title,
+                    Style::default().fg(theme.text_muted).add_modifier(Modifier::BOLD),
+                ))
+                .title_bottom(Span::styled(
+                    " Ctrl+F / Tab focus editor ",
+                    Style::default().fg(theme.text_muted),
+                ))
+        };
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -258,11 +404,14 @@ impl Editor {
 
         self.viewport_height = inner.height as usize;
         let gutter_w = format!("{}", self.lines.len()).len() as u16 + 3; // " 123 │ "
-        let content_w = inner.width.saturating_sub(gutter_w);
+        let content_w = inner.width.saturating_sub(gutter_w) as usize;
 
         let visible = inner.height as usize;
         let start = self.scroll;
         let end = (start + visible).min(self.lines.len());
+
+        // Compute syntax highlight spans for visible lines.
+        let hl_spans = highlight::highlight_range(&self.lines, start, end, self.lang);
 
         for (i, line_idx) in (start..end).enumerate() {
             let y = inner.y + i as u16;
@@ -277,30 +426,65 @@ impl Editor {
             };
             frame.buffer_mut().set_string(inner.x, y, &gutter, gutter_style);
 
-            // Line content
+            // Line content — render with syntax highlighting.
             let line = &self.lines[line_idx];
-            let display: String = line.chars().skip(0).take(content_w as usize).collect();
+            let base_fg = theme.text;
+            let content_x = inner.x + gutter_w;
 
-            let line_style = if is_cursor_line {
-                Style::default().fg(theme.text)
-            } else {
-                Style::default().fg(theme.text_secondary)
+            // Build a per-char colour array for the visible portion of the line.
+            let chars: Vec<char> = line.chars().take(content_w).collect();
+            let n = chars.len();
+
+            // Default colour for every char position.
+            let mut colours: Vec<Color> = vec![base_fg; n];
+
+            // Apply highlight spans (byte-indexed → char-indexed).
+            // We need byte→char offset mapping because spans use byte offsets.
+            let byte_to_char: Vec<usize> = {
+                let mut map = vec![0usize; line.len() + 1];
+                let mut ci = 0usize;
+                for (bi, _) in line.char_indices() {
+                    map[bi] = ci;
+                    ci += 1;
+                }
+                map[line.len()] = ci;
+                map
             };
-            frame.buffer_mut().set_string(inner.x + gutter_w, y, &display, line_style);
 
-            // Cursor
+            if let Some(spans) = hl_spans.get(i) {
+                for sp in spans {
+                    let cs = byte_to_char.get(sp.start).copied().unwrap_or(0);
+                    let ce = byte_to_char.get(sp.end).copied().unwrap_or(n).min(n);
+                    for ci in cs..ce {
+                        colours[ci] = sp.color;
+                    }
+                }
+            }
+
+            // Render character by character.
+            for (ci, &ch) in chars.iter().enumerate() {
+                let sx = content_x + ci as u16;
+                if sx >= inner.x + inner.width { break; }
+                let style = Style::default().fg(colours[ci]);
+                frame.buffer_mut().set_string(sx, y, &ch.to_string(), style);
+            }
+            // Pad remainder with spaces (clear any leftover content).
+            for cx in n..content_w {
+                let sx = content_x + cx as u16;
+                if sx >= inner.x + inner.width { break; }
+                frame.buffer_mut().set_string(sx, y, " ", Style::default());
+            }
+
+            // Cursor — draw on top.
             if is_cursor_line {
-                let cursor_x = inner.x + gutter_w + self.cursor.1 as u16;
+                let cursor_x = content_x + self.cursor.1 as u16;
                 if cursor_x < inner.x + inner.width {
-                    let cursor_char = line
-                        .chars()
-                        .nth(self.cursor.1)
-                        .unwrap_or(' ');
+                    let cursor_char = line.chars().nth(self.cursor.1).unwrap_or(' ');
                     frame.buffer_mut().set_string(
                         cursor_x,
                         y,
                         &cursor_char.to_string(),
-                        Style::default().bg(theme.text).fg(theme.bg),
+                        Style::default().bg(theme.text).fg(Color::White),
                     );
                 }
             }

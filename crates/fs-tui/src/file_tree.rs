@@ -297,7 +297,7 @@ impl FileTree {
                 let label = format!("{}{}{}{}", indent, icon, name_display, status_badge);
 
                 let (fg, bg) = if is_sel {
-                    (theme.bg, theme.accent)
+                    (Color::White, theme.accent)
                 } else {
                     let fg = match node.git_status {
                         'M' => theme.amber,
