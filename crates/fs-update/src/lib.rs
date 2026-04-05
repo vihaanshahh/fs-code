@@ -1,9 +1,7 @@
 //! Self-update system for FluidState.
 //!
-//! Checks GitHub Releases for new versions, downloads platform-specific
-//! binaries, verifies SHA-256 checksums, and replaces the running binary.
-//!
-//! Binary naming convention in GitHub releases:
+//! Downloads updates from fluidstate.ai which proxies the private GitHub
+//! releases. Binary naming convention:
 //!   fluidstate-{os}-{arch}        (unix)
 //!   fluidstate-{os}-{arch}.exe    (windows)
 //!
@@ -23,26 +21,17 @@ use tracing::{debug, warn};
 /// Current version, injected at compile time from Cargo.toml.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// GitHub owner/repo — change this when the repo is public.
-const GITHUB_REPO: &str = "vihaanshahh/fs-code";
+/// Base URL for update API.
+const SITE: &str = "https://fluidstate.ai";
 
-/// User-Agent for GitHub API requests.
+/// User-Agent for requests.
 const USER_AGENT: &str = concat!("fluidstate-updater/", env!("CARGO_PKG_VERSION"));
 
-// ── GitHub API types ──────────────────────────────────────────────
+// ── API types ────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct GhRelease {
+struct LatestRelease {
     tag_name: String,
-    assets: Vec<GhAsset>,
-    prerelease: bool,
-    draft: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhAsset {
-    name: String,
-    browser_download_url: String,
 }
 
 // ── Platform helpers ──────────────────────────────────────────────
@@ -97,9 +86,9 @@ pub struct VersionCheck {
     pub update_available: bool,
 }
 
-/// Check GitHub Releases for the latest version.
+/// Check for the latest version via fluidstate.ai.
 pub async fn check_for_update() -> Result<VersionCheck> {
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    let url = format!("{SITE}/api/releases/latest");
     debug!("checking for updates: {url}");
 
     let client = reqwest::Client::builder()
@@ -109,8 +98,7 @@ pub async fn check_for_update() -> Result<VersionCheck> {
 
     let resp = client.get(&url).send().await?;
 
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        // No releases yet
+    if !resp.status().is_success() {
         return Ok(VersionCheck {
             current: VERSION.to_string(),
             latest: VERSION.to_string(),
@@ -118,16 +106,7 @@ pub async fn check_for_update() -> Result<VersionCheck> {
         });
     }
 
-    let release: GhRelease = resp.error_for_status()?.json().await?;
-
-    if release.draft || release.prerelease {
-        return Ok(VersionCheck {
-            current: VERSION.to_string(),
-            latest: VERSION.to_string(),
-            update_available: false,
-        });
-    }
-
+    let release: LatestRelease = resp.json().await?;
     let latest = normalize_tag(&release.tag_name).to_string();
     let update_available = is_newer(VERSION, &latest);
 
@@ -203,30 +182,27 @@ pub async fn check_background() -> Option<String> {
 
 /// Download and install the latest release, replacing the current binary.
 ///
-/// 1. Fetch release metadata from GitHub
-/// 2. Find the platform-specific binary asset
-/// 3. Find & parse the checksums.sha256 asset
-/// 4. Download binary to a temp file
-/// 5. Verify SHA-256 checksum
-/// 6. Atomic-swap into the current binary's location
+/// 1. Fetch latest version tag from fluidstate.ai
+/// 2. Download platform-specific binary
+/// 3. Download & verify SHA-256 checksum
+/// 4. Atomic-swap into the current binary's location
 pub async fn perform_update() -> Result<String> {
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
     println!("Checking for updates...");
-    let release: GhRelease = client
-        .get(&url)
+    let release: LatestRelease = client
+        .get(format!("{SITE}/api/releases/latest"))
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
 
-    let latest = normalize_tag(&release.tag_name).to_string();
+    let tag = &release.tag_name;
+    let latest = normalize_tag(tag).to_string();
     if !is_newer(VERSION, &latest) {
         println!("Already up to date ({VERSION}).");
         return Ok(VERSION.to_string());
@@ -235,34 +211,23 @@ pub async fn perform_update() -> Result<String> {
     let wanted = asset_name()?;
     debug!("looking for asset: {wanted}");
 
-    let binary_asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == wanted)
-        .with_context(|| format!("no binary for this platform ({wanted}) in release {}", release.tag_name))?;
-
     // Parse checksum file if present
-    let expected_checksum = if let Some(checksums_asset) = release
-        .assets
-        .iter()
-        .find(|a| a.name == "checksums.sha256")
-    {
-        let body = client
-            .get(&checksums_asset.browser_download_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
-        parse_checksum(&body, &wanted)
-    } else {
-        warn!("no checksums.sha256 in release — skipping verification");
-        None
+    let checksums_url = format!("{SITE}/api/releases/download/{tag}/checksums.sha256");
+    let expected_checksum = match client.get(&checksums_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let body = resp.text().await?;
+            parse_checksum(&body, &wanted)
+        }
+        _ => {
+            warn!("no checksums.sha256 in release — skipping verification");
+            None
+        }
     };
 
+    let binary_url = format!("{SITE}/api/releases/download/{tag}/{wanted}");
     println!("Downloading {wanted} (v{latest})...");
     let bytes = client
-        .get(&binary_asset.browser_download_url)
+        .get(&binary_url)
         .send()
         .await?
         .error_for_status()?
