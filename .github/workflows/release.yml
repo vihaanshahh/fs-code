@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset_os: darwin
+            asset_arch: aarch64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_os: darwin
+            asset_arch: x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_os: linux
+            asset_arch: x86_64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifacts
+        run: |
+          BIN=target/${{ matrix.target }}/release/fluidstate
+
+          # Bare binary for self-updater: fluidstate-{os}-{arch}
+          cp "$BIN" "fluidstate-${{ matrix.asset_os }}-${{ matrix.asset_arch }}"
+
+          # Tar.gz for install script: fluidstate-{target}.tar.gz
+          cp "$BIN" fluidstate
+          tar czf "fluidstate-${{ matrix.target }}.tar.gz" fluidstate
+          rm fluidstate
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            fluidstate-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+            fluidstate-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: |
+          sha256sum fluidstate-darwin-* fluidstate-linux-* > checksums.sha256
+          cat checksums.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/fluidstate-*
+            artifacts/checksums.sha256

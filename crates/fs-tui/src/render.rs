@@ -29,7 +29,7 @@ pub fn render_welcome(frame: &mut Frame, area: Rect, theme: &Theme) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "Ctrl+N  new agent    Ctrl+W  close agent    Ctrl+Q  quit",
+            "Ctrl+N  new agent    Ctrl+T  new in folder    Ctrl+Q  quit",
             Style::default().fg(theme.text),
         )),
         Line::from(Span::styled(
@@ -63,12 +63,20 @@ pub fn render_pane(
 ) {
     if area.height < 2 || area.width < 4 { return; }
 
+    let provider_tag = match agent.provider {
+        fs_core::Provider::Claude => "",
+        fs_core::Provider::Codex => " [Codex]",
+    };
+    let folder = std::path::Path::new(&agent.cwd)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| agent.cwd.clone());
     let title = if scroll_offset > 0 {
-        format!(" ● {} [↑{} lines — Shift+↓ to live] ", agent.name, scroll_offset)
+        format!(" ● {}{} — {} [↑{} lines — Shift+↓ to live] ", agent.name, provider_tag, folder, scroll_offset)
     } else if is_focused {
-        format!(" ● {} ", agent.name)
+        format!(" ● {}{} — {} ", agent.name, provider_tag, folder)
     } else {
-        format!("   {} ", agent.name)
+        format!("   {}{} — {} ", agent.name, provider_tag, folder)
     };
 
     let block = if is_focused {
@@ -192,6 +200,49 @@ fn map_color(color: AnsiColor, default: Color) -> Color {
 }
 
 // ---------------------------------------------------------------------------
+// Menu bar — persistent top row with all commands
+// ---------------------------------------------------------------------------
+
+pub fn render_menu_bar(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let items: &[(&str, &str)] = &[
+        ("^N", "New"),
+        ("^⇧N", "New…"),
+        ("^W", "Close"),
+        ("^O", "Open"),
+        ("^F", "Focus Ed"),
+        ("^D", "Diff"),
+        ("^E", "Tree"),
+        ("^I", "Deps"),
+        ("^K", "Palette"),
+        ("^S", "Save"),
+        ("^G", "AI Edit"),
+        ("^Q", "Quit"),
+    ];
+
+    let mut spans = Vec::new();
+    for (key, label) in items {
+        spans.push(Span::styled(
+            format!(" {} ", key),
+            Style::default().fg(Color::Black).bg(theme.text_muted),
+        ));
+        spans.push(Span::styled(
+            format!("{} ", label),
+            Style::default().fg(theme.text),
+        ));
+    }
+
+    // Pad remainder
+    let used: usize = spans.iter().map(|s| s.content.len()).sum();
+    let remaining = (area.width as usize).saturating_sub(used);
+    spans.push(Span::styled(" ".repeat(remaining), Style::default()));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Reset)),
+        area,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Status bar
 // ---------------------------------------------------------------------------
 
@@ -219,14 +270,18 @@ pub fn render_status_bar(
         ));
     } else {
         for (i, agent) in agents.iter().enumerate() {
+            let ptag = match agent.provider {
+                fs_core::Provider::Codex => " ᶜˣ",
+                _ => "",
+            };
             if i == focused {
                 spans.push(Span::styled(
-                    format!(" ● {} ", agent.name),
+                    format!(" ● {}{} ", agent.name, ptag),
                     Style::default().fg(Color::White).bg(Color::Black).add_modifier(Modifier::BOLD),
                 ));
             } else {
                 spans.push(Span::styled(
-                    format!("  {} ", agent.name),
+                    format!("  {}{} ", agent.name, ptag),
                     Style::default().fg(theme.text_muted),
                 ));
             }

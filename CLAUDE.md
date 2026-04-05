@@ -115,7 +115,7 @@ node_modules/ (1 files, 0 symbols) → imports from: (none — leaf dependency)
 - ... and 15 more files
 
 ## Codex MCP Tools — USE THESE
-
+test
 This project has a live code index via MCP. **Always prefer these over grep/ripgrep for structural queries.** They are faster, rank-aware, and understand code relationships.
 
 ### When to use which tool

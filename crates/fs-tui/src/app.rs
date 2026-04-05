@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use alacritty_terminal::grid::Dimensions;
@@ -12,7 +13,7 @@ use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 
 use fs_agent;
-use fs_core::{uid, AgentDescriptor, AgentId, Config, KeyAction};
+use fs_core::{uid, AgentDescriptor, AgentId, Config, KeyAction, Provider};
 use fs_pty::TerminalManager;
 
 use crate::deps::DepsViewer;
@@ -26,6 +27,19 @@ use crate::render;
 use crate::theme::{self, Theme, ThemeMode};
 
 // ---------------------------------------------------------------------------
+// AI edit result — sent from background thread back to main loop
+// ---------------------------------------------------------------------------
+
+struct AiEditResult {
+    success: bool,
+    message: String,
+    /// File path that was edited
+    file_path: String,
+    /// Original file content before AI edit (for diff)
+    original_content: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Active overlay — only one overlay can be open at a time
 // ---------------------------------------------------------------------------
 
@@ -34,9 +48,152 @@ enum Overlay {
     None,
     Palette,
     FilePicker,
+    FolderInput,
     Editor,
     Diff,
     Deps,
+}
+
+// ---------------------------------------------------------------------------
+// Folder input — simple path text field for picking a directory
+// ---------------------------------------------------------------------------
+
+struct FolderInput {
+    input: String,
+    error: Option<String>,
+}
+
+impl FolderInput {
+    fn new() -> Self {
+        Self { input: String::new(), error: None }
+    }
+
+    fn open(&mut self, initial: &str) {
+        self.input = initial.to_string();
+        self.error = None;
+    }
+
+    fn close(&mut self) {
+        self.input.clear();
+        self.error = None;
+    }
+
+    fn input_char(&mut self, c: char) {
+        self.input.push(c);
+        self.error = None;
+    }
+
+    fn backspace(&mut self) {
+        self.input.pop();
+        self.error = None;
+    }
+
+    /// Tab-complete: find the longest common prefix among matching directory entries.
+    fn tab_complete(&mut self) {
+        let path = std::path::Path::new(&self.input);
+        let (dir, prefix) = if self.input.ends_with('/') || self.input.ends_with(std::path::MAIN_SEPARATOR) {
+            (std::path::Path::new(&self.input), "")
+        } else {
+            let parent = path.parent().unwrap_or(std::path::Path::new("/"));
+            let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            (parent, file)
+        };
+
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let matches: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with(prefix) { Some(name) } else { None }
+            })
+            .collect();
+
+        if matches.is_empty() { return; }
+
+        if matches.len() == 1 {
+            let completed = dir.join(&matches[0]).to_string_lossy().to_string();
+            self.input = if completed.ends_with('/') { completed } else { format!("{}/", completed) };
+        } else {
+            // Find longest common prefix
+            let first = &matches[0];
+            let common_len = first.len().min(
+                matches.iter().skip(1).map(|m| {
+                    first.chars().zip(m.chars()).take_while(|(a, b)| a == b).count()
+                }).min().unwrap_or(first.len())
+            );
+            let common = &first[..common_len];
+            self.input = dir.join(common).to_string_lossy().to_string();
+        }
+    }
+
+    /// Validate and return the path if it's a valid directory.
+    fn confirm(&mut self) -> Option<String> {
+        let expanded = if self.input.starts_with('~') {
+            if let Ok(home) = std::env::var("HOME") {
+                self.input.replacen('~', &home, 1)
+            } else {
+                self.input.clone()
+            }
+        } else {
+            self.input.clone()
+        };
+
+        let path = std::path::Path::new(&expanded);
+        if path.is_dir() {
+            Some(expanded)
+        } else {
+            self.error = Some("Not a valid directory".into());
+            None
+        }
+    }
+
+    fn render(&self, frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+        let w = 60u16.min(area.width.saturating_sub(4));
+        let h = 5u16;
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 3;
+
+        let dialog_area = Rect::new(x, y, w, h);
+        frame.render_widget(Clear, dialog_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.text))
+            .title(Span::styled(
+                " New Agent — Enter folder path ",
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ));
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        if inner.height < 2 { return; }
+
+        // Input line
+        let prompt = format!("❯ {}", self.input);
+        frame.render_widget(
+            Paragraph::new(prompt).style(Style::default().fg(theme.text)),
+            Rect::new(inner.x, inner.y, inner.width, 1),
+        );
+
+        // Error or hint
+        let hint_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+        if let Some(ref err) = self.error {
+            frame.render_widget(
+                Paragraph::new(err.as_str()).style(Style::default().fg(theme.red)),
+                hint_area,
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new("Tab to complete · Enter to confirm · Esc to cancel")
+                    .style(Style::default().fg(theme.text_muted)),
+                hint_area,
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +211,7 @@ pub struct App {
     config: Config,
     palette: Palette,
     file_picker: FilePicker,
+    folder_input: FolderInput,
     file_tree: FileTree,
     editor: Editor,
     diff_viewer: DiffViewer,
@@ -65,10 +223,23 @@ pub struct App {
     status_msg: Option<(String, std::time::Instant)>,
     should_quit: bool,
     theme: Theme,
+    /// Editor/agent split percentage (editor gets this %, agents get the rest)
+    editor_split_pct: u16,
+    /// Whether we are currently dragging the editor border
+    dragging_editor_border: bool,
+    /// Cached content area x-range for drag hit-testing
+    content_area_x: u16,
+    content_area_width: u16,
+    /// Whether the menu bar is visible
+    menu_bar_open: bool,
+    /// Channel for receiving AI edit completion signals
+    ai_rx: mpsc::Receiver<AiEditResult>,
+    ai_tx: mpsc::Sender<AiEditResult>,
 }
 
 impl App {
     pub fn new() -> Self {
+        let (ai_tx, ai_rx) = mpsc::channel();
         Self {
             agents: Vec::new(),
             terminal_mgr: TerminalManager::new(),
@@ -78,6 +249,7 @@ impl App {
             config: Config::default(),
             palette: Palette::new(),
             file_picker: FilePicker::new(),
+            folder_input: FolderInput::new(),
             file_tree: FileTree::new(),
             editor: Editor::new(),
             diff_viewer: DiffViewer::new(),
@@ -88,6 +260,13 @@ impl App {
             status_msg: None,
             should_quit: false,
             theme: theme::theme(ThemeMode::default()),
+            editor_split_pct: 45,
+            dragging_editor_border: false,
+            content_area_x: 0,
+            content_area_width: 0,
+            menu_bar_open: true,
+            ai_rx,
+            ai_tx,
         }
     }
 
@@ -139,6 +318,47 @@ impl App {
                 }
             }
 
+            // Expire AI status after 5 seconds (only non-working status)
+            if !self.editor.ai_working {
+                if let Some(ref s) = self.editor.ai_status {
+                    if !s.contains("working") {
+                        // We'll clear it on next tick via status_msg instead
+                    }
+                }
+            }
+
+            // Poll for completed AI edits
+            if let Ok(result) = self.ai_rx.try_recv() {
+                self.editor.ai_working = false;
+                if result.success {
+                    // Read new content before reloading (for diff)
+                    let new_content = std::fs::read_to_string(&result.file_path).ok();
+
+                    match self.editor.reload() {
+                        Ok(()) => {
+                            self.editor.ai_status = Some(result.message.clone());
+                            self.set_status(result.message);
+                        }
+                        Err(e) => {
+                            self.editor.ai_status = Some(format!("Reload failed: {}", e));
+                            self.set_status(format!("AI edit done but reload failed: {}", e));
+                        }
+                    }
+
+                    // Auto-open diff viewer showing what AI changed
+                    if let (Some(old), Some(new)) = (result.original_content, new_content) {
+                        let diff_text = crate::diff::unified_diff(&result.file_path, &old, &new);
+                        if !diff_text.is_empty() {
+                            self.diff_viewer.open_with(&diff_text);
+                            self.overlay = Overlay::Diff;
+                        }
+                    }
+                } else {
+                    self.editor.ai_status = Some(result.message.clone());
+                    self.set_status(result.message);
+                }
+            }
+
             if event::poll(Duration::from_millis(16))? {
                 let ev = event::read()?;
                 self.handle_event(ev)?;
@@ -169,7 +389,14 @@ impl App {
     fn handle_paste(&mut self, text: &str) -> anyhow::Result<()> {
         match self.overlay {
             Overlay::Editor => {
-                self.editor.insert_text(text);
+                if self.editor.prompt_open {
+                    // Paste into AI prompt (strip newlines)
+                    for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
+                        self.editor.prompt_char(c);
+                    }
+                } else {
+                    self.editor.insert_text(text);
+                }
             }
             Overlay::Palette => {
                 // Insert into palette search box (strip newlines)
@@ -180,6 +407,13 @@ impl App {
             Overlay::FilePicker => {
                 for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
                     self.file_picker.input(c);
+                }
+            }
+            Overlay::FolderInput => {
+                // Paste into folder input (strip newlines, trim whitespace)
+                let cleaned = text.trim().replace('\n', "").replace('\r', "");
+                for c in cleaned.chars() {
+                    self.folder_input.input_char(c);
                 }
             }
             Overlay::None => {
@@ -208,8 +442,13 @@ impl App {
                     } else {
                         self.diff_viewer.scroll_down(delta as usize);
                     }
+                } else if self.editor.is_open() && self.is_mouse_over_editor(mouse.column, mouse.row) {
+                    // Scroll the file editor
+                    self.editor.scroll_by(delta);
+                } else if self.overlay == Overlay::Editor {
+                    // Editor is focused — scroll it regardless of position
+                    self.editor.scroll_by(delta);
                 } else if self.overlay == Overlay::None && !self.agents.is_empty() {
-                    // Focus whichever pane the cursor is over, then scroll it
                     let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
                     let main_area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
                     let pane_areas = grid::compute_grid(main_area, self.agents.len());
@@ -218,10 +457,35 @@ impl App {
                             && mouse.row >= a.y && mouse.row < a.y + a.height
                     });
                     if let Some(idx) = hovered {
+                        let old_cwd = self.current_cwd();
                         self.focused = idx;
+                        self.refresh_sidebar_if_cwd_changed(&old_cwd);
                     }
                     self.scroll_focused(delta);
                 }
+            }
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                // Check if clicking on the editor/agent border for drag resize
+                if self.editor.is_open() && self.content_area_width > 0 {
+                    let agent_pct = 100u16.saturating_sub(self.editor_split_pct);
+                    let border_x = self.content_area_x
+                        + (self.content_area_width as u32 * agent_pct as u32 / 100) as u16;
+                    if mouse.column >= border_x.saturating_sub(1)
+                        && mouse.column <= border_x + 1
+                    {
+                        self.dragging_editor_border = true;
+                    }
+                }
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                if self.dragging_editor_border && self.content_area_width > 0 {
+                    let rel = mouse.column.saturating_sub(self.content_area_x);
+                    let agent_pct = (rel as u32 * 100 / self.content_area_width as u32) as u16;
+                    self.editor_split_pct = (100u16.saturating_sub(agent_pct)).clamp(15, 85);
+                }
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                self.dragging_editor_border = false;
             }
             _ => {}
         }
@@ -233,6 +497,7 @@ impl App {
         match self.overlay {
             Overlay::Palette => return self.handle_palette_key(key),
             Overlay::FilePicker => return self.handle_picker_key(key),
+            Overlay::FolderInput => return self.handle_folder_input_key(key),
             Overlay::Editor => return self.handle_editor_key(key),
             Overlay::Diff => return self.handle_diff_key(key),
             Overlay::Deps => return self.handle_deps_key(key),
@@ -258,6 +523,12 @@ impl App {
         match action {
             KeyAction::Quit => self.should_quit = true,
             KeyAction::NewAgent => self.add_agent()?,
+            KeyAction::NewAgentInFolder => {
+                let cwd = self.current_cwd();
+                self.folder_input.open(&cwd);
+                self.overlay = Overlay::FolderInput;
+            }
+            KeyAction::NewAgentWithProvider(p) => self.add_agent_with_provider(p)?,
             KeyAction::CloseAgent => {
                 if self.editor.is_open() {
                     // Ctrl+W closes the editor panel first, agent on next press
@@ -269,18 +540,24 @@ impl App {
             }
             KeyAction::FocusAgent(idx) => {
                 if idx < self.agents.len() {
+                    let old_cwd = self.current_cwd();
                     self.focused = idx;
+                    self.refresh_sidebar_if_cwd_changed(&old_cwd);
                 }
             }
             KeyAction::FocusNext => {
                 if !self.agents.is_empty() {
+                    let old_cwd = self.current_cwd();
                     self.focused = (self.focused + 1) % self.agents.len();
+                    self.refresh_sidebar_if_cwd_changed(&old_cwd);
                 }
             }
             KeyAction::FocusPrev => {
                 if !self.agents.is_empty() {
+                    let old_cwd = self.current_cwd();
                     self.focused =
                         (self.focused + self.agents.len() - 1) % self.agents.len();
+                    self.refresh_sidebar_if_cwd_changed(&old_cwd);
                 }
             }
             KeyAction::TogglePalette => {
@@ -346,6 +623,7 @@ impl App {
             match key.code {
                 KeyCode::Char('q') => return KeyAction::Quit,
                 KeyCode::Char('n') => return KeyAction::NewAgent,
+                KeyCode::Char('t') => return KeyAction::NewAgentInFolder,
                 KeyCode::Char('w') => return KeyAction::CloseAgent,
                 KeyCode::Char('k') => return KeyAction::TogglePalette,
                 KeyCode::Char(c) if ('1'..='9').contains(&c) => {
@@ -407,11 +685,50 @@ impl App {
                     self.overlay = Overlay::None;
                     match cmd.as_str() {
                         "new" => self.add_agent()?,
-                        "close" => self.close_focused_agent(),
+                        "new_codex" => self.add_agent_with_provider(Provider::Codex)?,
+                        "new_folder" => {
+                            let cwd = self.current_cwd();
+                            self.folder_input.open(&cwd);
+                            self.overlay = Overlay::FolderInput;
+                        }
+                        "close" => {
+                            if self.editor.is_open() {
+                                self.editor.close();
+                            } else {
+                                self.close_focused_agent();
+                            }
+                        }
                         "open" => {
                             let cwd = self.current_cwd();
                             self.file_picker.open(&cwd, PickerMode::Open);
                             self.overlay = Overlay::FilePicker;
+                        }
+                        "save" => {
+                            if self.editor.is_open() {
+                                match self.editor.save() {
+                                    Ok(()) => self.set_status("Saved"),
+                                    Err(e) => self.set_status(format!("Save failed: {}", e)),
+                                }
+                            }
+                        }
+                        "focus_ed" => {
+                            if self.editor.is_open() {
+                                self.overlay = Overlay::Editor;
+                            }
+                        }
+                        "focus_next" => {
+                            if !self.agents.is_empty() {
+                                let old_cwd = self.current_cwd();
+                                self.focused = (self.focused + 1) % self.agents.len();
+                                self.refresh_sidebar_if_cwd_changed(&old_cwd);
+                            }
+                        }
+                        "focus_prev" => {
+                            if !self.agents.is_empty() {
+                                let old_cwd = self.current_cwd();
+                                self.focused = (self.focused + self.agents.len() - 1) % self.agents.len();
+                                self.refresh_sidebar_if_cwd_changed(&old_cwd);
+                            }
                         }
                         "diff" => {
                             let cwd = self.current_cwd();
@@ -421,7 +738,25 @@ impl App {
                         "deps" => {
                             self.open_deps_viewer();
                         }
+                        "tree" => {
+                            self.toggle_sidebar();
+                        }
+                        "ai_edit" => {
+                            if self.editor.is_open() {
+                                self.overlay = Overlay::Editor;
+                                self.editor.open_prompt();
+                            } else {
+                                self.set_status("Open a file first (Ctrl+O)");
+                            }
+                        }
+                        "menu" => {
+                            self.menu_bar_open = !self.menu_bar_open;
+                        }
+                        "palette" => {
+                            // Already closing from execute()
+                        }
                         "quit" => self.should_quit = true,
+                        // Editor-only commands are informational in palette
                         _ => {}
                     }
                 }
@@ -430,6 +765,33 @@ impl App {
             KeyCode::Backspace => self.palette.backspace(),
             KeyCode::Up => self.palette.move_selection(-1),
             KeyCode::Down => self.palette.move_selection(1),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Overlay: Folder Input
+    // -----------------------------------------------------------------------
+
+    fn handle_folder_input_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.folder_input.close();
+                self.overlay = Overlay::None;
+            }
+            KeyCode::Enter => {
+                if let Some(path) = self.folder_input.confirm() {
+                    self.folder_input.close();
+                    self.overlay = Overlay::None;
+                    self.add_agent_in(path)?;
+                }
+            }
+            KeyCode::Tab => {
+                self.folder_input.tab_complete();
+            }
+            KeyCode::Backspace => self.folder_input.backspace(),
+            KeyCode::Char(c) => self.folder_input.input_char(c),
             _ => {}
         }
         Ok(())
@@ -481,10 +843,34 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
+        // AI prompt bar is open — route keys there
+        if self.editor.prompt_open {
+            match key.code {
+                KeyCode::Esc => {
+                    self.editor.close_prompt();
+                }
+                KeyCode::Enter => {
+                    if let Some((instruction, file_path)) = self.editor.submit_prompt() {
+                        self.set_status("AI editing...");
+                        self.spawn_ai_edit(instruction, file_path);
+                    }
+                }
+                KeyCode::Backspace => self.editor.prompt_backspace(),
+                KeyCode::Char(c) => self.editor.prompt_char(c),
+                _ => {}
+            }
+            return Ok(());
+        }
+
         match (ctrl, shift, key.code) {
             // Esc: unfocus editor, return focus to agents (panel stays open)
             (_, _, KeyCode::Esc) => {
+                self.editor.ai_status = None;
                 self.overlay = Overlay::None;
+            }
+            // Ctrl+A: open AI prompt bar
+            (true, _, KeyCode::Char('a')) => {
+                self.editor.open_prompt();
             }
             // Ctrl+W / Ctrl+X: close the editor panel entirely
             (true, _, KeyCode::Char('w')) | (true, _, KeyCode::Char('W'))
@@ -498,16 +884,16 @@ impl App {
                     Err(e) => self.set_status(format!("Save failed: {}", e)),
                 }
             }
-            // Ctrl+D: delete line / Ctrl+Shift+D: duplicate line
+            // Ctrl+D: delete line / Ctrl+Shift+D: duplicate line (also via palette)
             (true, true, KeyCode::Char('d')) | (true, true, KeyCode::Char('D')) => {
                 self.editor.duplicate_line();
             }
             (true, false, KeyCode::Char('d')) => {
                 self.editor.delete_line();
             }
-            // Fast navigation — Ctrl+Arrow jumps by word / 5 lines
-            (true, _, KeyCode::Up) => self.editor.jump_up(),
-            (true, _, KeyCode::Down) => self.editor.jump_down(),
+            // Fast navigation — Shift+Arrow jumps 5 lines, Ctrl+Arrow jumps by word
+            (_, true, KeyCode::Up) => self.editor.jump_up(),
+            (_, true, KeyCode::Down) => self.editor.jump_down(),
             (true, _, KeyCode::Left) => self.editor.word_left(),
             (true, _, KeyCode::Right) => self.editor.word_right(),
             // Ctrl+Home/End: top/bottom of file
@@ -639,6 +1025,16 @@ impl App {
     // -----------------------------------------------------------------------
     // Sidebar
     // -----------------------------------------------------------------------
+
+    /// Reload the sidebar file tree if the focused agent's cwd differs from the previous.
+    fn refresh_sidebar_if_cwd_changed(&mut self, old_cwd: &str) {
+        if self.sidebar_open {
+            let new_cwd = self.current_cwd();
+            if new_cwd != old_cwd {
+                self.file_tree.load(&new_cwd);
+            }
+        }
+    }
 
     fn toggle_sidebar(&mut self) {
         if !self.sidebar_open {
@@ -788,8 +1184,9 @@ impl App {
     fn handle_resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
         let sidebar_w = if self.sidebar_open { SIDEBAR_WIDTH } else { 0 };
         let available_cols = cols.saturating_sub(sidebar_w);
+        let chrome = 1 + if self.menu_bar_open { 1u16 } else { 0 }; // status bar + optional menu
         let areas = grid::compute_grid(
-            Rect::new(0, 0, available_cols, rows.saturating_sub(1)),
+            Rect::new(0, 0, available_cols, rows.saturating_sub(chrome)),
             self.agents.len(),
         );
 
@@ -844,25 +1241,50 @@ impl App {
     // -----------------------------------------------------------------------
 
     fn add_agent(&mut self) -> anyhow::Result<()> {
+        self.add_agent_with_provider(Provider::Claude)
+    }
+
+    fn add_agent_in(&mut self, cwd: String) -> anyhow::Result<()> {
+        self.add_agent_in_with_provider(cwd, Provider::Claude)
+    }
+
+    fn add_agent_with_provider(&mut self, provider: Provider) -> anyhow::Result<()> {
+        let cwd = self.current_cwd();
+        self.add_agent_in_with_provider(cwd, provider)
+    }
+
+    fn add_agent_in_with_provider(&mut self, cwd: String, provider: Provider) -> anyhow::Result<()> {
         if self.agents.len() >= self.config.max_agents {
             self.set_status(format!("Max {} agents reached", self.config.max_agents));
             return Ok(());
         }
 
-        let cwd = std::env::current_dir()?
-            .to_string_lossy()
-            .to_string();
+        // Validate the directory exists
+        if !std::path::Path::new(&cwd).is_dir() {
+            self.set_status(format!("Not a directory: {}", cwd));
+            return Ok(());
+        }
         let id = uid();
         let terminal_id = uid();
         let name = format!("Agent {}", self.agents.len() + 1);
 
-        let (program, args) = if let Some(cli) = fs_agent::find_claude_cli() {
-            (
-                cli.to_string_lossy().to_string(),
-                fs_agent::claude_args(None),
-            )
-        } else {
-            (self.config.default_shell.clone(), vec![])
+        let (program, args) = match provider {
+            Provider::Claude => {
+                if let Some(cli) = fs_agent::find_claude_cli() {
+                    (cli.to_string_lossy().to_string(), fs_agent::claude_args(None))
+                } else {
+                    self.set_status("Claude CLI not found — install with: npm i -g @anthropic-ai/claude-code");
+                    return Ok(());
+                }
+            }
+            Provider::Codex => {
+                if let Some(cli) = fs_agent::find_codex_cli() {
+                    (cli.to_string_lossy().to_string(), fs_agent::codex_args())
+                } else {
+                    self.set_status("Codex CLI not found — install with: npm i -g @openai/codex");
+                    return Ok(());
+                }
+            }
         };
 
         let env = fs_agent::build_clean_env();
@@ -879,21 +1301,29 @@ impl App {
         )?;
 
         self.agent_terminals.insert(id.clone(), terminal_id);
+
+        let folder = std::path::Path::new(&cwd)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| cwd.clone());
+
         self.agents.push(AgentDescriptor {
             id,
             name,
             cwd,
             is_active: true,
-            provider: "claude".into(),
+            provider,
         });
 
+        let old_cwd = self.current_cwd();
         self.focused = self.agents.len() - 1;
+        self.refresh_sidebar_if_cwd_changed(&old_cwd);
 
         // Resize all panes (existing + new) to fit the updated grid layout.
         let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
         self.handle_resize(term_cols, term_rows)?;
 
-        self.set_status("Agent created");
+        self.set_status(format!("{} agent created in {}", provider.label(), folder));
         Ok(())
     }
 
@@ -903,6 +1333,7 @@ impl App {
             return;
         }
 
+        let old_cwd = self.current_cwd();
         let idx = self.focused;
         let agent = self.agents.remove(idx);
 
@@ -918,13 +1349,93 @@ impl App {
 
         if !self.agents.is_empty() {
             self.focused = self.focused.min(self.agents.len() - 1);
+            self.refresh_sidebar_if_cwd_changed(&old_cwd);
             // Resize remaining panes to fill the now-larger grid slots.
             let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
             self.handle_resize(term_cols, term_rows).ok();
         } else {
             self.focused = 0;
+            // Falls back to process cwd — refresh sidebar if it's open
+            self.refresh_sidebar_if_cwd_changed(&old_cwd);
         }
         self.set_status("Agent closed");
+    }
+
+    /// Spawn `claude --print` in a background thread to apply an AI edit.
+    fn spawn_ai_edit(&self, instruction: String, file_path: String) {
+        let tx = self.ai_tx.clone();
+        let cwd = self.current_cwd();
+
+        let cli = match fs_agent::find_claude_cli() {
+            Some(p) => p,
+            None => {
+                tx.send(AiEditResult {
+                    success: false,
+                    message: "Claude CLI not found".into(),
+                    file_path: file_path.clone(),
+                    original_content: None,
+                }).ok();
+                return;
+            }
+        };
+
+        // Capture original content for diff
+        let original_content = std::fs::read_to_string(&file_path).ok();
+
+        std::thread::Builder::new()
+            .name("ai-edit".into())
+            .spawn(move || {
+                let prompt = format!(
+                    "Edit the file {} according to this instruction: {}\n\
+                     Only edit the file — do not create new files. Be precise and minimal.",
+                    file_path, instruction
+                );
+
+                let result = std::process::Command::new(cli)
+                    .arg("--print")
+                    .arg("--allowedTools")
+                    .arg("Edit,Read")
+                    .arg("--dangerously-skip-permissions")
+                    .arg(&prompt)
+                    .current_dir(&cwd)
+                    .env("CLAUDE_CODE_ENTRYPOINT", "cli")
+                    .output();
+
+                match result {
+                    Ok(output) => {
+                        if output.status.success() {
+                            tx.send(AiEditResult {
+                                success: true,
+                                message: "AI edit applied — Ctrl+D to view diff".into(),
+                                file_path,
+                                original_content,
+                            }).ok();
+                        } else {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            let msg = if stderr.trim().is_empty() {
+                                "AI edit failed".to_string()
+                            } else {
+                                format!("AI: {}", stderr.trim().chars().take(80).collect::<String>())
+                            };
+                            tx.send(AiEditResult {
+                                success: false,
+                                message: msg,
+                                file_path,
+                                original_content: None,
+                            }).ok();
+                        }
+                    }
+                    Err(e) => {
+                        tx.send(AiEditResult {
+                            success: false,
+                            message: format!("Failed to run claude: {}", e),
+                            file_path,
+                            original_content: None,
+                        }).ok();
+                    }
+                }
+            })
+            .ok();
     }
 
     fn current_cwd(&self) -> String {
@@ -938,6 +1449,15 @@ impl App {
         }
     }
 
+    /// Check if a mouse position is over the editor panel area.
+    fn is_mouse_over_editor(&self, col: u16, _row: u16) -> bool {
+        if self.content_area_width == 0 { return false; }
+        let agent_pct = 100u16.saturating_sub(self.editor_split_pct);
+        let editor_start = self.content_area_x
+            + (self.content_area_width as u32 * agent_pct as u32 / 100) as u16;
+        col >= editor_start
+    }
+
     // -----------------------------------------------------------------------
     // Rendering
     // -----------------------------------------------------------------------
@@ -945,14 +1465,28 @@ impl App {
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
-        // Split vertically: main content + 1-row status bar
+        // Split vertically: menu bar (optional) + main content + 1-row status bar
+        let mut constraints = Vec::new();
+        if self.menu_bar_open {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Min(1));
+        constraints.push(Constraint::Length(1));
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .constraints(constraints)
             .split(area);
 
-        let main_area = chunks[0];
-        let status_area = chunks[1];
+        let (menu_area, main_area, status_area) = if self.menu_bar_open {
+            (Some(chunks[0]), chunks[1], chunks[2])
+        } else {
+            (None, chunks[0], chunks[1])
+        };
+
+        // Render menu bar
+        if let Some(ma) = menu_area {
+            render::render_menu_bar(frame, ma, &self.theme);
+        }
 
         // Split horizontally: optional sidebar + content area
         let (sidebar_area, content_area) = if self.sidebar_open {
@@ -970,11 +1504,16 @@ impl App {
             self.file_tree.render(frame, sa, &self.theme, self.sidebar_focused);
         }
 
+        // Cache content area for mouse drag hit-testing
+        self.content_area_x = content_area.x;
+        self.content_area_width = content_area.width;
+
         // Split content: agent grid on left, editor panel on right (when open)
         let (agent_area, editor_panel_area) = if self.editor.is_open() {
+            let agent_pct = 100u16.saturating_sub(self.editor_split_pct);
             let h = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .constraints([Constraint::Percentage(agent_pct), Constraint::Percentage(self.editor_split_pct)])
                 .split(content_area);
             (h[0], Some(h[1]))
         } else {
@@ -1006,11 +1545,13 @@ impl App {
 
         let hint = match self.overlay {
             Overlay::Editor =>
-                " ^S save │ ^W close │ Esc unfocus editor ",
+                " ^G ask AI │ ^S save │ ^W close │ Esc unfocus editor ",
             Overlay::Diff =>
                 " ↑↓/jk scroll │ ←→/hl prev/next file │ e edit │ q close ",
             Overlay::FilePicker =>
                 " ↑↓ navigate │ Enter open │ Esc cancel ",
+            Overlay::FolderInput =>
+                " Tab complete │ Enter confirm │ Esc cancel ",
             Overlay::Palette =>
                 " ↑↓ navigate │ Enter run │ Esc cancel ",
             Overlay::Deps =>
@@ -1020,7 +1561,7 @@ impl App {
             Overlay::None if self.editor.is_open() =>
                 " ^F focus editor │ ^W close │ Tab cycle │ ^E tree │ ^D diff │ ^I deps │ ^K palette ",
             Overlay::None =>
-                " ^N new │ ^W close │ Tab cycle │ ^E tree │ ^O open │ ^D diff │ ^I deps │ ^K palette │ ^Q quit ",
+                " ^N new │ ^⇧N new in folder │ ^W close │ Tab cycle │ ^E tree │ ^O open │ ^D diff │ ^K palette │ ^Q quit ",
         };
 
         render::render_status_bar(
@@ -1037,6 +1578,7 @@ impl App {
         match self.overlay {
             Overlay::Palette    => self.palette.render(frame, area, &self.theme),
             Overlay::FilePicker => self.file_picker.render(frame, area, &self.theme),
+            Overlay::FolderInput => self.folder_input.render(frame, area, &self.theme),
             Overlay::Editor     => {} // rendered inline as side panel above
             Overlay::Diff       => self.diff_viewer.render(frame, main_area, &self.theme),
             Overlay::Deps       => self.deps_viewer.render(frame, main_area, &self.theme),

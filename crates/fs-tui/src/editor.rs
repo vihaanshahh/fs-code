@@ -33,8 +33,20 @@ pub struct Editor {
     open: bool,
     /// Viewport dimensions (set on render)
     viewport_height: usize,
+    /// Viewport width for content area (set on render)
+    viewport_width: usize,
+    /// Horizontal scroll offset (first visible column)
+    pub scroll_x: usize,
     /// Detected language for syntax highlighting
     lang: Lang,
+    /// AI prompt bar is open (user is typing an instruction)
+    pub prompt_open: bool,
+    /// Current text in the AI prompt bar
+    pub prompt_input: String,
+    /// AI is currently processing a request
+    pub ai_working: bool,
+    /// Status message from last AI operation
+    pub ai_status: Option<String>,
 }
 
 impl Editor {
@@ -47,7 +59,13 @@ impl Editor {
             dirty: false,
             open: false,
             viewport_height: 20,
+            viewport_width: 80,
+            scroll_x: 0,
             lang: Lang::Generic,
+            prompt_open: false,
+            prompt_input: String::new(),
+            ai_working: false,
+            ai_status: None,
         }
     }
 
@@ -66,6 +84,7 @@ impl Editor {
         }
         self.cursor = (0, 0);
         self.scroll = 0;
+        self.scroll_x = 0;
         self.dirty = false;
         self.open = true;
         Ok(())
@@ -79,6 +98,60 @@ impl Editor {
     pub fn save(&mut self) -> Result<(), String> {
         let content = self.lines.join("\n") + "\n";
         std::fs::write(&self.path, content).map_err(|e| e.to_string())?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // AI prompt bar
+    // -----------------------------------------------------------------------
+
+    pub fn open_prompt(&mut self) {
+        if self.ai_working { return; }
+        self.prompt_open = true;
+        self.prompt_input.clear();
+        self.ai_status = None;
+    }
+
+    pub fn close_prompt(&mut self) {
+        self.prompt_open = false;
+        self.prompt_input.clear();
+    }
+
+    pub fn prompt_char(&mut self, c: char) {
+        self.prompt_input.push(c);
+    }
+
+    pub fn prompt_backspace(&mut self) {
+        self.prompt_input.pop();
+    }
+
+    /// Take the prompt text and mark AI as working. Returns the prompt + file path.
+    pub fn submit_prompt(&mut self) -> Option<(String, String)> {
+        if self.prompt_input.trim().is_empty() {
+            return None;
+        }
+        let instruction = self.prompt_input.clone();
+        let path = self.path.clone();
+        self.prompt_open = false;
+        self.prompt_input.clear();
+        self.ai_working = true;
+        self.ai_status = Some("AI working...".into());
+        Some((instruction, path))
+    }
+
+    /// Reload the file from disk (after AI edits it).
+    pub fn reload(&mut self) -> Result<(), String> {
+        let content = std::fs::read_to_string(&self.path).map_err(|e| e.to_string())?;
+        let old_cursor = self.cursor;
+        self.lines = content.lines().map(|l| l.to_string()).collect();
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        // Try to preserve cursor position
+        self.cursor.0 = old_cursor.0.min(self.lines.len().saturating_sub(1));
+        self.clamp_col();
+        self.ensure_visible();
         self.dirty = false;
         Ok(())
     }
@@ -106,6 +179,7 @@ impl Editor {
     pub fn move_left(&mut self) {
         if self.cursor.1 > 0 {
             self.cursor.1 -= 1;
+            self.ensure_visible_h();
         } else if self.cursor.0 > 0 {
             self.cursor.0 -= 1;
             self.cursor.1 = self.current_line_len();
@@ -117,6 +191,7 @@ impl Editor {
         let len = self.current_line_len();
         if self.cursor.1 < len {
             self.cursor.1 += 1;
+            self.ensure_visible_h();
         } else if self.cursor.0 < self.lines.len() - 1 {
             self.cursor.0 += 1;
             self.cursor.1 = 0;
@@ -126,10 +201,12 @@ impl Editor {
 
     pub fn move_home(&mut self) {
         self.cursor.1 = 0;
+        self.ensure_visible_h();
     }
 
     pub fn move_end(&mut self) {
         self.cursor.1 = self.current_line_len();
+        self.ensure_visible_h();
     }
 
     pub fn page_up(&mut self) {
@@ -146,14 +223,33 @@ impl Editor {
         self.ensure_visible();
     }
 
-    /// Jump 5 lines up (Ctrl+Up) — fast vertical movement.
+    /// Scroll viewport by delta lines (positive = down, negative = up).
+    /// Moves cursor to stay within the visible area.
+    pub fn scroll_by(&mut self, delta: i32) {
+        let max_scroll = self.lines.len().saturating_sub(self.viewport_height);
+        if delta < 0 {
+            self.scroll = self.scroll.saturating_sub((-delta) as usize);
+        } else {
+            self.scroll = (self.scroll + delta as usize).min(max_scroll);
+        }
+        // Keep cursor within visible range
+        if self.cursor.0 < self.scroll {
+            self.cursor.0 = self.scroll;
+            self.clamp_col();
+        } else if self.cursor.0 >= self.scroll + self.viewport_height {
+            self.cursor.0 = self.scroll + self.viewport_height - 1;
+            self.clamp_col();
+        }
+    }
+
+    /// Jump 5 lines up (Shift+Up) — fast vertical movement.
     pub fn jump_up(&mut self) {
         self.cursor.0 = self.cursor.0.saturating_sub(5);
         self.clamp_col();
         self.ensure_visible();
     }
 
-    /// Jump 5 lines down (Ctrl+Down) — fast vertical movement.
+    /// Jump 5 lines down (Shift+Down) — fast vertical movement.
     pub fn jump_down(&mut self) {
         self.cursor.0 = (self.cursor.0 + 5).min(self.lines.len().saturating_sub(1));
         self.clamp_col();
@@ -183,6 +279,7 @@ impl Editor {
             col -= 1;
         }
         self.cursor.1 = col;
+        self.ensure_visible_h();
     }
 
     /// Jump one word right (Ctrl+Right).
@@ -209,12 +306,14 @@ impl Editor {
             col += 1;
         }
         self.cursor.1 = col;
+        self.ensure_visible_h();
     }
 
     /// Jump to first line (Ctrl+Home).
     pub fn goto_top(&mut self) {
         self.cursor = (0, 0);
         self.scroll = 0;
+        self.scroll_x = 0;
     }
 
     /// Jump to last line (Ctrl+End).
@@ -233,6 +332,7 @@ impl Editor {
         self.lines[self.cursor.0].insert(col, c);
         self.cursor.1 = col + 1;
         self.dirty = true;
+        self.ensure_visible_h();
     }
 
     /// Insert a multi-character string (e.g. from a paste operation).
@@ -299,6 +399,7 @@ impl Editor {
                 self.lines[self.cursor.0].remove(col - 1);
                 self.cursor.1 = col - 1;
                 self.dirty = true;
+                self.ensure_visible_h();
             }
         } else if self.cursor.0 > 0 {
             // Join with previous line
@@ -347,6 +448,19 @@ impl Editor {
         if self.cursor.0 >= self.scroll + self.viewport_height {
             self.scroll = self.cursor.0 - self.viewport_height + 1;
         }
+        self.ensure_visible_h();
+    }
+
+    fn ensure_visible_h(&mut self) {
+        let margin = 4usize; // keep cursor this far from edges
+        let w = self.viewport_width;
+        if w == 0 { return; }
+        if self.cursor.1 < self.scroll_x + margin {
+            self.scroll_x = self.cursor.1.saturating_sub(margin);
+        }
+        if self.cursor.1 >= self.scroll_x + w.saturating_sub(margin) {
+            self.scroll_x = self.cursor.1 + margin + 1 - w;
+        }
     }
 
 
@@ -363,7 +477,18 @@ impl Editor {
     pub fn render(&mut self, frame: &mut Frame, area: Rect, is_focused: bool, theme: &Theme) {
         let filename = self.path.rsplit('/').next().unwrap_or(&self.path);
         let dirty_marker = if self.dirty { " ●" } else { "" };
-        let title = format!(" {}{} — {}/{} ", filename, dirty_marker, self.cursor.0 + 1, self.lines.len());
+        let ai_indicator = if self.ai_working { " ⟳ AI" } else { "" };
+        let title = format!(" {}{}{} — {}/{} ", filename, dirty_marker, ai_indicator, self.cursor.0 + 1, self.lines.len());
+
+        let bottom_hint = if self.prompt_open {
+            " Enter submit │ Esc cancel "
+        } else if self.ai_working {
+            " AI is editing this file... "
+        } else if is_focused {
+            " ^G ask AI │ ^S save │ S-↑↓ jump │ C-←→ word │ C-D del line │ Esc unfocus"
+        } else {
+            " Ctrl+F / Tab focus editor "
+        };
 
         let block = if is_focused {
             Block::default()
@@ -378,7 +503,7 @@ impl Editor {
                         .add_modifier(Modifier::BOLD),
                 ))
                 .title_bottom(Span::styled(
-                    " Ctrl+S save │ C-↑↓ jump │ C-←→ word │ C-D del line │ Esc unfocus ",
+                    bottom_hint,
                     Style::default().fg(theme.text_muted),
                 ))
         } else {
@@ -390,7 +515,7 @@ impl Editor {
                     Style::default().fg(theme.text_muted).add_modifier(Modifier::BOLD),
                 ))
                 .title_bottom(Span::styled(
-                    " Ctrl+F / Tab focus editor ",
+                    bottom_hint,
                     Style::default().fg(theme.text_muted),
                 ))
         };
@@ -405,6 +530,7 @@ impl Editor {
         self.viewport_height = inner.height as usize;
         let gutter_w = format!("{}", self.lines.len()).len() as u16 + 3; // " 123 │ "
         let content_w = inner.width.saturating_sub(gutter_w) as usize;
+        self.viewport_width = content_w;
 
         let visible = inner.height as usize;
         let start = self.scroll;
@@ -430,16 +556,16 @@ impl Editor {
             let line = &self.lines[line_idx];
             let base_fg = theme.text;
             let content_x = inner.x + gutter_w;
+            let sx0 = self.scroll_x; // first visible column
 
-            // Build a per-char colour array for the visible portion of the line.
-            let chars: Vec<char> = line.chars().take(content_w).collect();
-            let n = chars.len();
+            // Build a per-char colour array for the full line.
+            let all_chars: Vec<char> = line.chars().collect();
+            let total_chars = all_chars.len();
 
             // Default colour for every char position.
-            let mut colours: Vec<Color> = vec![base_fg; n];
+            let mut colours: Vec<Color> = vec![base_fg; total_chars];
 
             // Apply highlight spans (byte-indexed → char-indexed).
-            // We need byte→char offset mapping because spans use byte offsets.
             let byte_to_char: Vec<usize> = {
                 let mut map = vec![0usize; line.len() + 1];
                 let mut ci = 0usize;
@@ -454,43 +580,112 @@ impl Editor {
             if let Some(spans) = hl_spans.get(i) {
                 for sp in spans {
                     let cs = byte_to_char.get(sp.start).copied().unwrap_or(0);
-                    let ce = byte_to_char.get(sp.end).copied().unwrap_or(n).min(n);
+                    let ce = byte_to_char.get(sp.end).copied().unwrap_or(total_chars).min(total_chars);
                     for ci in cs..ce {
                         colours[ci] = sp.color;
                     }
                 }
             }
 
-            // Render character by character.
-            for (ci, &ch) in chars.iter().enumerate() {
-                let sx = content_x + ci as u16;
+            // Visible slice of characters after horizontal scroll.
+            let vis_end = (sx0 + content_w).min(total_chars);
+            let vis_start = sx0.min(total_chars);
+
+            // Subtle highlight for the active cursor line when focused.
+            let cursor_line_bg = if is_cursor_line && is_focused {
+                Some(Color::Indexed(236))
+            } else {
+                None
+            };
+
+            // Render visible characters.
+            for ci in vis_start..vis_end {
+                let dx = (ci - sx0) as u16;
+                let sx = content_x + dx;
                 if sx >= inner.x + inner.width { break; }
-                let style = Style::default().fg(colours[ci]);
-                frame.buffer_mut().set_string(sx, y, &ch.to_string(), style);
+                let mut style = Style::default().fg(colours[ci]);
+                if let Some(bg) = cursor_line_bg {
+                    style = style.bg(bg);
+                }
+                frame.buffer_mut().set_string(sx, y, &all_chars[ci].to_string(), style);
             }
-            // Pad remainder with spaces (clear any leftover content).
-            for cx in n..content_w {
+            // Pad remainder with spaces.
+            let rendered = vis_end.saturating_sub(vis_start);
+            for cx in rendered..content_w {
                 let sx = content_x + cx as u16;
                 if sx >= inner.x + inner.width { break; }
-                frame.buffer_mut().set_string(sx, y, " ", Style::default());
+                let pad_style = if let Some(bg) = cursor_line_bg {
+                    Style::default().bg(bg)
+                } else {
+                    Style::default()
+                };
+                frame.buffer_mut().set_string(sx, y, " ", pad_style);
             }
 
-            // Cursor — draw on top.
-            if is_cursor_line {
-                let cursor_x = content_x + self.cursor.1 as u16;
-                if cursor_x < inner.x + inner.width {
-                    let cursor_char = line.chars().nth(self.cursor.1).unwrap_or(' ');
+            // Cursor — draw on top (only when editor is focused).
+            if is_cursor_line && is_focused {
+                if self.cursor.1 >= sx0 {
+                    let cursor_dx = (self.cursor.1 - sx0) as u16;
+                    let cursor_x = content_x + cursor_dx;
+                    if cursor_x < inner.x + inner.width {
+                        let cursor_char = all_chars.get(self.cursor.1).copied().unwrap_or(' ');
+                        frame.buffer_mut().set_string(
+                            cursor_x,
+                            y,
+                            &cursor_char.to_string(),
+                            Style::default().bg(Color::White).fg(Color::Black),
+                        );
+                    }
+                }
+            }
+        }
+
+        // AI prompt bar — rendered at the bottom of the editor inner area
+        if self.prompt_open || self.ai_status.is_some() {
+            let bar_y = inner.y + inner.height.saturating_sub(1);
+            if self.prompt_open {
+                let prompt_text = format!("🤖 {} ", self.prompt_input);
+                let cursor_pos = inner.x + prompt_text.len() as u16;
+                frame.buffer_mut().set_string(
+                    inner.x, bar_y,
+                    &prompt_text,
+                    Style::default().fg(theme.amber).bg(Color::Black),
+                );
+                // Pad rest of line
+                let remaining = inner.width.saturating_sub(prompt_text.len() as u16);
+                for dx in 0..remaining {
                     frame.buffer_mut().set_string(
-                        cursor_x,
-                        y,
-                        &cursor_char.to_string(),
-                        Style::default().bg(theme.text).fg(Color::White),
+                        inner.x + prompt_text.len() as u16 + dx, bar_y,
+                        " ",
+                        Style::default().bg(Color::Black),
+                    );
+                }
+                // Blinking cursor
+                if cursor_pos < inner.x + inner.width {
+                    frame.buffer_mut().set_string(
+                        cursor_pos, bar_y, " ",
+                        Style::default().bg(theme.amber).fg(Color::Black),
+                    );
+                }
+            } else if let Some(ref status) = self.ai_status {
+                let msg = format!(" {} ", status);
+                frame.buffer_mut().set_string(
+                    inner.x, bar_y,
+                    &msg,
+                    Style::default().fg(Color::Black).bg(theme.green),
+                );
+                let remaining = inner.width.saturating_sub(msg.len() as u16);
+                for dx in 0..remaining {
+                    frame.buffer_mut().set_string(
+                        inner.x + msg.len() as u16 + dx, bar_y,
+                        " ",
+                        Style::default().bg(theme.green),
                     );
                 }
             }
         }
 
-        // Scrollbar
+        // Vertical scrollbar
         if self.lines.len() > visible {
             let mut scrollbar_state =
                 ScrollbarState::new(self.lines.len()).position(self.scroll);
@@ -498,6 +693,19 @@ impl Editor {
                 Scrollbar::new(ScrollbarOrientation::VerticalRight),
                 inner,
                 &mut scrollbar_state,
+            );
+        }
+
+        // Horizontal scrollbar
+        let max_line_len = self.lines[start..end].iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        if max_line_len > content_w {
+            let hbar_area = Rect::new(inner.x + gutter_w, inner.y, inner.width.saturating_sub(gutter_w), inner.height);
+            let mut hbar_state =
+                ScrollbarState::new(max_line_len).position(self.scroll_x);
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::HorizontalBottom),
+                hbar_area,
+                &mut hbar_state,
             );
         }
     }

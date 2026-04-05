@@ -18,6 +18,44 @@ pub type AgentId = String;
 pub type TerminalId = String;
 
 // ---------------------------------------------------------------------------
+// Provider
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Provider {
+    Claude,
+    Codex,
+}
+
+impl Provider {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Codex => "Codex",
+        }
+    }
+
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+impl Default for Provider {
+    fn default() -> Self {
+        Self::Claude
+    }
+}
+
+impl std::fmt::Display for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Agent types
 // ---------------------------------------------------------------------------
 
@@ -27,7 +65,7 @@ pub struct AgentDescriptor {
     pub name: String,
     pub cwd: String,
     pub is_active: bool,
-    pub provider: String,
+    pub provider: Provider,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +118,8 @@ pub enum AppEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAction {
     NewAgent,
+    NewAgentInFolder,
+    NewAgentWithProvider(Provider),
     CloseAgent,
     FocusAgent(usize), // 0-indexed
     FocusNext,

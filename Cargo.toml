@@ -5,6 +5,7 @@ members = [
     "crates/fs-pty",
     "crates/fs-agent",
     "crates/fs-tui",
+    "crates/fs-update",
     "crates/fs-app",
 ]
 

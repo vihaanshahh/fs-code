@@ -143,6 +143,124 @@ fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
 }
 
 // ---------------------------------------------------------------------------
+// Generate unified diff from two strings (for AI edit preview)
+// ---------------------------------------------------------------------------
+
+/// Produce a unified diff string from old and new content for a given file path.
+/// Uses a simple O(nm) LCS diff — fine for typical file sizes.
+pub fn unified_diff(path: &str, old: &str, new: &str) -> String {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+
+    // LCS table
+    let n = old_lines.len();
+    let m = new_lines.len();
+    let mut dp = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if old_lines[i] == new_lines[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+
+    // Walk the LCS table to produce edit operations
+    #[derive(Clone, Copy)]
+    enum Op { Keep, Remove, Add }
+    let mut ops: Vec<(Op, usize, usize)> = Vec::new(); // (op, old_idx, new_idx)
+    let (mut i, mut j) = (0, 0);
+    while i < n || j < m {
+        if i < n && j < m && old_lines[i] == new_lines[j] {
+            ops.push((Op::Keep, i, j));
+            i += 1;
+            j += 1;
+        } else if j < m && (i >= n || dp[i][j + 1] >= dp[i + 1][j]) {
+            ops.push((Op::Add, i, j));
+            j += 1;
+        } else {
+            ops.push((Op::Remove, i, j));
+            i += 1;
+        }
+    }
+
+    // Group into hunks with 3 lines of context
+    let ctx = 3usize;
+    let mut hunks: Vec<(usize, usize)> = Vec::new(); // (start, end) indices into ops
+    let mut hunk_start: Option<usize> = None;
+    let mut last_change: Option<usize> = None;
+
+    for (idx, (op, _, _)) in ops.iter().enumerate() {
+        if !matches!(op, Op::Keep) {
+            if hunk_start.is_none() {
+                hunk_start = Some(idx.saturating_sub(ctx));
+            }
+            last_change = Some(idx);
+        } else if let Some(lc) = last_change {
+            if idx - lc > ctx * 2 {
+                hunks.push((hunk_start.unwrap(), (lc + ctx + 1).min(ops.len())));
+                hunk_start = None;
+                last_change = None;
+            }
+        }
+    }
+    if let (Some(hs), Some(lc)) = (hunk_start, last_change) {
+        hunks.push((hs, (lc + ctx + 1).min(ops.len())));
+    }
+
+    if hunks.is_empty() {
+        return String::new(); // no changes
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("diff --git a/{path} b/{path}\n"));
+    out.push_str(&format!("--- a/{path}\n"));
+    out.push_str(&format!("+++ b/{path}\n"));
+
+    for (start, end) in &hunks {
+        // Compute hunk header line numbers
+        let mut old_start = 0;
+        let mut old_count = 0;
+        let mut new_start = 0;
+        let mut new_count = 0;
+        let mut first = true;
+
+        for idx in *start..*end {
+            let (op, oi, ni) = ops[idx];
+            match op {
+                Op::Keep => {
+                    if first { old_start = oi + 1; new_start = ni + 1; first = false; }
+                    old_count += 1;
+                    new_count += 1;
+                }
+                Op::Remove => {
+                    if first { old_start = oi + 1; new_start = ni + 1; first = false; }
+                    old_count += 1;
+                }
+                Op::Add => {
+                    if first { old_start = oi + 1; new_start = ni + 1; first = false; }
+                    new_count += 1;
+                }
+            }
+        }
+
+        out.push_str(&format!("@@ -{},{} +{},{} @@\n", old_start, old_count, new_start, new_count));
+
+        for idx in *start..*end {
+            let (op, oi, ni) = ops[idx];
+            match op {
+                Op::Keep   => out.push_str(&format!(" {}\n", old_lines[oi])),
+                Op::Remove => out.push_str(&format!("-{}\n", old_lines[oi])),
+                Op::Add    => out.push_str(&format!("+{}\n", new_lines[ni])),
+            }
+        }
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Diff viewer state
 // ---------------------------------------------------------------------------
 

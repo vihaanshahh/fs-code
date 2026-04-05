@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 fs-core = { path = "../fs-core" }
 fs-tui = { path = "../fs-tui" }
+fs-update = { path = "../fs-update" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
