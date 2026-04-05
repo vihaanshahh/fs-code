@@ -17,7 +17,7 @@ jobs:
             target: aarch64-apple-darwin
             asset_os: darwin
             asset_arch: aarch64
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             asset_os: darwin
             asset_arch: x86_64
