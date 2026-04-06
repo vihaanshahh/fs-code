@@ -48,6 +48,37 @@ pub fn find_codex_cli() -> Option<PathBuf> {
     which::which("codex").ok()
 }
 
+/// Find the GitHub Copilot CLI binary.
+///
+/// Looks for the interactive `copilot` binary shipped by `@github/copilot`.
+/// Falls back to common npm global install locations.
+pub fn find_copilot_cli() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("FLUIDSTATE_COPILOT_PATH") {
+        let pb = PathBuf::from(&p);
+        if pb.exists() {
+            return Some(pb);
+        }
+    }
+
+    if let Ok(p) = which::which("copilot") {
+        return Some(p);
+    }
+
+    let home = dirs::home_dir().unwrap_or_default();
+    let candidates = [
+        home.join(".npm-global/bin/copilot"),
+        PathBuf::from("/usr/local/bin/copilot"),
+        PathBuf::from("/opt/homebrew/bin/copilot"),
+    ];
+    for c in &candidates {
+        if c.exists() {
+            return Some(c.clone());
+        }
+    }
+
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Clean environment — filter out Electron/Vite vars, ensure PATH is complete
 // ---------------------------------------------------------------------------
@@ -89,4 +120,9 @@ pub fn claude_args(resume_session: Option<&str>) -> Vec<String> {
 /// Build arguments for launching codex interactively in a PTY.
 pub fn codex_args() -> Vec<String> {
     vec!["--no-alt-screen".into()]
+}
+
+/// Build arguments for launching GitHub Copilot CLI interactively in a PTY.
+pub fn copilot_args() -> Vec<String> {
+    Vec::new()
 }

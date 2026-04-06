@@ -11,6 +11,7 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
 
 use fs_agent;
 use fs_core::{uid, AgentDescriptor, AgentId, Config, KeyAction, Provider};
@@ -49,9 +50,89 @@ enum Overlay {
     Palette,
     FilePicker,
     FolderInput,
+    ProviderPicker,
     Editor,
     Diff,
     Deps,
+}
+
+// ---------------------------------------------------------------------------
+// Provider picker — small popup for choosing which agent to spawn
+// ---------------------------------------------------------------------------
+
+const PROVIDER_CHOICES: &[Provider] = &[Provider::Claude, Provider::Codex, Provider::Copilot];
+
+struct ProviderPicker {
+    selected: usize,
+    /// If Some(cwd), the picker is opening an agent in a specific folder
+    /// (from Ctrl+Shift+N flow). Otherwise uses the current cwd.
+    target_cwd: Option<String>,
+}
+
+impl ProviderPicker {
+    fn new() -> Self {
+        Self { selected: 0, target_cwd: None }
+    }
+
+    fn open(&mut self, target_cwd: Option<String>) {
+        self.selected = 0;
+        self.target_cwd = target_cwd;
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        let n = PROVIDER_CHOICES.len() as i32;
+        let new = (self.selected as i32 + delta).rem_euclid(n);
+        self.selected = new as usize;
+    }
+
+    fn current(&self) -> Provider {
+        PROVIDER_CHOICES[self.selected]
+    }
+
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let w = 40u16.min(area.width.saturating_sub(4));
+        let h = (PROVIDER_CHOICES.len() as u16 + 4).min(area.height.saturating_sub(4));
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+
+        let picker_area = Rect::new(x, y, w, h);
+        frame.render_widget(Clear, picker_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.text))
+            .title(Span::styled(
+                " New Agent ",
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ));
+
+        let inner = block.inner(picker_area);
+        frame.render_widget(block, picker_area);
+
+        if inner.height < 2 {
+            return;
+        }
+
+        let items: Vec<ListItem> = PROVIDER_CHOICES
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let is_selected = i == self.selected;
+                let (prefix, style) = if is_selected {
+                    ("▸ ", Style::default().fg(theme.text).add_modifier(Modifier::BOLD | Modifier::REVERSED))
+                } else {
+                    ("  ", Style::default().fg(theme.text))
+                };
+                let label = format!("{}. {}", i + 1, p.label());
+                ListItem::new(Line::from(vec![
+                    Span::styled(prefix, style),
+                    Span::styled(label, style),
+                ]))
+            })
+            .collect();
+
+        frame.render_widget(List::new(items), inner);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +293,7 @@ pub struct App {
     palette: Palette,
     file_picker: FilePicker,
     folder_input: FolderInput,
+    provider_picker: ProviderPicker,
     file_tree: FileTree,
     editor: Editor,
     diff_viewer: DiffViewer,
@@ -230,8 +312,6 @@ pub struct App {
     /// Cached content area x-range for drag hit-testing
     content_area_x: u16,
     content_area_width: u16,
-    /// Whether the menu bar is visible
-    menu_bar_open: bool,
     /// Channel for receiving AI edit completion signals
     ai_rx: mpsc::Receiver<AiEditResult>,
     ai_tx: mpsc::Sender<AiEditResult>,
@@ -250,6 +330,7 @@ impl App {
             palette: Palette::new(),
             file_picker: FilePicker::new(),
             folder_input: FolderInput::new(),
+            provider_picker: ProviderPicker::new(),
             file_tree: FileTree::new(),
             editor: Editor::new(),
             diff_viewer: DiffViewer::new(),
@@ -264,7 +345,6 @@ impl App {
             dragging_editor_border: false,
             content_area_x: 0,
             content_area_width: 0,
-            menu_bar_open: true,
             ai_rx,
             ai_tx,
         }
@@ -498,6 +578,7 @@ impl App {
             Overlay::Palette => return self.handle_palette_key(key),
             Overlay::FilePicker => return self.handle_picker_key(key),
             Overlay::FolderInput => return self.handle_folder_input_key(key),
+            Overlay::ProviderPicker => return self.handle_provider_picker_key(key),
             Overlay::Editor => return self.handle_editor_key(key),
             Overlay::Diff => return self.handle_diff_key(key),
             Overlay::Deps => return self.handle_deps_key(key),
@@ -522,7 +603,7 @@ impl App {
 
         match action {
             KeyAction::Quit => self.should_quit = true,
-            KeyAction::NewAgent => self.add_agent()?,
+            KeyAction::NewAgent => self.open_provider_picker(),
             KeyAction::NewAgentInFolder => {
                 let cwd = self.current_cwd();
                 self.folder_input.open(&cwd);
@@ -684,8 +765,10 @@ impl App {
                 if let Some(cmd) = self.palette.execute() {
                     self.overlay = Overlay::None;
                     match cmd.as_str() {
-                        "new" => self.add_agent()?,
+                        "new" => self.open_provider_picker(),
+                        "new_claude" => self.add_agent_with_provider(Provider::Claude)?,
                         "new_codex" => self.add_agent_with_provider(Provider::Codex)?,
+                        "new_copilot" => self.add_agent_with_provider(Provider::Copilot)?,
                         "new_folder" => {
                             let cwd = self.current_cwd();
                             self.folder_input.open(&cwd);
@@ -749,9 +832,6 @@ impl App {
                                 self.set_status("Open a file first (Ctrl+O)");
                             }
                         }
-                        "menu" => {
-                            self.menu_bar_open = !self.menu_bar_open;
-                        }
                         "palette" => {
                             // Already closing from execute()
                         }
@@ -783,8 +863,8 @@ impl App {
             KeyCode::Enter => {
                 if let Some(path) = self.folder_input.confirm() {
                     self.folder_input.close();
-                    self.overlay = Overlay::None;
-                    self.add_agent_in(path)?;
+                    self.provider_picker.open(Some(path));
+                    self.overlay = Overlay::ProviderPicker;
                 }
             }
             KeyCode::Tab => {
@@ -831,6 +911,43 @@ impl App {
             KeyCode::Up => self.file_picker.move_selection(-1),
             KeyCode::Down => self.file_picker.move_selection(1),
             _ => {}
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Overlay: Provider Picker
+    // -----------------------------------------------------------------------
+
+    fn handle_provider_picker_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.provider_picker.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.provider_picker.move_selection(1),
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < PROVIDER_CHOICES.len() {
+                    self.provider_picker.selected = idx;
+                    self.confirm_provider_picker()?;
+                }
+            }
+            KeyCode::Enter => {
+                self.confirm_provider_picker()?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn confirm_provider_picker(&mut self) -> anyhow::Result<()> {
+        let provider = self.provider_picker.current();
+        let target_cwd = self.provider_picker.target_cwd.take();
+        self.overlay = Overlay::None;
+        match target_cwd {
+            Some(cwd) => self.add_agent_in_with_provider(cwd, provider)?,
+            None => self.add_agent_with_provider(provider)?,
         }
         Ok(())
     }
@@ -1184,7 +1301,7 @@ impl App {
     fn handle_resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
         let sidebar_w = if self.sidebar_open { SIDEBAR_WIDTH } else { 0 };
         let available_cols = cols.saturating_sub(sidebar_w);
-        let chrome = 1 + if self.menu_bar_open { 1u16 } else { 0 }; // status bar + optional menu
+        let chrome = 1u16; // status bar
         let areas = grid::compute_grid(
             Rect::new(0, 0, available_cols, rows.saturating_sub(chrome)),
             self.agents.len(),
@@ -1240,12 +1357,10 @@ impl App {
     // Agent lifecycle
     // -----------------------------------------------------------------------
 
-    fn add_agent(&mut self) -> anyhow::Result<()> {
-        self.add_agent_with_provider(Provider::Claude)
-    }
-
-    fn add_agent_in(&mut self, cwd: String) -> anyhow::Result<()> {
-        self.add_agent_in_with_provider(cwd, Provider::Claude)
+    /// Open the provider picker overlay — Ctrl+N entrypoint.
+    fn open_provider_picker(&mut self) {
+        self.provider_picker.open(None);
+        self.overlay = Overlay::ProviderPicker;
     }
 
     fn add_agent_with_provider(&mut self, provider: Provider) -> anyhow::Result<()> {
@@ -1282,6 +1397,14 @@ impl App {
                     (cli.to_string_lossy().to_string(), fs_agent::codex_args())
                 } else {
                     self.set_status("Codex CLI not found — install with: npm i -g @openai/codex");
+                    return Ok(());
+                }
+            }
+            Provider::Copilot => {
+                if let Some(cli) = fs_agent::find_copilot_cli() {
+                    (cli.to_string_lossy().to_string(), fs_agent::copilot_args())
+                } else {
+                    self.set_status("Copilot CLI not found — install with: npm i -g @github/copilot");
                     return Ok(());
                 }
             }
@@ -1465,28 +1588,13 @@ impl App {
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
-        // Split vertically: menu bar (optional) + main content + 1-row status bar
-        let mut constraints = Vec::new();
-        if self.menu_bar_open {
-            constraints.push(Constraint::Length(1));
-        }
-        constraints.push(Constraint::Min(1));
-        constraints.push(Constraint::Length(1));
+        // Split vertically: main content + 1-row status bar
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(constraints)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
             .split(area);
-
-        let (menu_area, main_area, status_area) = if self.menu_bar_open {
-            (Some(chunks[0]), chunks[1], chunks[2])
-        } else {
-            (None, chunks[0], chunks[1])
-        };
-
-        // Render menu bar
-        if let Some(ma) = menu_area {
-            render::render_menu_bar(frame, ma, &self.theme);
-        }
+        let main_area = chunks[0];
+        let status_area = chunks[1];
 
         // Split horizontally: optional sidebar + content area
         let (sidebar_area, content_area) = if self.sidebar_open {
@@ -1552,6 +1660,8 @@ impl App {
                 " ↑↓ navigate │ Enter open │ Esc cancel ",
             Overlay::FolderInput =>
                 " Tab complete │ Enter confirm │ Esc cancel ",
+            Overlay::ProviderPicker =>
+                " ↑↓ navigate │ 1-3 select │ Enter confirm │ Esc cancel ",
             Overlay::Palette =>
                 " ↑↓ navigate │ Enter run │ Esc cancel ",
             Overlay::Deps =>
@@ -1579,6 +1689,7 @@ impl App {
             Overlay::Palette    => self.palette.render(frame, area, &self.theme),
             Overlay::FilePicker => self.file_picker.render(frame, area, &self.theme),
             Overlay::FolderInput => self.folder_input.render(frame, area, &self.theme),
+            Overlay::ProviderPicker => self.provider_picker.render(frame, area, &self.theme),
             Overlay::Editor     => {} // rendered inline as side panel above
             Overlay::Diff       => self.diff_viewer.render(frame, main_area, &self.theme),
             Overlay::Deps       => self.deps_viewer.render(frame, main_area, &self.theme),

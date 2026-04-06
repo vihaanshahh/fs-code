@@ -66,6 +66,7 @@ pub fn render_pane(
     let provider_tag = match agent.provider {
         fs_core::Provider::Claude => "",
         fs_core::Provider::Codex => " [Codex]",
+        fs_core::Provider::Copilot => " [Copilot]",
     };
     let folder = std::path::Path::new(&agent.cwd)
         .file_name()
@@ -200,49 +201,6 @@ fn map_color(color: AnsiColor, default: Color) -> Color {
 }
 
 // ---------------------------------------------------------------------------
-// Menu bar — persistent top row with all commands
-// ---------------------------------------------------------------------------
-
-pub fn render_menu_bar(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let items: &[(&str, &str)] = &[
-        ("^N", "New"),
-        ("^⇧N", "New…"),
-        ("^W", "Close"),
-        ("^O", "Open"),
-        ("^F", "Focus Ed"),
-        ("^D", "Diff"),
-        ("^E", "Tree"),
-        ("^I", "Deps"),
-        ("^K", "Palette"),
-        ("^S", "Save"),
-        ("^G", "AI Edit"),
-        ("^Q", "Quit"),
-    ];
-
-    let mut spans = Vec::new();
-    for (key, label) in items {
-        spans.push(Span::styled(
-            format!(" {} ", key),
-            Style::default().fg(Color::Black).bg(theme.text_muted),
-        ));
-        spans.push(Span::styled(
-            format!("{} ", label),
-            Style::default().fg(theme.text),
-        ));
-    }
-
-    // Pad remainder
-    let used: usize = spans.iter().map(|s| s.content.len()).sum();
-    let remaining = (area.width as usize).saturating_sub(used);
-    spans.push(Span::styled(" ".repeat(remaining), Style::default()));
-
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Reset)),
-        area,
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Status bar
 // ---------------------------------------------------------------------------
 
@@ -272,6 +230,7 @@ pub fn render_status_bar(
         for (i, agent) in agents.iter().enumerate() {
             let ptag = match agent.provider {
                 fs_core::Provider::Codex => " ᶜˣ",
+                fs_core::Provider::Copilot => " ᵍᶜ",
                 _ => "",
             };
             if i == focused {

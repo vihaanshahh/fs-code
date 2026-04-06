@@ -18,8 +18,10 @@ struct PaletteEntry {
 
 const COMMANDS: &[PaletteEntry] = &[
     // Agents
-    PaletteEntry { id: "new",        label: "New Agent (Claude)",      shortcut: "Ctrl+N",       category: "Agents" },
+    PaletteEntry { id: "new",        label: "New Agent…",              shortcut: "Ctrl+N",       category: "Agents" },
+    PaletteEntry { id: "new_claude", label: "New Agent (Claude)",      shortcut: "",              category: "Agents" },
     PaletteEntry { id: "new_codex",  label: "New Agent (Codex)",       shortcut: "",              category: "Agents" },
+    PaletteEntry { id: "new_copilot",label: "New Agent (Copilot)",     shortcut: "",              category: "Agents" },
     PaletteEntry { id: "new_folder", label: "New Agent in Folder…",    shortcut: "Ctrl+T",        category: "Agents" },
     PaletteEntry { id: "close",      label: "Close Agent / Editor",    shortcut: "Ctrl+W",       category: "Agents" },
     PaletteEntry { id: "focus_next", label: "Focus Next Agent",        shortcut: "Ctrl+→ / Tab", category: "Agents" },
@@ -43,7 +45,6 @@ const COMMANDS: &[PaletteEntry] = &[
     PaletteEntry { id: "goto_end",   label: "Go to End of File",       shortcut: "Ctrl+End",     category: "Editor" },
     // View
     PaletteEntry { id: "palette",    label: "Toggle Command Palette",  shortcut: "Ctrl+K",       category: "View" },
-    PaletteEntry { id: "menu",       label: "Toggle Menu Bar",         shortcut: "",              category: "View" },
     PaletteEntry { id: "scroll_up",  label: "Scroll Terminal Up",      shortcut: "Shift+↑",      category: "View" },
     PaletteEntry { id: "scroll_dn",  label: "Scroll Terminal Down",    shortcut: "Shift+↓",      category: "View" },
     // App

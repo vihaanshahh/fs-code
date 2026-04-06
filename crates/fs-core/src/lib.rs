@@ -25,6 +25,7 @@ pub type TerminalId = String;
 pub enum Provider {
     Claude,
     Codex,
+    Copilot,
 }
 
 impl Provider {
@@ -32,6 +33,7 @@ impl Provider {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::Copilot => "Copilot",
         }
     }
 
@@ -39,6 +41,7 @@ impl Provider {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Copilot => "copilot",
         }
     }
 }
