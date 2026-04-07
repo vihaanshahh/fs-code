@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener};
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::Config as TermConfig;
+use alacritty_terminal::term::{Config as TermConfig, TermMode};
 use alacritty_terminal::vte::ansi;
 use alacritty_terminal::Term;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -69,6 +69,9 @@ pub struct TerminalInstance {
 
     /// Set to true when the PTY reader thread detects EOF.
     pub exited: Arc<std::sync::atomic::AtomicBool>,
+
+    /// Monotonic counter bumped whenever the PTY reader applies new output.
+    revision: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TerminalInstance {
@@ -117,11 +120,13 @@ impl TerminalInstance {
         let term_arc = Arc::new(Mutex::new(term));
 
         let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let revision = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         // Background thread: read PTY output → feed into Term
         let mut reader = pair.master.try_clone_reader()?;
         let term_for_reader = Arc::clone(&term_arc);
         let exited_flag = Arc::clone(&exited);
+        let revision_flag = Arc::clone(&revision);
 
         std::thread::Builder::new()
             .name("pty-reader".into())
@@ -139,6 +144,7 @@ impl TerminalInstance {
                                 for byte in &buf[..n] {
                                     parser.advance(&mut *t, *byte);
                                 }
+                                revision_flag.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                         Err(_) => break,
@@ -162,6 +168,7 @@ impl TerminalInstance {
             cols,
             rows,
             exited,
+            revision,
         })
     }
 
@@ -197,5 +204,21 @@ impl TerminalInstance {
     /// Check if the PTY process has exited.
     pub fn has_exited(&self) -> bool {
         self.exited.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Revision of the terminal contents, incremented on PTY output.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// True if the underlying terminal is currently using the alternate screen
+    /// buffer (full-screen TUIs like vim, less, copilot CLI). In this mode
+    /// alacritty does not push lines into scrollback history, so our local
+    /// scroll mechanism is a no-op — scroll input must be forwarded to the PTY.
+    pub fn is_alt_screen(&self) -> bool {
+        match self.term.lock() {
+            Ok(t) => t.mode().contains(TermMode::ALT_SCREEN),
+            Err(_) => false,
+        }
     }
 }

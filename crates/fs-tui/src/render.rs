@@ -67,6 +67,7 @@ pub fn render_pane(
         fs_core::Provider::Claude => "",
         fs_core::Provider::Codex => " [Codex]",
         fs_core::Provider::Copilot => " [Copilot]",
+        fs_core::Provider::Gemini => " [Gemini]",
     };
     let folder = std::path::Path::new(&agent.cwd)
         .file_name()
@@ -118,9 +119,16 @@ pub fn render_pane(
 // ---------------------------------------------------------------------------
 
 fn render_terminal_content(frame: &mut Frame, area: Rect, instance: &TerminalInstance, scroll_offset: usize) {
-    let term = match instance.term.lock() {
+    let term = match instance.term.try_lock() {
         Ok(t) => t,
-        Err(_) => return,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            let busy = Paragraph::new("updating...")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center);
+            frame.render_widget(busy, area);
+            return;
+        }
+        Err(std::sync::TryLockError::Poisoned(_)) => return,
     };
 
     let content = term.renderable_content();
@@ -231,6 +239,7 @@ pub fn render_status_bar(
             let ptag = match agent.provider {
                 fs_core::Provider::Codex => " ᶜˣ",
                 fs_core::Provider::Copilot => " ᵍᶜ",
+                fs_core::Provider::Gemini => " ᵍᵐ",
                 _ => "",
             };
             if i == focused {

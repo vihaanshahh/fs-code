@@ -26,6 +26,7 @@ pub enum Provider {
     Claude,
     Codex,
     Copilot,
+    Gemini,
 }
 
 impl Provider {
@@ -34,6 +35,7 @@ impl Provider {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Copilot => "Copilot",
+            Self::Gemini => "Gemini",
         }
     }
 
@@ -42,6 +44,7 @@ impl Provider {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Copilot => "copilot",
+            Self::Gemini => "gemini",
         }
     }
 }

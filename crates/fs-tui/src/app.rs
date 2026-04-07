@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::grid::Dimensions;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyboardEnhancementFlags, KeyModifiers, MouseEvent, MouseEventKind, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags, EnableBracketedPaste, DisableBracketedPaste};
@@ -60,7 +60,7 @@ enum Overlay {
 // Provider picker — small popup for choosing which agent to spawn
 // ---------------------------------------------------------------------------
 
-const PROVIDER_CHOICES: &[Provider] = &[Provider::Claude, Provider::Codex, Provider::Copilot];
+const PROVIDER_CHOICES: &[Provider] = &[Provider::Claude, Provider::Codex, Provider::Copilot, Provider::Gemini];
 
 struct ProviderPicker {
     selected: usize,
@@ -309,12 +309,15 @@ pub struct App {
     editor_split_pct: u16,
     /// Whether we are currently dragging the editor border
     dragging_editor_border: bool,
+    /// Editor focus mode — editor takes the dominant area, agents shrink to a thin sidebar
+    editor_focus_mode: bool,
     /// Cached content area x-range for drag hit-testing
     content_area_x: u16,
     content_area_width: u16,
     /// Channel for receiving AI edit completion signals
     ai_rx: mpsc::Receiver<AiEditResult>,
     ai_tx: mpsc::Sender<AiEditResult>,
+    last_terminal_revisions: HashMap<String, u64>,
 }
 
 impl App {
@@ -343,10 +346,12 @@ impl App {
             theme: theme::theme(ThemeMode::default()),
             editor_split_pct: 45,
             dragging_editor_border: false,
+            editor_focus_mode: false,
             content_area_x: 0,
             content_area_width: 0,
             ai_rx,
             ai_tx,
+            last_terminal_revisions: HashMap::new(),
         }
     }
 
@@ -384,64 +389,25 @@ impl App {
         &mut self,
         term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> anyhow::Result<()> {
+        let mut needs_redraw = true;
         loop {
-            term.draw(|frame| self.render(frame))?;
+            needs_redraw |= self.expire_status_if_needed(Instant::now());
+            needs_redraw |= self.poll_ai_results();
+            needs_redraw |= self.sync_terminal_revisions();
+
+            if needs_redraw {
+                term.draw(|frame| self.render(frame))?;
+                needs_redraw = false;
+            }
 
             if self.should_quit {
                 break;
             }
 
-            // Expire status messages after 3 seconds
-            if let Some((_, at)) = &self.status_msg {
-                if at.elapsed() > Duration::from_secs(3) {
-                    self.status_msg = None;
-                }
-            }
-
-            // Expire AI status after 5 seconds (only non-working status)
-            if !self.editor.ai_working {
-                if let Some(ref s) = self.editor.ai_status {
-                    if !s.contains("working") {
-                        // We'll clear it on next tick via status_msg instead
-                    }
-                }
-            }
-
-            // Poll for completed AI edits
-            if let Ok(result) = self.ai_rx.try_recv() {
-                self.editor.ai_working = false;
-                if result.success {
-                    // Read new content before reloading (for diff)
-                    let new_content = std::fs::read_to_string(&result.file_path).ok();
-
-                    match self.editor.reload() {
-                        Ok(()) => {
-                            self.editor.ai_status = Some(result.message.clone());
-                            self.set_status(result.message);
-                        }
-                        Err(e) => {
-                            self.editor.ai_status = Some(format!("Reload failed: {}", e));
-                            self.set_status(format!("AI edit done but reload failed: {}", e));
-                        }
-                    }
-
-                    // Auto-open diff viewer showing what AI changed
-                    if let (Some(old), Some(new)) = (result.original_content, new_content) {
-                        let diff_text = crate::diff::unified_diff(&result.file_path, &old, &new);
-                        if !diff_text.is_empty() {
-                            self.diff_viewer.open_with(&diff_text);
-                            self.overlay = Overlay::Diff;
-                        }
-                    }
-                } else {
-                    self.editor.ai_status = Some(result.message.clone());
-                    self.set_status(result.message);
-                }
-            }
-
-            if event::poll(Duration::from_millis(16))? {
+            if event::poll(Duration::from_millis(50))? {
                 let ev = event::read()?;
                 self.handle_event(ev)?;
+                needs_redraw = true;
             }
         }
         Ok(())
@@ -449,6 +415,90 @@ impl App {
 
     fn set_status(&mut self, msg: impl Into<String>) {
         self.status_msg = Some((msg.into(), std::time::Instant::now()));
+    }
+
+    fn toggle_editor_focus_mode(&mut self) {
+        if !self.editor.is_open() {
+            self.set_status("Open a file first to enter editor focus mode");
+            return;
+        }
+        self.editor_focus_mode = !self.editor_focus_mode;
+        if self.editor_focus_mode {
+            self.set_status("Editor focus mode on — agents minimized");
+        } else {
+            self.set_status("Editor focus mode off");
+        }
+        // Resize PTYs so agent terminals adapt to their new (smaller/larger) panes.
+        if let Ok((c, r)) = crossterm::terminal::size() {
+            let _ = self.handle_resize(c, r);
+        }
+    }
+
+    fn expire_status_if_needed(&mut self, now: Instant) -> bool {
+        if let Some((_, at)) = &self.status_msg {
+            if now.duration_since(*at) > Duration::from_secs(3) {
+                self.status_msg = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn poll_ai_results(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.ai_rx.try_recv() {
+            changed = true;
+            self.editor.ai_working = false;
+            if result.success {
+                // Read new content before reloading (for diff)
+                let new_content = std::fs::read_to_string(&result.file_path).ok();
+
+                match self.editor.reload() {
+                    Ok(()) => {
+                        self.editor.ai_status = Some(result.message.clone());
+                        self.set_status(result.message);
+                    }
+                    Err(e) => {
+                        self.editor.ai_status = Some(format!("Reload failed: {}", e));
+                        self.set_status(format!("AI edit done but reload failed: {}", e));
+                    }
+                }
+
+                // Auto-open diff viewer showing what AI changed
+                if let (Some(old), Some(new)) = (result.original_content, new_content) {
+                    let diff_text = crate::diff::unified_diff(&result.file_path, &old, &new);
+                    if !diff_text.is_empty() {
+                        self.diff_viewer.open_with(&diff_text);
+                        self.overlay = Overlay::Diff;
+                    }
+                }
+            } else {
+                self.editor.ai_status = Some(result.message.clone());
+                self.set_status(result.message);
+            }
+        }
+        changed
+    }
+
+    fn sync_terminal_revisions(&mut self) -> bool {
+        let mut changed = false;
+        self.last_terminal_revisions
+            .retain(|terminal_id, _| self.terminal_mgr.get(terminal_id).is_some());
+
+        for terminal_id in self.agent_terminals.values() {
+            let Some(instance) = self.terminal_mgr.get(terminal_id) else { continue };
+            let revision = instance.revision();
+            let entry = self
+                .last_terminal_revisions
+                .entry(terminal_id.clone())
+                .or_insert(0);
+            if *entry != revision {
+                *entry = revision;
+                changed = true;
+            }
+        }
+
+        changed
     }
 
     // -----------------------------------------------------------------------
@@ -546,7 +596,8 @@ impl App {
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 // Check if clicking on the editor/agent border for drag resize
-                if self.editor.is_open() && self.content_area_width > 0 {
+                // (disabled in editor focus mode — split is fixed there).
+                if self.editor.is_open() && self.content_area_width > 0 && !self.editor_focus_mode {
                     let agent_pct = 100u16.saturating_sub(self.editor_split_pct);
                     let border_x = self.content_area_x
                         + (self.content_area_width as u32 * agent_pct as u32 / 100) as u16;
@@ -674,6 +725,17 @@ impl App {
                             self.overlay = Overlay::Editor;
                         }
                     }
+                    // Ctrl+B: toggle editor focus mode (big editor, small agents on side)
+                    (true, _, KeyCode::Char('b')) => {
+                        self.toggle_editor_focus_mode();
+                    }
+                    // Alt+Z: toggle word wrap in the editor
+                    _ if key.modifiers.contains(KeyModifiers::ALT)
+                        && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z')) =>
+                    {
+                        let on = self.editor.toggle_wrap();
+                        self.set_status(if on { "Word wrap on" } else { "Word wrap off" });
+                    }
                     // Ctrl+I: inspect deps for the open editor file (or selected sidebar file)
                     (true, _, KeyCode::Char('i')) => {
                         self.open_deps_viewer();
@@ -684,6 +746,29 @@ impl App {
                     // Shift+PageUp/PageDown: scroll a page
                     (_, true, KeyCode::PageUp) => self.scroll_focused(-20),
                     (_, true, KeyCode::PageDown) => self.scroll_focused(20),
+                    // Alt+Up/Down/PgUp/PgDn: scroll the focused chat (works in every
+                    // terminal — Shift+arrows require kitty keyboard protocol which
+                    // not all terminals support).
+                    _ if key.modifiers.contains(KeyModifiers::ALT)
+                        && matches!(key.code, KeyCode::Up) =>
+                    {
+                        self.scroll_focused(-1);
+                    }
+                    _ if key.modifiers.contains(KeyModifiers::ALT)
+                        && matches!(key.code, KeyCode::Down) =>
+                    {
+                        self.scroll_focused(1);
+                    }
+                    _ if key.modifiers.contains(KeyModifiers::ALT)
+                        && matches!(key.code, KeyCode::PageUp) =>
+                    {
+                        self.scroll_focused(-20);
+                    }
+                    _ if key.modifiers.contains(KeyModifiers::ALT)
+                        && matches!(key.code, KeyCode::PageDown) =>
+                    {
+                        self.scroll_focused(20);
+                    }
                     _ => {
                         // Any regular keypress snaps back to live view
                         if let Some(agent) = self.agents.get(self.focused) {
@@ -769,6 +854,12 @@ impl App {
                         "new_claude" => self.add_agent_with_provider(Provider::Claude)?,
                         "new_codex" => self.add_agent_with_provider(Provider::Codex)?,
                         "new_copilot" => self.add_agent_with_provider(Provider::Copilot)?,
+                        "new_gemini" => self.add_agent_with_provider(Provider::Gemini)?,
+                        "toggle_focus" => self.toggle_editor_focus_mode(),
+                        "toggle_wrap" => {
+                            let on = self.editor.toggle_wrap();
+                            self.set_status(if on { "Word wrap on" } else { "Word wrap off" });
+                        }
                         "new_folder" => {
                             let cwd = self.current_cwd();
                             self.folder_input.open(&cwd);
@@ -1327,6 +1418,13 @@ impl App {
     // -----------------------------------------------------------------------
 
     /// Scroll the focused pane. Negative delta = scroll up (into history), positive = toward live.
+    ///
+    /// Two paths:
+    /// 1. Main-screen TUIs (Codex, Claude, Gemini): manipulate alacritty's
+    ///    scrollback offset locally — fast, never disturbs the CLI.
+    /// 2. Alt-screen TUIs (Copilot, vim, less): alacritty has no scrollback in
+    ///    alt-screen mode, so forward arrow / PgUp / PgDn key sequences to the
+    ///    PTY and let the CLI's own UI scroll itself.
     fn scroll_focused(&mut self, delta: i32) {
         let Some(agent) = self.agents.get(self.focused) else { return };
         let terminal_id = match self.agent_terminals.get(&agent.id) {
@@ -1334,9 +1432,46 @@ impl App {
             None => return,
         };
         let Some(instance) = self.terminal_mgr.get(&terminal_id) else { return };
-        let max_scroll = instance.term.lock()
-            .map(|t| t.grid().history_size())
-            .unwrap_or(0);
+
+        // Alt-screen path: forward to PTY as arrow / PgUp / PgDn key sequences.
+        if instance.is_alt_screen() {
+            // Map magnitude → key sequence count.
+            // delta == ±1   → single arrow press
+            // delta == ±20  → single PgUp/PgDn press (page granularity)
+            // anything else → repeated arrow presses
+            let bytes: Vec<u8> = if delta <= -20 {
+                b"\x1b[5~".to_vec() // PgUp
+            } else if delta >= 20 {
+                b"\x1b[6~".to_vec() // PgDn
+            } else if delta < 0 {
+                let n = (-delta) as usize;
+                let mut v = Vec::with_capacity(3 * n);
+                for _ in 0..n {
+                    v.extend_from_slice(b"\x1b[A"); // Up
+                }
+                v
+            } else if delta > 0 {
+                let n = delta as usize;
+                let mut v = Vec::with_capacity(3 * n);
+                for _ in 0..n {
+                    v.extend_from_slice(b"\x1b[B"); // Down
+                }
+                v
+            } else {
+                return;
+            };
+            let _ = instance.write(&bytes);
+            return;
+        }
+
+        // Main-screen path: manipulate local scrollback offset.
+        // Use a blocking lock here — a one-shot user scroll can wait the few µs
+        // for the PTY reader to release the mutex. (Render uses try_lock to stay
+        // responsive; user actions should not silently drop.)
+        let max_scroll = match instance.term.lock() {
+            Ok(t) => t.grid().history_size(),
+            Err(_) => return,
+        };
 
         let current = *self.scroll_offsets.get(&agent.id).unwrap_or(&0);
         let new_offset = if delta < 0 {
@@ -1408,6 +1543,14 @@ impl App {
                     return Ok(());
                 }
             }
+            Provider::Gemini => {
+                if let Some(cli) = fs_agent::find_gemini_cli() {
+                    (cli.to_string_lossy().to_string(), fs_agent::gemini_args())
+                } else {
+                    self.set_status("Gemini CLI not found — install with: npm i -g @google/gemini-cli");
+                    return Ok(());
+                }
+            }
         };
 
         let env = fs_agent::build_clean_env();
@@ -1462,6 +1605,7 @@ impl App {
 
         if let Some(tid) = self.agent_terminals.remove(&agent.id) {
             self.terminal_mgr.close(&tid);
+            self.last_terminal_revisions.remove(&tid);
         }
         self.scroll_offsets.remove(&agent.id);
 
@@ -1575,10 +1719,17 @@ impl App {
     /// Check if a mouse position is over the editor panel area.
     fn is_mouse_over_editor(&self, col: u16, _row: u16) -> bool {
         if self.content_area_width == 0 { return false; }
-        let agent_pct = 100u16.saturating_sub(self.editor_split_pct);
-        let editor_start = self.content_area_x
-            + (self.content_area_width as u32 * agent_pct as u32 / 100) as u16;
-        col >= editor_start
+        if self.editor_focus_mode {
+            // Editor is on the LEFT in focus mode; agents take a small slice on the right.
+            let agent_w = ((self.content_area_width as u32 * 18 / 100) as u16).clamp(20, 36);
+            let editor_end = self.content_area_x + self.content_area_width.saturating_sub(agent_w);
+            col < editor_end
+        } else {
+            let agent_pct = 100u16.saturating_sub(self.editor_split_pct);
+            let editor_start = self.content_area_x
+                + (self.content_area_width as u32 * agent_pct as u32 / 100) as u16;
+            col >= editor_start
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1616,14 +1767,27 @@ impl App {
         self.content_area_x = content_area.x;
         self.content_area_width = content_area.width;
 
-        // Split content: agent grid on left, editor panel on right (when open)
+        // Split content: agent grid + optional editor panel.
+        // - Default: agents left, editor right, sized by `editor_split_pct`.
+        // - Focus mode: editor LEFT (dominant), agents shrunk to a thin column on the RIGHT.
         let (agent_area, editor_panel_area) = if self.editor.is_open() {
-            let agent_pct = 100u16.saturating_sub(self.editor_split_pct);
-            let h = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(agent_pct), Constraint::Percentage(self.editor_split_pct)])
-                .split(content_area);
-            (h[0], Some(h[1]))
+            if self.editor_focus_mode {
+                // Agents get a small fixed slice (or 18% — whichever is bigger up to 36 cols)
+                let agent_w = ((content_area.width as u32 * 18 / 100) as u16).clamp(20, 36);
+                let editor_w = content_area.width.saturating_sub(agent_w);
+                let h = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(editor_w), Constraint::Length(agent_w)])
+                    .split(content_area);
+                (h[1], Some(h[0]))
+            } else {
+                let agent_pct = 100u16.saturating_sub(self.editor_split_pct);
+                let h = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(agent_pct), Constraint::Percentage(self.editor_split_pct)])
+                    .split(content_area);
+                (h[0], Some(h[1]))
+            }
         } else {
             (content_area, None)
         };
@@ -1669,9 +1833,9 @@ impl App {
             Overlay::None if self.sidebar_focused =>
                 " ↑↓/jk navigate │ Enter expand/open │ e edit │ d diff │ i deps │ r refresh │ Esc unfocus ",
             Overlay::None if self.editor.is_open() =>
-                " ^F focus editor │ ^W close │ Tab cycle │ ^E tree │ ^D diff │ ^I deps │ ^K palette ",
+                " ^F focus editor │ ^B big editor │ ^W close │ Tab cycle │ ^E tree │ ^D diff │ ^I deps │ ^K palette ",
             Overlay::None =>
-                " ^N new │ ^⇧N new in folder │ ^W close │ Tab cycle │ ^E tree │ ^O open │ ^D diff │ ^K palette │ ^Q quit ",
+                " ^N new │ ^W close │ Tab cycle │ ^E tree │ ^O open │ Alt+↑↓ scroll chat │ ^K palette │ ^Q quit ",
         };
 
         render::render_status_bar(

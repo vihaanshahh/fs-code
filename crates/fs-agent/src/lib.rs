@@ -126,3 +126,39 @@ pub fn codex_args() -> Vec<String> {
 pub fn copilot_args() -> Vec<String> {
     Vec::new()
 }
+
+/// Find the Gemini CLI binary.
+///
+/// Looks for the interactive `gemini` binary shipped by `@google/gemini-cli`.
+/// Falls back to common npm global install locations.
+pub fn find_gemini_cli() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("FLUIDSTATE_GEMINI_PATH") {
+        let pb = PathBuf::from(&p);
+        if pb.exists() {
+            return Some(pb);
+        }
+    }
+
+    if let Ok(p) = which::which("gemini") {
+        return Some(p);
+    }
+
+    let home = dirs::home_dir().unwrap_or_default();
+    let candidates = [
+        home.join(".npm-global/bin/gemini"),
+        PathBuf::from("/usr/local/bin/gemini"),
+        PathBuf::from("/opt/homebrew/bin/gemini"),
+    ];
+    for c in &candidates {
+        if c.exists() {
+            return Some(c.clone());
+        }
+    }
+
+    None
+}
+
+/// Build arguments for launching Gemini CLI interactively in a PTY.
+pub fn gemini_args() -> Vec<String> {
+    Vec::new()
+}

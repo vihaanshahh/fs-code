@@ -9,7 +9,7 @@
 //!   - Scrolling with viewport tracking
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, BorderType, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Block, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::highlight::{self, Lang};
 use crate::theme::Theme;
@@ -47,6 +47,9 @@ pub struct Editor {
     pub ai_working: bool,
     /// Status message from last AI operation
     pub ai_status: Option<String>,
+    /// Soft word-wrap: when true, long lines flow onto multiple visual rows
+    /// instead of being clipped (and horizontal scroll is disabled).
+    pub wrap: bool,
 }
 
 impl Editor {
@@ -66,7 +69,17 @@ impl Editor {
             prompt_input: String::new(),
             ai_working: false,
             ai_status: None,
+            wrap: true,
         }
+    }
+
+    /// Toggle soft word-wrap. Returns the new state.
+    pub fn toggle_wrap(&mut self) -> bool {
+        self.wrap = !self.wrap;
+        if self.wrap {
+            self.scroll_x = 0;
+        }
+        self.wrap
     }
 
     pub fn is_open(&self) -> bool {
@@ -452,6 +465,11 @@ impl Editor {
     }
 
     fn ensure_visible_h(&mut self) {
+        if self.wrap {
+            // Word-wrap mode: no horizontal scrolling.
+            self.scroll_x = 0;
+            return;
+        }
         let margin = 4usize; // keep cursor this far from edges
         let w = self.viewport_width;
         if w == 0 { return; }
@@ -480,20 +498,11 @@ impl Editor {
         let ai_indicator = if self.ai_working { " ⟳ AI" } else { "" };
         let title = format!(" {}{}{} — {}/{} ", filename, dirty_marker, ai_indicator, self.cursor.0 + 1, self.lines.len());
 
-        let bottom_hint = if self.prompt_open {
-            " Enter submit │ Esc cancel "
-        } else if self.ai_working {
-            " AI is editing this file... "
-        } else if is_focused {
-            " ^G ask AI │ ^S save │ S-↑↓ jump │ C-←→ word │ C-D del line │ Esc unfocus"
-        } else {
-            " Ctrl+F / Tab focus editor "
-        };
-
+        // Borderless editor — single horizontal line on top carrying the title only.
+        // The global status bar handles hint text, so no bottom chrome is needed.
         let block = if is_focused {
             Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Thick)
+                .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.text))
                 .title(Span::styled(
                     title,
@@ -502,21 +511,13 @@ impl Editor {
                         .bg(theme.text)
                         .add_modifier(Modifier::BOLD),
                 ))
-                .title_bottom(Span::styled(
-                    bottom_hint,
-                    Style::default().fg(theme.text_muted),
-                ))
         } else {
             Block::default()
-                .borders(Borders::ALL)
+                .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.border))
                 .title(Span::styled(
                     title,
                     Style::default().fg(theme.text_muted).add_modifier(Modifier::BOLD),
-                ))
-                .title_bottom(Span::styled(
-                    bottom_hint,
-                    Style::default().fg(theme.text_muted),
                 ))
         };
 
@@ -539,33 +540,22 @@ impl Editor {
         // Compute syntax highlight spans for visible lines.
         let hl_spans = highlight::highlight_range(&self.lines, start, end, self.lang);
 
-        for (i, line_idx) in (start..end).enumerate() {
-            let y = inner.y + i as u16;
+        let total_rows = inner.height;
+        let mut row_y: u16 = 0;
+        let mut line_idx = start;
+
+        while line_idx < self.lines.len() && row_y < total_rows {
+            let i = line_idx - start;
             let is_cursor_line = line_idx == self.cursor.0;
 
-            // Gutter
-            let gutter = format!("{:>width$} │ ", line_idx + 1, width = (gutter_w - 3) as usize);
-            let gutter_style = if is_cursor_line {
-                Style::default().fg(theme.amber)
-            } else {
-                Style::default().fg(theme.text_muted)
-            };
-            frame.buffer_mut().set_string(inner.x, y, &gutter, gutter_style);
-
-            // Line content — render with syntax highlighting.
+            // Build per-char colour array for the full line.
             let line = &self.lines[line_idx];
             let base_fg = theme.text;
             let content_x = inner.x + gutter_w;
-            let sx0 = self.scroll_x; // first visible column
-
-            // Build a per-char colour array for the full line.
             let all_chars: Vec<char> = line.chars().collect();
             let total_chars = all_chars.len();
-
-            // Default colour for every char position.
             let mut colours: Vec<Color> = vec![base_fg; total_chars];
 
-            // Apply highlight spans (byte-indexed → char-indexed).
             let byte_to_char: Vec<usize> = {
                 let mut map = vec![0usize; line.len() + 1];
                 let mut ci = 0usize;
@@ -576,7 +566,6 @@ impl Editor {
                 map[line.len()] = ci;
                 map
             };
-
             if let Some(spans) = hl_spans.get(i) {
                 for sp in spans {
                     let cs = byte_to_char.get(sp.start).copied().unwrap_or(0);
@@ -587,45 +576,79 @@ impl Editor {
                 }
             }
 
-            // Visible slice of characters after horizontal scroll.
-            let vis_end = (sx0 + content_w).min(total_chars);
-            let vis_start = sx0.min(total_chars);
-
-            // Subtle highlight for the active cursor line when focused.
             let cursor_line_bg = if is_cursor_line && is_focused {
                 Some(Color::Indexed(236))
             } else {
                 None
             };
+            let gutter_style = if is_cursor_line {
+                Style::default().fg(theme.amber)
+            } else {
+                Style::default().fg(theme.text_muted)
+            };
 
-            // Render visible characters.
-            for ci in vis_start..vis_end {
-                let dx = (ci - sx0) as u16;
-                let sx = content_x + dx;
-                if sx >= inner.x + inner.width { break; }
-                let mut style = Style::default().fg(colours[ci]);
-                if let Some(bg) = cursor_line_bg {
-                    style = style.bg(bg);
-                }
-                frame.buffer_mut().set_string(sx, y, &all_chars[ci].to_string(), style);
-            }
-            // Pad remainder with spaces.
-            let rendered = vis_end.saturating_sub(vis_start);
-            for cx in rendered..content_w {
-                let sx = content_x + cx as u16;
-                if sx >= inner.x + inner.width { break; }
-                let pad_style = if let Some(bg) = cursor_line_bg {
-                    Style::default().bg(bg)
+            // Number of visual rows this logical line will occupy.
+            let chunks = if self.wrap && content_w > 0 {
+                if total_chars == 0 { 1 } else { (total_chars + content_w - 1) / content_w }
+            } else {
+                1
+            };
+
+            for chunk_i in 0..chunks {
+                if row_y >= total_rows { break; }
+                let y = inner.y + row_y;
+
+                // Gutter — line number on first chunk, continuation arrow on wraps.
+                if chunk_i == 0 {
+                    let gutter = format!("{:>width$} │ ", line_idx + 1, width = (gutter_w - 3) as usize);
+                    frame.buffer_mut().set_string(inner.x, y, &gutter, gutter_style);
                 } else {
-                    Style::default()
-                };
-                frame.buffer_mut().set_string(sx, y, " ", pad_style);
-            }
+                    let gutter = format!("{:>width$} ↪ ", "", width = (gutter_w - 3) as usize);
+                    frame.buffer_mut().set_string(inner.x, y, &gutter, gutter_style);
+                }
 
-            // Cursor — draw on top (only when editor is focused).
-            if is_cursor_line && is_focused {
-                if self.cursor.1 >= sx0 {
-                    let cursor_dx = (self.cursor.1 - sx0) as u16;
+                // Determine which character range is on this visual row.
+                let (chunk_start, chunk_end) = if self.wrap {
+                    let cs = chunk_i * content_w;
+                    let ce = (cs + content_w).min(total_chars);
+                    (cs, ce)
+                } else {
+                    let sx0 = self.scroll_x;
+                    let cs = sx0.min(total_chars);
+                    let ce = (sx0 + content_w).min(total_chars);
+                    (cs, ce)
+                };
+
+                // Render the visible characters.
+                for ci in chunk_start..chunk_end {
+                    let dx = (ci - chunk_start) as u16;
+                    let sx = content_x + dx;
+                    if sx >= inner.x + inner.width { break; }
+                    let mut style = Style::default().fg(colours[ci]);
+                    if let Some(bg) = cursor_line_bg {
+                        style = style.bg(bg);
+                    }
+                    frame.buffer_mut().set_string(sx, y, &all_chars[ci].to_string(), style);
+                }
+                // Pad remainder with spaces (so cursor-line bg fills the row).
+                let rendered = chunk_end.saturating_sub(chunk_start);
+                for cx in rendered..content_w {
+                    let sx = content_x + cx as u16;
+                    if sx >= inner.x + inner.width { break; }
+                    let pad_style = if let Some(bg) = cursor_line_bg {
+                        Style::default().bg(bg)
+                    } else {
+                        Style::default()
+                    };
+                    frame.buffer_mut().set_string(sx, y, " ", pad_style);
+                }
+
+                // Cursor — draw only if it falls inside this visual row.
+                if is_cursor_line && is_focused
+                    && self.cursor.1 >= chunk_start
+                    && self.cursor.1 < chunk_start + content_w
+                {
+                    let cursor_dx = (self.cursor.1 - chunk_start) as u16;
                     let cursor_x = content_x + cursor_dx;
                     if cursor_x < inner.x + inner.width {
                         let cursor_char = all_chars.get(self.cursor.1).copied().unwrap_or(' ');
@@ -637,7 +660,11 @@ impl Editor {
                         );
                     }
                 }
+
+                row_y += 1;
             }
+
+            line_idx += 1;
         }
 
         // AI prompt bar — rendered at the bottom of the editor inner area
