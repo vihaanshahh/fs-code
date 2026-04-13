@@ -110,7 +110,10 @@ pub enum AppEvent {
     /// A crossterm input event (key, mouse, resize)
     Input(crossterm::event::Event),
     /// PTY produced output for a terminal
-    PtyOutput { terminal_id: TerminalId, data: Vec<u8> },
+    PtyOutput {
+        terminal_id: TerminalId,
+        data: Vec<u8>,
+    },
     /// PTY process exited
     PtyExit { terminal_id: TerminalId, code: i32 },
     /// Tick — periodic redraw trigger

@@ -119,6 +119,16 @@ impl DepsViewer {
         }
     }
 
+    /// Switch to the imports section.
+    pub fn focus_imports(&mut self) {
+        self.section = Section::Imports;
+    }
+
+    /// Switch to the imported-by section.
+    pub fn focus_imported_by(&mut self) {
+        self.section = Section::ImportedBy;
+    }
+
     pub fn toggle_section(&mut self) {
         self.section = match self.section {
             Section::Imports => Section::ImportedBy,

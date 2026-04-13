@@ -18,40 +18,80 @@ struct PaletteEntry {
 
 const COMMANDS: &[PaletteEntry] = &[
     // Agents
-    PaletteEntry { id: "new",        label: "New Agent…",              shortcut: "Ctrl+N",       category: "Agents" },
-    PaletteEntry { id: "new_claude", label: "New Agent (Claude)",      shortcut: "",              category: "Agents" },
-    PaletteEntry { id: "new_codex",  label: "New Agent (Codex)",       shortcut: "",              category: "Agents" },
-    PaletteEntry { id: "new_copilot",label: "New Agent (Copilot)",     shortcut: "",              category: "Agents" },
-    PaletteEntry { id: "new_gemini", label: "New Agent (Gemini)",      shortcut: "",              category: "Agents" },
-    PaletteEntry { id: "toggle_focus", label: "Toggle Editor Focus Mode", shortcut: "Ctrl+B",     category: "Editor" },
-    PaletteEntry { id: "toggle_wrap",  label: "Toggle Word Wrap",          shortcut: "Alt+Z",     category: "Editor" },
-    PaletteEntry { id: "new_folder", label: "New Agent in Folder…",    shortcut: "Ctrl+T",        category: "Agents" },
-    PaletteEntry { id: "close",      label: "Close Agent / Editor",    shortcut: "Ctrl+W",       category: "Agents" },
-    PaletteEntry { id: "focus_next", label: "Focus Next Agent",        shortcut: "Ctrl+→ / Tab", category: "Agents" },
-    PaletteEntry { id: "focus_prev", label: "Focus Previous Agent",    shortcut: "Ctrl+←",       category: "Agents" },
-    // Files & Editor
-    PaletteEntry { id: "open",       label: "Open File",               shortcut: "Ctrl+O",       category: "Files" },
-    PaletteEntry { id: "save",       label: "Save File",               shortcut: "Ctrl+S",       category: "Files" },
-    PaletteEntry { id: "focus_ed",   label: "Focus Editor",            shortcut: "Ctrl+F / Tab", category: "Files" },
-    PaletteEntry { id: "tree",       label: "Toggle File Tree",        shortcut: "Ctrl+E",       category: "Files" },
-    PaletteEntry { id: "diff",       label: "View Diff",               shortcut: "Ctrl+D",       category: "Files" },
-    PaletteEntry { id: "deps",       label: "Inspect Deps",            shortcut: "Ctrl+I",       category: "Files" },
-    // Editor navigation
-    PaletteEntry { id: "ai_edit",    label: "AI Edit File",            shortcut: "Ctrl+A",       category: "Editor" },
-    PaletteEntry { id: "del_line",   label: "Delete Line",             shortcut: "Ctrl+D",       category: "Editor" },
-    PaletteEntry { id: "dup_line",   label: "Duplicate Line",          shortcut: "",              category: "Editor" },
-    PaletteEntry { id: "jump_up",    label: "Jump 5 Lines Up",         shortcut: "Shift+↑",      category: "Editor" },
-    PaletteEntry { id: "jump_down",  label: "Jump 5 Lines Down",       shortcut: "Shift+↓",      category: "Editor" },
-    PaletteEntry { id: "word_left",  label: "Word Left",               shortcut: "Ctrl+←",       category: "Editor" },
-    PaletteEntry { id: "word_right", label: "Word Right",              shortcut: "Ctrl+→",       category: "Editor" },
-    PaletteEntry { id: "goto_top",   label: "Go to Top of File",       shortcut: "Ctrl+Home",    category: "Editor" },
-    PaletteEntry { id: "goto_end",   label: "Go to End of File",       shortcut: "Ctrl+End",     category: "Editor" },
+    PaletteEntry { id: "new",         label: "New Agent…",              shortcut: "Ctrl+N",       category: "Agents" },
+    PaletteEntry { id: "new_claude",  label: "New Agent (Claude)",      shortcut: "",              category: "Agents" },
+    PaletteEntry { id: "new_codex",   label: "New Agent (Codex)",       shortcut: "",              category: "Agents" },
+    PaletteEntry { id: "new_copilot", label: "New Agent (Copilot)",     shortcut: "",              category: "Agents" },
+    PaletteEntry { id: "new_gemini",  label: "New Agent (Gemini)",      shortcut: "",              category: "Agents" },
+    PaletteEntry { id: "new_folder",  label: "New Agent in Folder…",    shortcut: "Ctrl+T",       category: "Agents" },
+    PaletteEntry { id: "close",       label: "Close Agent / Editor",    shortcut: "Ctrl+W",       category: "Agents" },
+    PaletteEntry { id: "focus_next",  label: "Focus Next Agent",        shortcut: "Ctrl+→ / Tab", category: "Agents" },
+    PaletteEntry { id: "focus_prev",  label: "Focus Previous Agent",    shortcut: "Ctrl+←",       category: "Agents" },
+    // Files
+    PaletteEntry { id: "open",        label: "Open File",               shortcut: "Ctrl+O",       category: "Files" },
+    PaletteEntry { id: "save",        label: "Save File",               shortcut: "Ctrl+S",       category: "Files" },
+    PaletteEntry { id: "focus_ed",    label: "Focus Editor",            shortcut: "Ctrl+F / Tab", category: "Files" },
+    PaletteEntry { id: "tree",        label: "Toggle File Tree",        shortcut: "Ctrl+E",       category: "Files" },
+    PaletteEntry { id: "diff",        label: "View Diff",               shortcut: "Ctrl+D",       category: "Files" },
+    PaletteEntry { id: "deps",        label: "Inspect Deps",            shortcut: "Ctrl+I",       category: "Files" },
+    PaletteEntry { id: "new_file",    label: "New File",                shortcut: "n (in tree)",   category: "Files" },
+    PaletteEntry { id: "new_dir",     label: "New Folder",              shortcut: "N (in tree)",   category: "Files" },
+    PaletteEntry { id: "rename_file", label: "Rename",                  shortcut: "F2 (in tree)",  category: "Files" },
+    PaletteEntry { id: "delete_file", label: "Delete",                  shortcut: "x (in tree)",   category: "Files" },
+    PaletteEntry { id: "dup_file",    label: "Duplicate",               shortcut: "y (in tree)",   category: "Files" },
+    PaletteEntry { id: "move_file",   label: "Move File",               shortcut: "m (in tree)",   category: "Files" },
+    // Search
+    PaletteEntry { id: "find",           label: "Find",                    shortcut: "Ctrl+F",       category: "Search" },
+    PaletteEntry { id: "find_replace",   label: "Find and Replace",        shortcut: "Ctrl+H",       category: "Search" },
+    PaletteEntry { id: "goto_line",      label: "Go to Line…",             shortcut: "Ctrl+G",       category: "Search" },
+    PaletteEntry { id: "goto_symbol",    label: "Go to Symbol (Outline)",  shortcut: "Ctrl+R",       category: "Search" },
+    // Editor
+    PaletteEntry { id: "ai_edit",        label: "AI Edit File",            shortcut: "Ctrl+A",       category: "Editor" },
+    PaletteEntry { id: "toggle_focus",   label: "Toggle Editor Focus Mode",shortcut: "Ctrl+B",       category: "Editor" },
+    PaletteEntry { id: "toggle_wrap",    label: "Toggle Word Wrap",        shortcut: "Alt+Z",        category: "Editor" },
+    PaletteEntry { id: "select_line",    label: "Select Current Line",     shortcut: "Ctrl+L",       category: "Editor" },
+    PaletteEntry { id: "del_line",       label: "Delete Line",             shortcut: "Ctrl+D",       category: "Editor" },
+    PaletteEntry { id: "dup_line",       label: "Duplicate Line",          shortcut: "Ctrl+Shift+D", category: "Editor" },
+    PaletteEntry { id: "move_line_up",   label: "Move Line Up",            shortcut: "Alt+↑",        category: "Editor" },
+    PaletteEntry { id: "move_line_down", label: "Move Line Down",          shortcut: "Alt+↓",        category: "Editor" },
+    PaletteEntry { id: "copy_sel",       label: "Copy Selection",          shortcut: "Ctrl+C",       category: "Editor" },
+    PaletteEntry { id: "cut_sel",        label: "Cut Selection",           shortcut: "Ctrl+X",       category: "Editor" },
+    PaletteEntry { id: "paste",          label: "Paste",                   shortcut: "Ctrl+V",       category: "Editor" },
+    // Multi-cursor
+    PaletteEntry { id: "cursor_above",    label: "Add Cursor Above",       shortcut: "Ctrl+Alt+↑",  category: "Multi-cursor" },
+    PaletteEntry { id: "cursor_below",    label: "Add Cursor Below",       shortcut: "Ctrl+Alt+↓",  category: "Multi-cursor" },
+    PaletteEntry { id: "add_next_occ",    label: "Add Next Occurrence",    shortcut: "Alt+D",        category: "Multi-cursor" },
+    PaletteEntry { id: "add_prev_occ",    label: "Add Prev Occurrence",    shortcut: "Alt+Shift+D",  category: "Multi-cursor" },
+    PaletteEntry { id: "add_all_occ",     label: "Add All Occurrences",    shortcut: "Alt+Shift+L",  category: "Multi-cursor" },
+    PaletteEntry { id: "skip_occ",        label: "Skip Current Occurrence",shortcut: "Alt+S",        category: "Multi-cursor" },
+    PaletteEntry { id: "remove_last_cursor", label: "Remove Last Cursor",  shortcut: "Alt+Backspace",category: "Multi-cursor" },
+    // Folding
+    PaletteEntry { id: "toggle_fold",    label: "Toggle Fold at Cursor",  shortcut: "Alt+[",        category: "Folding" },
+    PaletteEntry { id: "fold_all",       label: "Fold All",               shortcut: "Alt+Shift+[",  category: "Folding" },
+    PaletteEntry { id: "unfold_all",     label: "Unfold All",             shortcut: "Alt+Shift+]",  category: "Folding" },
+    // Diagnostics
+    PaletteEntry { id: "next_diagnostic",   label: "Next Diagnostic",        shortcut: "F8",           category: "Diagnostics" },
+    PaletteEntry { id: "prev_diagnostic",   label: "Previous Diagnostic",    shortcut: "Shift+F8",     category: "Diagnostics" },
+    PaletteEntry { id: "toggle_diagnostics",label: "Toggle Diagnostics",     shortcut: "Ctrl+Shift+M", category: "Diagnostics" },
+    // Tabs
+    PaletteEntry { id: "next_tab",       label: "Next Tab",               shortcut: "Ctrl+Tab",     category: "Tabs" },
+    PaletteEntry { id: "prev_tab",       label: "Previous Tab",           shortcut: "Ctrl+Shift+Tab",category: "Tabs" },
+    PaletteEntry { id: "close_tab",      label: "Close Tab",              shortcut: "Ctrl+W",       category: "Tabs" },
+    // Navigation
+    PaletteEntry { id: "word_left",      label: "Word Left",              shortcut: "Ctrl+←",       category: "Navigation" },
+    PaletteEntry { id: "word_right",     label: "Word Right",             shortcut: "Ctrl+→",       category: "Navigation" },
+    PaletteEntry { id: "goto_top",       label: "Go to Top of File",      shortcut: "Ctrl+Home",    category: "Navigation" },
+    PaletteEntry { id: "goto_end",       label: "Go to End of File",      shortcut: "Ctrl+End",     category: "Navigation" },
+    PaletteEntry { id: "jump_up",        label: "Jump 5 Lines Up",        shortcut: "Shift+↑",      category: "Navigation" },
+    PaletteEntry { id: "jump_down",      label: "Jump 5 Lines Down",      shortcut: "Shift+↓",      category: "Navigation" },
     // View
-    PaletteEntry { id: "palette",    label: "Toggle Command Palette",  shortcut: "Ctrl+K",       category: "View" },
-    PaletteEntry { id: "scroll_up",  label: "Scroll Terminal Up",      shortcut: "Shift+↑",      category: "View" },
-    PaletteEntry { id: "scroll_dn",  label: "Scroll Terminal Down",    shortcut: "Shift+↓",      category: "View" },
+    PaletteEntry { id: "sidebar",        label: "Toggle Sidebar",         shortcut: "Ctrl+E",       category: "View" },
+    PaletteEntry { id: "copy_terminal",  label: "Copy Terminal Text",     shortcut: "Ctrl+Shift+C", category: "View" },
+    PaletteEntry { id: "palette",        label: "Toggle Command Palette", shortcut: "Ctrl+K",       category: "View" },
+    PaletteEntry { id: "scroll_up",      label: "Scroll Terminal Up",     shortcut: "Shift+↑",      category: "View" },
+    PaletteEntry { id: "scroll_dn",      label: "Scroll Terminal Down",   shortcut: "Shift+↓",      category: "View" },
     // App
-    PaletteEntry { id: "quit",       label: "Quit",                    shortcut: "Ctrl+Q",       category: "App" },
+    PaletteEntry { id: "quit",           label: "Quit",                   shortcut: "Ctrl+Q",       category: "App" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -121,6 +161,32 @@ impl Palette {
         self.close();
         result
     }
+
+    /// Map a visual row (relative to the list area start) to a command index.
+    /// Category headers are skipped. Returns true if a valid command was selected.
+    pub fn click_row(&mut self, visual_row: usize) {
+        let filtered = self.filtered_commands();
+        let mut row = 0usize;
+        let mut last_category = "";
+
+        for (idx, entry) in filtered.iter().enumerate() {
+            if entry.category != last_category {
+                last_category = entry.category;
+                if row >= self.scroll {
+                    if row - self.scroll == visual_row {
+                        return; // clicked on a category header, ignore
+                    }
+                }
+                row += 1;
+            }
+            if row >= self.scroll && row - self.scroll == visual_row {
+                self.selected = idx;
+                return;
+            }
+            row += 1;
+        }
+    }
+
 
     fn filtered_commands(&self) -> Vec<&PaletteEntry> {
         let query = self.input.to_lowercase();

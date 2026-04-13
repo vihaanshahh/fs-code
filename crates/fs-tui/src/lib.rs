@@ -5,6 +5,7 @@
 //! and diff view.
 
 mod app;
+mod clipboard;
 mod deps;
 mod diff;
 mod editor;

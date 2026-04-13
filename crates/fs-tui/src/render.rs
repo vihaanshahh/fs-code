@@ -10,6 +10,7 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
 use fs_core::AgentDescriptor;
 use fs_pty::TerminalInstance;
 
+use crate::app::PaneSelection;
 use crate::theme::Theme;
 
 // ---------------------------------------------------------------------------
@@ -59,6 +60,7 @@ pub fn render_pane(
     is_focused: bool,
     instance: Option<&TerminalInstance>,
     scroll_offset: usize,
+    selection: Option<&PaneSelection>,
     theme: &Theme,
 ) {
     if area.height < 2 || area.width < 4 { return; }
@@ -110,7 +112,7 @@ pub fn render_pane(
     frame.render_widget(block, area);
 
     if let Some(inst) = instance {
-        render_terminal_content(frame, inner, inst, scroll_offset);
+        render_terminal_content(frame, inner, inst, scroll_offset, selection);
     }
 }
 
@@ -118,7 +120,7 @@ pub fn render_pane(
 // Terminal content — map alacritty_terminal cells to ratatui spans
 // ---------------------------------------------------------------------------
 
-fn render_terminal_content(frame: &mut Frame, area: Rect, instance: &TerminalInstance, scroll_offset: usize) {
+fn render_terminal_content(frame: &mut Frame, area: Rect, instance: &TerminalInstance, scroll_offset: usize, selection: Option<&PaneSelection>) {
     let term = match instance.term.try_lock() {
         Ok(t) => t,
         Err(std::sync::TryLockError::WouldBlock) => {
@@ -168,6 +170,13 @@ fn render_terminal_content(frame: &mut Frame, area: Rect, instance: &TerminalIns
 
             if scroll_offset == 0 && row == cursor.point.line.0 as usize && col == cursor.point.column.0 {
                 style = style.bg(Color::Black).fg(Color::White);
+            }
+
+            // Highlight selected region
+            if let Some(sel) = selection {
+                if sel.contains(row, col) {
+                    style = Style::default().fg(Color::Black).bg(Color::Cyan);
+                }
             }
 
             let ch = if c == '\0' || c == ' ' { ' ' } else { c };

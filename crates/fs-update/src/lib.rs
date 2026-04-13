@@ -66,11 +66,8 @@ fn normalize_tag(tag: &str) -> &str {
 
 /// Simple semver "is `a` < `b`?" for dotted numeric versions.
 fn is_newer(current: &str, remote: &str) -> bool {
-    let parse = |s: &str| -> Vec<u64> {
-        s.split('.')
-            .filter_map(|p| p.parse::<u64>().ok())
-            .collect()
-    };
+    let parse =
+        |s: &str| -> Vec<u64> { s.split('.').filter_map(|p| p.parse::<u64>().ok()).collect() };
     let a = parse(current);
     let b = parse(remote);
     b > a
@@ -249,10 +246,12 @@ pub async fn perform_update() -> Result<String> {
 
     // Write to temp file next to current binary, then atomic rename
     let current_exe = env::current_exe().context("cannot determine current executable path")?;
-    let current_dir = current_exe.parent().context("executable has no parent dir")?;
+    let current_dir = current_exe
+        .parent()
+        .context("executable has no parent dir")?;
 
-    let mut tmp = NamedTempFile::new_in(current_dir)
-        .context("failed to create temp file for update")?;
+    let mut tmp =
+        NamedTempFile::new_in(current_dir).context("failed to create temp file for update")?;
     tmp.write_all(&bytes)?;
     tmp.flush()?;
 

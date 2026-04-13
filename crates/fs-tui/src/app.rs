@@ -17,15 +17,62 @@ use fs_agent;
 use fs_core::{uid, AgentDescriptor, AgentId, Config, KeyAction, Provider};
 use fs_pty::TerminalManager;
 
+use crate::clipboard;
 use crate::deps::DepsViewer;
 use crate::diff::DiffViewer;
-use crate::editor::Editor;
+use crate::editor::{Editor, PromptSubmit};
 use crate::file_picker::{FilePicker, PickerMode};
 use crate::file_tree::{FileTree, SIDEBAR_WIDTH};
 use crate::grid;
 use crate::palette::Palette;
 use crate::render;
 use crate::theme::{self, Theme, ThemeMode};
+
+// ---------------------------------------------------------------------------
+// Pane text selection — click-and-drag in agent terminal panes
+// ---------------------------------------------------------------------------
+
+/// A text selection within an agent terminal pane, in screen coordinates.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PaneSelection {
+    /// Agent index this selection belongs to
+    agent_idx: usize,
+    /// Start position (row, col) relative to the pane inner area
+    start: (usize, usize),
+    /// End position (row, col) relative to the pane inner area
+    end: (usize, usize),
+}
+
+impl PaneSelection {
+    /// Return (start, end) normalized so start <= end in reading order.
+    fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        if self.start.0 < self.end.0
+            || (self.start.0 == self.end.0 && self.start.1 <= self.end.1)
+        {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+
+    /// Check if a cell (row, col) is within the selection.
+    pub(crate) fn contains(&self, row: usize, col: usize) -> bool {
+        let (s, e) = self.ordered();
+        if row < s.0 || row > e.0 {
+            return false;
+        }
+        if row == s.0 && row == e.0 {
+            return col >= s.1 && col <= e.1;
+        }
+        if row == s.0 {
+            return col >= s.1;
+        }
+        if row == e.0 {
+            return col <= e.1;
+        }
+        true
+    }
+}
 
 // ---------------------------------------------------------------------------
 // AI edit result — sent from background thread back to main loop
@@ -309,6 +356,18 @@ pub struct App {
     editor_split_pct: u16,
     /// Whether we are currently dragging the editor border
     dragging_editor_border: bool,
+    /// Whether we are currently drag-selecting in the editor
+    dragging_editor_selection: bool,
+    /// Current text selection in an agent terminal pane
+    pane_selection: Option<PaneSelection>,
+    /// Whether we are currently drag-selecting in an agent pane
+    dragging_pane_selection: bool,
+    /// Last sidebar click: (time, node_index) for double-click detection
+    last_sidebar_click: Option<(Instant, usize)>,
+    /// Last editor click: (time, col, row) for multi-click detection
+    last_editor_click: Option<(Instant, u16, u16)>,
+    /// Editor click count for double/triple-click (1=single, 2=word, 3=line)
+    editor_click_count: u8,
     /// Editor focus mode — editor takes the dominant area, agents shrink to a thin sidebar
     editor_focus_mode: bool,
     /// Cached content area x-range for drag hit-testing
@@ -346,6 +405,12 @@ impl App {
             theme: theme::theme(ThemeMode::default()),
             editor_split_pct: 45,
             dragging_editor_border: false,
+            dragging_editor_selection: false,
+            pane_selection: None,
+            dragging_pane_selection: false,
+            last_sidebar_click: None,
+            last_editor_click: None,
+            editor_click_count: 0,
             editor_focus_mode: false,
             content_area_x: 0,
             content_area_width: 0,
@@ -434,6 +499,59 @@ impl App {
         }
     }
 
+    fn copy_to_system_clipboard(&self, text: &str) {
+        let _ = clipboard::copy_text(text);
+    }
+
+    /// Extract the selected text from an agent terminal pane.
+    fn extract_pane_selection_text(&self, sel: &PaneSelection) -> String {
+        let agent = match self.agents.get(sel.agent_idx) {
+            Some(a) => a,
+            None => return String::new(),
+        };
+        let tid = match self.agent_terminals.get(&agent.id) {
+            Some(t) => t,
+            None => return String::new(),
+        };
+        let inst = match self.terminal_mgr.get(tid) {
+            Some(i) => i,
+            None => return String::new(),
+        };
+        let scroll = self.scroll_offsets.get(&agent.id).copied().unwrap_or(0);
+        let Ok(t) = inst.term.lock() else {
+            return String::new();
+        };
+        let grid = t.grid();
+        let cols = grid.columns();
+        let (s, e) = sel.ordered();
+        let mut lines = Vec::new();
+        for row in s.0..=e.0 {
+            let line_idx = row as i32 - scroll as i32;
+            let row_ref = &grid[alacritty_terminal::index::Line(line_idx)];
+            let col_start = if row == s.0 { s.1 } else { 0 };
+            let col_end = if row == e.0 { e.1.min(cols.saturating_sub(1)) } else { cols.saturating_sub(1) };
+            let mut line = String::new();
+            for c in col_start..=col_end {
+                if c >= cols { break; }
+                let cell = &row_ref[alacritty_terminal::index::Column(c)];
+                let ch = cell.c;
+                line.push(if ch == '\0' { ' ' } else { ch });
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        // Remove trailing empty lines
+        while lines.last().map_or(false, |l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
+    fn paste_from_clipboard(&mut self) {
+        if let Some(text) = clipboard::paste_text() {
+            self.editor.insert_text(&text);
+        }
+    }
+
     fn expire_status_if_needed(&mut self, now: Instant) -> bool {
         if let Some((_, at)) = &self.status_msg {
             if now.duration_since(*at) > Duration::from_secs(3) {
@@ -519,7 +637,17 @@ impl App {
     fn handle_paste(&mut self, text: &str) -> anyhow::Result<()> {
         match self.overlay {
             Overlay::Editor => {
-                if self.editor.prompt_open {
+                if self.editor.outline_open {
+                    // Paste into outline filter
+                    for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
+                        self.editor.outline_char(c);
+                    }
+                } else if self.editor.replace_open {
+                    // Paste into focused replace field
+                    for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
+                        self.editor.replace_char(c);
+                    }
+                } else if self.editor.is_prompt_open() {
                     // Paste into AI prompt (strip newlines)
                     for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
                         self.editor.prompt_char(c);
@@ -562,30 +690,67 @@ impl App {
         Ok(())
     }
 
+    /// Check if a screen position is inside a rect.
+    fn rect_contains(area: Rect, col: u16, row: u16) -> bool {
+        col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
+    }
+
+    /// Compute the sidebar area (if open) for hit-testing.
+    fn sidebar_rect(&self) -> Option<Rect> {
+        if self.sidebar_open {
+            let (_, term_rows) = terminal::size().unwrap_or((80, 24));
+            let main_h = term_rows.saturating_sub(1);
+            Some(Rect::new(0, 0, SIDEBAR_WIDTH, main_h))
+        } else {
+            None
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
+        // Route to active overlay first — overlays consume all mouse events
+        match self.overlay {
+            Overlay::Palette => return self.handle_palette_mouse(mouse),
+            Overlay::FilePicker => return self.handle_picker_mouse(mouse),
+            Overlay::ProviderPicker => return self.handle_provider_picker_mouse(mouse),
+            Overlay::Diff => return self.handle_diff_mouse(mouse),
+            Overlay::Deps => return self.handle_deps_mouse(mouse),
+            Overlay::Editor if self.editor.outline_open => return self.handle_outline_mouse(mouse),
+            _ => {}
+        }
+
+        let sidebar_area = self.sidebar_rect();
+        let over_sidebar = sidebar_area.map_or(false, |a| Self::rect_contains(a, mouse.column, mouse.row));
+        let over_editor = self.editor.is_open() && self.is_mouse_over_editor(mouse.column, mouse.row);
+
         match mouse.kind {
+            // -----------------------------------------------------------------
+            // Scroll
+            // -----------------------------------------------------------------
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let delta = if mouse.kind == MouseEventKind::ScrollUp { -3 } else { 3 };
+                let delta: i32 = if mouse.kind == MouseEventKind::ScrollUp { -3 } else { 3 };
                 if self.overlay == Overlay::Diff {
                     if delta < 0 {
                         self.diff_viewer.scroll_up((-delta) as usize);
                     } else {
                         self.diff_viewer.scroll_down(delta as usize);
                     }
-                } else if self.editor.is_open() && self.is_mouse_over_editor(mouse.column, mouse.row) {
-                    // Scroll the file editor
+                } else if over_sidebar {
+                    // Scroll the sidebar file tree
+                    if let Some(sa) = sidebar_area {
+                        let visible = sa.height.saturating_sub(2) as usize; // borders
+                        self.file_tree.scroll_by(delta, visible);
+                    }
+                } else if over_editor {
                     self.editor.scroll_by(delta);
                 } else if self.overlay == Overlay::Editor {
-                    // Editor is focused — scroll it regardless of position
+                    // Editor focused — scroll regardless of pointer position
                     self.editor.scroll_by(delta);
                 } else if self.overlay == Overlay::None && !self.agents.is_empty() {
+                    // Scroll hovered agent pane
                     let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
                     let main_area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
                     let pane_areas = grid::compute_grid(main_area, self.agents.len());
-                    let hovered = pane_areas.iter().position(|a| {
-                        mouse.column >= a.x && mouse.column < a.x + a.width
-                            && mouse.row >= a.y && mouse.row < a.y + a.height
-                    });
+                    let hovered = pane_areas.iter().position(|a| Self::rect_contains(*a, mouse.column, mouse.row));
                     if let Some(idx) = hovered {
                         let old_cwd = self.current_cwd();
                         self.focused = idx;
@@ -594,9 +759,114 @@ impl App {
                     self.scroll_focused(delta);
                 }
             }
+
+            // -----------------------------------------------------------------
+            // Left mouse down
+            // -----------------------------------------------------------------
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                // Check if clicking on the editor/agent border for drag resize
-                // (disabled in editor focus mode — split is fixed there).
+                let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+                let alt = mouse.modifiers.contains(KeyModifiers::ALT);
+                let shift_alt = shift && alt;
+
+                // --- Block selection start (Shift+Alt in editor) ---
+                if shift_alt && self.overlay == Overlay::Editor {
+                    if let Some((line, col)) = self.editor.mouse_position(mouse.column, mouse.row) {
+                        self.editor.block_selection = Some(crate::editor::BlockSelection::new(
+                            (line, col),
+                            (line, col),
+                        ));
+                    }
+                    return Ok(());
+                }
+
+                // --- Alt+click to toggle extra cursor in editor ---
+                if alt && !shift && self.overlay == Overlay::Editor {
+                    if let Some((line, col)) = self.editor.mouse_position(mouse.column, mouse.row) {
+                        self.editor.toggle_cursor((line, col));
+                    }
+                    return Ok(());
+                }
+
+                // --- Sidebar click ---
+                if over_sidebar {
+                    if let Some(sa) = sidebar_area {
+                        // Row within inner area (skip top border)
+                        let row_in_inner = mouse.row.saturating_sub(sa.y + 1) as usize;
+                        if let Some(idx) = self.file_tree.click_at_row(row_in_inner) {
+                            // Focus sidebar
+                            self.sidebar_focused = true;
+                            if self.overlay == Overlay::Editor {
+                                self.overlay = Overlay::None;
+                            }
+
+                            // Double-click detection
+                            let now = Instant::now();
+                            if let Some((last_time, last_idx)) = self.last_sidebar_click {
+                                if last_idx == idx && now.duration_since(last_time) < Duration::from_millis(300) {
+                                    // Double-click: activate (open file / toggle dir)
+                                    if let Some(path) = self.file_tree.activate_selected() {
+                                        let path_str = path.to_string_lossy().to_string();
+                                        let _ = self.editor.open_file(&path_str);
+                                        self.overlay = Overlay::Editor;
+                                        self.sidebar_focused = false;
+                                    }
+                                    self.last_sidebar_click = None;
+                                    return Ok(());
+                                }
+                            }
+                            self.last_sidebar_click = Some((now, idx));
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // --- Editor click ---
+                if over_editor && self.editor.is_open() {
+                    if let Some((line, col)) = self.editor.mouse_position(mouse.column, mouse.row) {
+                        // Focus editor
+                        self.overlay = Overlay::Editor;
+                        self.sidebar_focused = false;
+
+                        // Multi-click detection (double-click = word select, triple = line select)
+                        let now = Instant::now();
+                        let same_spot = self.last_editor_click.map_or(false, |(t, lc, lr)| {
+                            now.duration_since(t) < Duration::from_millis(300)
+                                && lc == mouse.column && lr == mouse.row
+                        });
+                        if same_spot {
+                            self.editor_click_count = (self.editor_click_count + 1).min(3);
+                        } else {
+                            self.editor_click_count = 1;
+                        }
+                        self.last_editor_click = Some((now, mouse.column, mouse.row));
+
+                        match self.editor_click_count {
+                            2 => {
+                                // Double-click: select word
+                                self.editor.select_word_at((line, col));
+                            }
+                            3 => {
+                                // Triple-click: select line
+                                self.editor.select_line_at(line);
+                            }
+                            _ => {
+                                // Single click
+                                if shift {
+                                    // Shift+click extends selection
+                                    self.editor.extend_selection_to((line, col));
+                                } else {
+                                    // Regular click places cursor, clears selection
+                                    self.editor.block_selection = None;
+                                    self.editor.place_cursor((line, col));
+                                }
+                                self.dragging_editor_selection = true;
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // --- Editor/agent border drag ---
                 if self.editor.is_open() && self.content_area_width > 0 && !self.editor_focus_mode {
                     let agent_pct = 100u16.saturating_sub(self.editor_split_pct);
                     let border_x = self.content_area_x
@@ -605,19 +875,114 @@ impl App {
                         && mouse.column <= border_x + 1
                     {
                         self.dragging_editor_border = true;
+                        return Ok(());
+                    }
+                }
+
+                // --- Agent pane click: focus that agent + start text selection ---
+                if self.overlay == Overlay::None && !self.agents.is_empty() {
+                    let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+                    let main_area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
+                    let pane_areas = grid::compute_grid(main_area, self.agents.len());
+                    if let Some(idx) = pane_areas.iter().position(|a| Self::rect_contains(*a, mouse.column, mouse.row)) {
+                        let old_cwd = self.current_cwd();
+                        self.focused = idx;
+                        self.sidebar_focused = false;
+                        self.refresh_sidebar_if_cwd_changed(&old_cwd);
+
+                        // Start pane text selection (position relative to pane inner area)
+                        let pane = pane_areas[idx];
+                        let inner_x = pane.x + 1; // border
+                        let inner_y = pane.y + 1; // border
+                        let row = mouse.row.saturating_sub(inner_y) as usize;
+                        let col = mouse.column.saturating_sub(inner_x) as usize;
+                        self.pane_selection = Some(PaneSelection {
+                            agent_idx: idx,
+                            start: (row, col),
+                            end: (row, col),
+                        });
+                        self.dragging_pane_selection = true;
                     }
                 }
             }
+
+            // -----------------------------------------------------------------
+            // Middle mouse down — close tab if over editor tab bar
+            // -----------------------------------------------------------------
+            MouseEventKind::Down(crossterm::event::MouseButton::Middle) => {
+                if over_editor && self.editor.is_open() && self.editor.tab_count() > 1 {
+                    // Middle-click on editor area: close current tab
+                    self.editor.close_tab();
+                    if !self.editor.is_open() {
+                        self.overlay = Overlay::None;
+                    }
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // Left drag
+            // -----------------------------------------------------------------
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                if self.dragging_editor_border && self.content_area_width > 0 {
+                let shift_alt = mouse.modifiers.contains(KeyModifiers::SHIFT)
+                    && mouse.modifiers.contains(KeyModifiers::ALT);
+                if shift_alt && self.overlay == Overlay::Editor && self.editor.block_selection.is_some() {
+                    // Extend block selection
+                    if let Some((line, col)) = self.editor.mouse_position(mouse.column, mouse.row) {
+                        if let Some(ref mut bs) = self.editor.block_selection {
+                            bs.cursor = (line, col);
+                        }
+                    }
+                } else if self.dragging_editor_selection {
+                    // Extend normal text selection via drag
+                    if let Some((line, col)) = self.editor.mouse_position(mouse.column, mouse.row) {
+                        self.editor.extend_selection_to((line, col));
+                    }
+                } else if self.dragging_pane_selection {
+                    // Extend pane text selection via drag
+                    if let Some(ref mut sel) = self.pane_selection {
+                        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+                        let main_area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
+                        let pane_areas = grid::compute_grid(main_area, self.agents.len());
+                        if let Some(&pane) = pane_areas.get(sel.agent_idx) {
+                            let inner_x = pane.x + 1;
+                            let inner_y = pane.y + 1;
+                            sel.end = (
+                                mouse.row.saturating_sub(inner_y) as usize,
+                                mouse.column.saturating_sub(inner_x) as usize,
+                            );
+                        }
+                    }
+                } else if self.dragging_editor_border && self.content_area_width > 0 {
                     let rel = mouse.column.saturating_sub(self.content_area_x);
                     let agent_pct = (rel as u32 * 100 / self.content_area_width as u32) as u16;
                     self.editor_split_pct = (100u16.saturating_sub(agent_pct)).clamp(15, 85);
                 }
             }
+
+            // -----------------------------------------------------------------
+            // Left mouse up — clear all drag states
+            // -----------------------------------------------------------------
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 self.dragging_editor_border = false;
+                self.dragging_editor_selection = false;
+                if self.dragging_pane_selection {
+                    self.dragging_pane_selection = false;
+                    // Auto-copy selection to clipboard on mouse up (if non-empty)
+                    if let Some(ref sel) = self.pane_selection {
+                        if sel.start != sel.end {
+                            let text = self.extract_pane_selection_text(sel);
+                            if !text.is_empty() {
+                                self.copy_to_system_clipboard(&text);
+                                self.set_status("Copied selection");
+                            }
+                        } else {
+                            // Single click with no drag — clear selection
+                            self.pane_selection = None;
+                        }
+                    }
+                }
             }
+
             _ => {}
         }
         Ok(())
@@ -769,11 +1134,36 @@ impl App {
                     {
                         self.scroll_focused(20);
                     }
+                    // Ctrl+Shift+C: copy selected text (or full visible terminal text)
+                    (true, true, KeyCode::Char('c')) | (true, true, KeyCode::Char('C')) => {
+                        // Prefer pane selection if present
+                        if let Some(ref sel) = self.pane_selection {
+                            if sel.start != sel.end {
+                                let text = self.extract_pane_selection_text(sel);
+                                if !text.is_empty() {
+                                    self.copy_to_system_clipboard(&text);
+                                    self.set_status("Copied selection");
+                                    self.pane_selection = None;
+                                }
+                            }
+                        } else if let Some(agent) = self.agents.get(self.focused) {
+                            if let Some(tid) = self.agent_terminals.get(&agent.id) {
+                                if let Some(inst) = self.terminal_mgr.get(tid) {
+                                    let text = inst.visible_text();
+                                    if !text.is_empty() {
+                                        self.copy_to_system_clipboard(&text);
+                                        self.set_status("Copied terminal text");
+                                    }
+                                }
+                            }
+                        }
+                    }
                     _ => {
-                        // Any regular keypress snaps back to live view
+                        // Any regular keypress snaps back to live view and clears selection
                         if let Some(agent) = self.agents.get(self.focused) {
                             self.scroll_offsets.insert(agent.id.clone(), 0);
                         }
+                        self.pane_selection = None;
                         self.forward_key_to_terminal(key)?;
                     }
                 }
@@ -848,94 +1238,250 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(cmd) = self.palette.execute() {
-                    self.overlay = Overlay::None;
-                    match cmd.as_str() {
-                        "new" => self.open_provider_picker(),
-                        "new_claude" => self.add_agent_with_provider(Provider::Claude)?,
-                        "new_codex" => self.add_agent_with_provider(Provider::Codex)?,
-                        "new_copilot" => self.add_agent_with_provider(Provider::Copilot)?,
-                        "new_gemini" => self.add_agent_with_provider(Provider::Gemini)?,
-                        "toggle_focus" => self.toggle_editor_focus_mode(),
-                        "toggle_wrap" => {
-                            let on = self.editor.toggle_wrap();
-                            self.set_status(if on { "Word wrap on" } else { "Word wrap off" });
-                        }
-                        "new_folder" => {
-                            let cwd = self.current_cwd();
-                            self.folder_input.open(&cwd);
-                            self.overlay = Overlay::FolderInput;
-                        }
-                        "close" => {
-                            if self.editor.is_open() {
-                                self.editor.close();
-                            } else {
-                                self.close_focused_agent();
-                            }
-                        }
-                        "open" => {
-                            let cwd = self.current_cwd();
-                            self.file_picker.open(&cwd, PickerMode::Open);
-                            self.overlay = Overlay::FilePicker;
-                        }
-                        "save" => {
-                            if self.editor.is_open() {
-                                match self.editor.save() {
-                                    Ok(()) => self.set_status("Saved"),
-                                    Err(e) => self.set_status(format!("Save failed: {}", e)),
-                                }
-                            }
-                        }
-                        "focus_ed" => {
-                            if self.editor.is_open() {
-                                self.overlay = Overlay::Editor;
-                            }
-                        }
-                        "focus_next" => {
-                            if !self.agents.is_empty() {
-                                let old_cwd = self.current_cwd();
-                                self.focused = (self.focused + 1) % self.agents.len();
-                                self.refresh_sidebar_if_cwd_changed(&old_cwd);
-                            }
-                        }
-                        "focus_prev" => {
-                            if !self.agents.is_empty() {
-                                let old_cwd = self.current_cwd();
-                                self.focused = (self.focused + self.agents.len() - 1) % self.agents.len();
-                                self.refresh_sidebar_if_cwd_changed(&old_cwd);
-                            }
-                        }
-                        "diff" => {
-                            let cwd = self.current_cwd();
-                            self.file_picker.open(&cwd, PickerMode::Diff);
-                            self.overlay = Overlay::FilePicker;
-                        }
-                        "deps" => {
-                            self.open_deps_viewer();
-                        }
-                        "tree" => {
-                            self.toggle_sidebar();
-                        }
-                        "ai_edit" => {
-                            if self.editor.is_open() {
-                                self.overlay = Overlay::Editor;
-                                self.editor.open_prompt();
-                            } else {
-                                self.set_status("Open a file first (Ctrl+O)");
-                            }
-                        }
-                        "palette" => {
-                            // Already closing from execute()
-                        }
-                        "quit" => self.should_quit = true,
-                        // Editor-only commands are informational in palette
-                        _ => {}
-                    }
+                    self.execute_palette_command(&cmd)?;
                 }
             }
             KeyCode::Char(c) => self.palette.input(c),
             KeyCode::Backspace => self.palette.backspace(),
             KeyCode::Up => self.palette.move_selection(-1),
             KeyCode::Down => self.palette.move_selection(1),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn execute_palette_command(&mut self, cmd: &str) -> anyhow::Result<()> {
+        self.overlay = Overlay::None;
+        match cmd {
+            "new" => self.open_provider_picker(),
+            "new_claude" => self.add_agent_with_provider(Provider::Claude)?,
+            "new_codex" => self.add_agent_with_provider(Provider::Codex)?,
+            "new_copilot" => self.add_agent_with_provider(Provider::Copilot)?,
+            "new_gemini" => self.add_agent_with_provider(Provider::Gemini)?,
+            "toggle_focus" => self.toggle_editor_focus_mode(),
+            "toggle_wrap" => {
+                let on = self.editor.toggle_wrap();
+                self.set_status(if on { "Word wrap on" } else { "Word wrap off" });
+            }
+            "new_folder" => {
+                let cwd = self.current_cwd();
+                self.folder_input.open(&cwd);
+                self.overlay = Overlay::FolderInput;
+            }
+            "close" => {
+                if self.editor.is_open() {
+                    self.editor.close();
+                } else {
+                    self.close_focused_agent();
+                }
+            }
+            "open" => {
+                let cwd = self.current_cwd();
+                self.file_picker.open(&cwd, PickerMode::Open);
+                self.overlay = Overlay::FilePicker;
+            }
+            "save" => {
+                if self.editor.is_open() {
+                    match self.editor.save() {
+                        Ok(()) => self.set_status("Saved"),
+                        Err(e) => self.set_status(format!("Save failed: {}", e)),
+                    }
+                }
+            }
+            "focus_ed" => {
+                if self.editor.is_open() {
+                    self.overlay = Overlay::Editor;
+                }
+            }
+            "focus_next" => {
+                if !self.agents.is_empty() {
+                    let old_cwd = self.current_cwd();
+                    self.focused = (self.focused + 1) % self.agents.len();
+                    self.refresh_sidebar_if_cwd_changed(&old_cwd);
+                }
+            }
+            "focus_prev" => {
+                if !self.agents.is_empty() {
+                    let old_cwd = self.current_cwd();
+                    self.focused = (self.focused + self.agents.len() - 1) % self.agents.len();
+                    self.refresh_sidebar_if_cwd_changed(&old_cwd);
+                }
+            }
+            "diff" => {
+                let cwd = self.current_cwd();
+                self.file_picker.open(&cwd, PickerMode::Diff);
+                self.overlay = Overlay::FilePicker;
+            }
+            "deps" => {
+                self.open_deps_viewer();
+            }
+            "tree" => {
+                self.toggle_sidebar();
+            }
+            "new_file" => {
+                self.ensure_sidebar_focused();
+                self.file_tree.start_new_file();
+                self.set_status("New file: type name, Enter to create, Esc to cancel");
+            }
+            "new_dir" => {
+                self.ensure_sidebar_focused();
+                self.file_tree.start_new_folder();
+                self.set_status("New folder: type name, Enter to create, Esc to cancel");
+            }
+            "rename_file" => {
+                self.ensure_sidebar_focused();
+                self.file_tree.start_rename();
+                self.set_status("Rename: edit name, Enter to confirm, Esc to cancel");
+            }
+            "delete_file" => {
+                self.ensure_sidebar_focused();
+                match self.file_tree.delete_selected() {
+                    Ok(msg) => {
+                        self.file_tree.refresh();
+                        self.set_status(msg);
+                    }
+                    Err(e) => self.set_status(format!("Delete failed: {}", e)),
+                }
+            }
+            "dup_file" => {
+                self.ensure_sidebar_focused();
+                match self.file_tree.duplicate_selected() {
+                    Ok(msg) => {
+                        self.file_tree.refresh();
+                        self.set_status(msg);
+                    }
+                    Err(e) => self.set_status(format!("Duplicate failed: {}", e)),
+                }
+            }
+            "move_file" => {
+                self.ensure_sidebar_focused();
+                self.file_tree.start_move();
+                self.set_status("Move: navigate to destination, Enter to drop, Esc to cancel");
+            }
+            "ai_edit" => {
+                if self.editor.is_open() {
+                    self.overlay = Overlay::Editor;
+                    self.editor.open_ai_prompt();
+                } else {
+                    self.set_status("Open a file first (Ctrl+O)");
+                }
+            }
+            // Search
+            "find" => {
+                self.editor.open_search_prompt();
+                self.overlay = Overlay::Editor;
+            }
+            "find_replace" => {
+                self.editor.open_replace_bar();
+                self.overlay = Overlay::Editor;
+            }
+            "goto_line" => {
+                self.editor.open_goto_line_prompt();
+                self.overlay = Overlay::Editor;
+            }
+            "goto_symbol" => {
+                self.editor.open_outline();
+                self.overlay = Overlay::Editor;
+            }
+            // Folding
+            "toggle_fold" => { self.editor.toggle_fold_at_cursor(); }
+            "fold_all" => {
+                self.editor.fold_all();
+                self.set_status("Folded all");
+            }
+            "unfold_all" => {
+                self.editor.unfold_all();
+                self.set_status("Unfolded all");
+            }
+            // Diagnostics
+            "next_diagnostic" => { self.editor.next_diagnostic(); }
+            "prev_diagnostic" => { self.editor.prev_diagnostic(); }
+            "toggle_diagnostics" => { self.editor.toggle_diagnostics(); }
+            // Tabs
+            "next_tab" => { self.editor.next_tab(); }
+            "prev_tab" => { self.editor.prev_tab(); }
+            "close_tab" => {
+                if self.editor.close_tab() {
+                    self.overlay = Overlay::None;
+                }
+            }
+            // Editor actions
+            "select_line" => {
+                self.editor.select_current_line();
+                self.overlay = Overlay::Editor;
+            }
+            "copy_sel" => {
+                if let Some(t) = self.editor.selected_text() {
+                    self.copy_to_system_clipboard(&t);
+                }
+            }
+            "cut_sel" => {
+                if let Some(t) = self.editor.cut_selection() {
+                    self.copy_to_system_clipboard(&t);
+                }
+            }
+            "paste" => {
+                self.paste_from_clipboard();
+                self.overlay = Overlay::Editor;
+            }
+            // Multi-cursor
+            "skip_occ" => {
+                self.editor.skip_current_occurrence();
+                self.overlay = Overlay::Editor;
+            }
+            "remove_last_cursor" => {
+                self.editor.remove_last_cursor();
+                self.overlay = Overlay::Editor;
+            }
+            "cursor_above" => {
+                self.editor.add_cursor_above();
+                self.overlay = Overlay::Editor;
+            }
+            "cursor_below" => {
+                self.editor.add_cursor_below();
+                self.overlay = Overlay::Editor;
+            }
+            "add_next_occ" => {
+                self.editor.add_next_occurrence_cursor();
+                self.overlay = Overlay::Editor;
+            }
+            "add_prev_occ" => {
+                self.editor.add_prev_occurrence_cursor();
+                self.overlay = Overlay::Editor;
+            }
+            "add_all_occ" => {
+                self.editor.add_all_occurrence_cursors();
+                self.overlay = Overlay::Editor;
+            }
+            "move_line_up" => {
+                self.editor.move_lines_up();
+                self.overlay = Overlay::Editor;
+            }
+            "move_line_down" => {
+                self.editor.move_lines_down();
+                self.overlay = Overlay::Editor;
+            }
+            "sidebar" => {
+                self.toggle_sidebar();
+            }
+            "copy_terminal" => {
+                if let Some(agent) = self.agents.get(self.focused) {
+                    if let Some(tid) = self.agent_terminals.get(&agent.id) {
+                        if let Some(inst) = self.terminal_mgr.get(tid) {
+                            let text = inst.visible_text();
+                            if !text.is_empty() {
+                                self.copy_to_system_clipboard(&text);
+                                self.set_status("Copied terminal text");
+                            }
+                        }
+                    }
+                }
+            }
+            "palette" => {
+                // Already closing from execute()
+            }
+            "quit" => self.should_quit = true,
+            // Editor-only commands are informational in palette
             _ => {}
         }
         Ok(())
@@ -1050,17 +1596,77 @@ impl App {
     fn handle_editor_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
 
-        // AI prompt bar is open — route keys there
-        if self.editor.prompt_open {
+        // -----------------------------------------------------------------
+        // 1. Outline overlay — consumes all keys while open
+        // -----------------------------------------------------------------
+        if self.editor.outline_open {
+            match key.code {
+                KeyCode::Esc => self.editor.close_outline(),
+                KeyCode::Up => self.editor.outline_move(-1),
+                KeyCode::Down => self.editor.outline_move(1),
+                KeyCode::Enter => {
+                    if self.editor.outline_confirm() {
+                        let line = self.editor.cursor.0 + 1;
+                        self.set_status(format!("Jumped to line {}", line));
+                    }
+                }
+                KeyCode::Backspace => self.editor.outline_backspace(),
+                KeyCode::Char(c) => self.editor.outline_char(c),
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // -----------------------------------------------------------------
+        // 2. Inline find/replace bar — consumes keys while open
+        // -----------------------------------------------------------------
+        if self.editor.replace_open {
+            match key.code {
+                KeyCode::Esc => self.editor.close_replace_bar(),
+                KeyCode::Tab => self.editor.replace_toggle_field(),
+                KeyCode::Enter if alt => {
+                    let n = self.editor.replace_bar_all();
+                    self.set_status(format!("Replaced {} occurrences", n));
+                }
+                KeyCode::Enter => {
+                    self.editor.replace_bar_current();
+                }
+                KeyCode::F(3) if shift => { self.editor.replace_bar_prev(); }
+                KeyCode::F(3) => { self.editor.replace_bar_next(); }
+                KeyCode::Backspace => self.editor.replace_backspace(),
+                KeyCode::Char(c) => self.editor.replace_char(c),
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // -----------------------------------------------------------------
+        // 3. Prompt bar (AI, Search, GotoLine)
+        // -----------------------------------------------------------------
+        if self.editor.is_prompt_open() {
             match key.code {
                 KeyCode::Esc => {
                     self.editor.close_prompt();
                 }
                 KeyCode::Enter => {
-                    if let Some((instruction, file_path)) = self.editor.submit_prompt() {
-                        self.set_status("AI editing...");
-                        self.spawn_ai_edit(instruction, file_path);
+                    if let Some(action) = self.editor.submit_prompt() {
+                        match action {
+                            PromptSubmit::Ai { instruction, path: file_path } => {
+                                self.set_status("AI editing...");
+                                self.spawn_ai_edit(instruction, file_path);
+                            }
+                            PromptSubmit::Search { query } => {
+                                self.set_status(format!("Search: \"{}\"", query));
+                            }
+                            PromptSubmit::Replace { query: _, replacement: _, replaced } => {
+                                self.set_status(format!("Replaced {} occurrences", replaced));
+                            }
+                            PromptSubmit::GotoLine { line } => {
+                                self.set_status(format!("Jumped to line {}", line + 1));
+                            }
+                        }
                     }
                 }
                 KeyCode::Backspace => self.editor.prompt_backspace(),
@@ -1070,57 +1676,211 @@ impl App {
             return Ok(());
         }
 
-        match (ctrl, shift, key.code) {
-            // Esc: unfocus editor, return focus to agents (panel stays open)
-            (_, _, KeyCode::Esc) => {
-                self.editor.ai_status = None;
-                self.overlay = Overlay::None;
+        // -----------------------------------------------------------------
+        // 4. Main editor key handling — 4-tuple match
+        // -----------------------------------------------------------------
+        match (ctrl, shift, alt, key.code) {
+            // Esc: clear extra cursors first, then block selection, then unfocus
+            (_, _, _, KeyCode::Esc) => {
+                if self.editor.has_extra_cursors() {
+                    self.editor.clear_extra_cursors();
+                } else if self.editor.block_selection.is_some() {
+                    self.editor.clear_block_selection();
+                } else {
+                    self.editor.ai_status = None;
+                    self.overlay = Overlay::None;
+                }
             }
-            // Ctrl+A: open AI prompt bar
-            (true, _, KeyCode::Char('a')) => {
-                self.editor.open_prompt();
+
+            // --- Prompts & search ---
+            (true, _, false, KeyCode::Char('a')) => self.editor.open_ai_prompt(),
+            (true, _, false, KeyCode::Char('f')) => self.editor.open_search_prompt(),
+            (true, _, false, KeyCode::Char('h')) => self.editor.open_replace_bar(),
+            (true, _, false, KeyCode::Char('g')) => self.editor.open_goto_line_prompt(),
+            (true, _, false, KeyCode::Char('l')) => self.editor.select_current_line(),
+            (true, _, false, KeyCode::Char('r')) => self.editor.open_outline(),
+
+            // --- Undo / Redo ---
+            (true, false, false, KeyCode::Char('z')) => { self.editor.undo(); }
+            (true, false, false, KeyCode::Char('y')) => { self.editor.redo(); }
+            (true, true, false, KeyCode::Char('z')) | (true, true, false, KeyCode::Char('Z')) => { self.editor.redo(); }
+
+            // --- Clipboard ---
+            (true, false, false, KeyCode::Char('c')) => {
+                if self.editor.has_selection() {
+                    if let Some(text) = self.editor.selected_text() {
+                        self.copy_to_system_clipboard(&text);
+                        self.set_status("Copied selection");
+                    }
+                } else {
+                    // Copy current line
+                    let (line, _) = self.editor.cursor;
+                    if let Some(text) = self.editor.lines_ref().get(line) {
+                        let copy = format!("{}\n", text);
+                        self.copy_to_system_clipboard(&copy);
+                        self.set_status("Copied line");
+                    }
+                }
             }
-            // Ctrl+W / Ctrl+X: close the editor panel entirely
-            (true, _, KeyCode::Char('w')) | (true, _, KeyCode::Char('W'))
-            | (true, _, KeyCode::Char('x')) | (true, _, KeyCode::Char('X')) => {
-                self.editor.close();
-                self.overlay = Overlay::None;
+            (true, false, false, KeyCode::Char('x')) => {
+                if let Some(text) = self.editor.cut_selection() {
+                    self.copy_to_system_clipboard(&text);
+                    self.set_status("Cut selection");
+                }
             }
-            (true, _, KeyCode::Char('s')) => {
+            (true, false, false, KeyCode::Char('v')) => {
+                self.paste_from_clipboard();
+            }
+
+            // --- Multi-cursor ---
+            (true, false, true, KeyCode::Up) => {
+                let n = self.editor.add_cursor_above();
+                self.set_status(format!("{} cursors", n + 1));
+            }
+            (true, false, true, KeyCode::Down) => {
+                let n = self.editor.add_cursor_below();
+                self.set_status(format!("{} cursors", n + 1));
+            }
+            (false, false, true, KeyCode::Char('d')) => {
+                self.editor.add_next_occurrence_cursor();
+            }
+            (false, true, true, KeyCode::Char('D')) | (false, true, true, KeyCode::Char('d')) => {
+                self.editor.add_prev_occurrence_cursor();
+            }
+            (false, true, true, KeyCode::Char('L')) | (false, true, true, KeyCode::Char('l')) => {
+                let n = self.editor.add_all_occurrence_cursors();
+                self.set_status(format!("Added {} cursors for all occurrences", n));
+            }
+            (false, false, true, KeyCode::Char('s')) => {
+                self.editor.skip_current_occurrence();
+            }
+            (false, false, true, KeyCode::Backspace) => {
+                self.editor.remove_last_cursor();
+            }
+
+            // --- Line operations ---
+            (false, false, true, KeyCode::Up) => { self.editor.move_lines_up(); }
+            (false, false, true, KeyCode::Down) => { self.editor.move_lines_down(); }
+
+            // --- Replace shortcuts (when replace state exists) ---
+            (false, false, true, KeyCode::Enter) => {
+                self.editor.replace_current_match();
+            }
+            (false, false, true, KeyCode::Char('r')) => {
+                self.editor.replace_current_and_next();
+            }
+            (false, true, true, KeyCode::Char('R')) | (false, true, true, KeyCode::Char('r')) => {
+                if let Some(n) = self.editor.replace_all_current() {
+                    self.set_status(format!("Replaced {} occurrences", n));
+                }
+            }
+
+            // --- Folding ---
+            // Alt+[ → toggle fold at cursor
+            (false, false, true, KeyCode::Char('[')) => self.editor.toggle_fold_at_cursor(),
+            // Alt+Shift+[ = Alt+{ → fold all
+            (false, true, true, KeyCode::Char('{')) | (false, false, true, KeyCode::Char('{')) => {
+                self.editor.fold_all();
+                self.set_status("Folded all");
+            }
+            // Alt+Shift+] = Alt+} → unfold all
+            (false, true, true, KeyCode::Char('}')) | (false, false, true, KeyCode::Char('}')) => {
+                self.editor.unfold_all();
+                self.set_status("Unfolded all");
+            }
+
+            // --- Diagnostics ---
+            (false, false, false, KeyCode::F(8)) => { self.editor.next_diagnostic(); }
+            (false, true, false, KeyCode::F(8)) => { self.editor.prev_diagnostic(); }
+            (true, true, false, KeyCode::Char('m')) | (true, true, false, KeyCode::Char('M')) => {
+                self.editor.toggle_diagnostics();
+            }
+
+            // --- Tabs ---
+            (true, false, false, KeyCode::Tab) => self.editor.next_tab(),
+            (true, true, false, KeyCode::BackTab) | (true, true, false, KeyCode::Tab) => self.editor.prev_tab(),
+            (true, false, false, KeyCode::PageDown) => self.editor.next_tab(),
+            (true, false, false, KeyCode::PageUp) => self.editor.prev_tab(),
+            (true, false, false, KeyCode::Char('w')) => {
+                if self.editor.close_tab() {
+                    self.overlay = Overlay::None;
+                }
+            }
+            // Alt+1..9 → switch tab by number
+            (false, false, true, KeyCode::Char(c @ '1'..='9')) => {
+                let idx = (c as usize) - ('1' as usize);
+                self.editor.switch_tab(idx);
+            }
+
+            // --- Block selection (Shift+Alt+Arrow) ---
+            (false, true, true, KeyCode::Up) => self.editor.extend_block_selection_dir(-1, 0),
+            (false, true, true, KeyCode::Down) => self.editor.extend_block_selection_dir(1, 0),
+            (false, true, true, KeyCode::Left) => self.editor.extend_block_selection_dir(0, -1),
+            (false, true, true, KeyCode::Right) => self.editor.extend_block_selection_dir(0, 1),
+
+            // --- Selection movement (Shift only, no ctrl/alt) ---
+            (false, true, false, KeyCode::Left) => self.editor.select_left(),
+            (false, true, false, KeyCode::Right) => self.editor.select_right(),
+            (false, true, false, KeyCode::Up) => self.editor.select_up(),
+            (false, true, false, KeyCode::Down) => self.editor.select_down(),
+            (false, true, false, KeyCode::Home) => self.editor.select_home(),
+            (false, true, false, KeyCode::End) => self.editor.select_end(),
+            (false, true, false, KeyCode::PageUp) => self.editor.select_page_up(),
+            (false, true, false, KeyCode::PageDown) => self.editor.select_page_down(),
+
+            // --- Save ---
+            (true, false, false, KeyCode::Char('s')) => {
                 match self.editor.save() {
                     Ok(()) => self.set_status("Saved"),
                     Err(e) => self.set_status(format!("Save failed: {}", e)),
                 }
             }
-            // Ctrl+D: delete line / Ctrl+Shift+D: duplicate line (also via palette)
-            (true, true, KeyCode::Char('d')) | (true, true, KeyCode::Char('D')) => {
+            // Ctrl+Shift+D: duplicate line / Ctrl+D: delete line
+            (true, true, false, KeyCode::Char('d')) | (true, true, false, KeyCode::Char('D')) => {
                 self.editor.duplicate_line();
             }
-            (true, false, KeyCode::Char('d')) => {
-                self.editor.delete_line();
+            (true, false, false, KeyCode::Char('d')) => self.editor.delete_line(),
+
+            // --- Word navigation (Ctrl+Arrow) ---
+            (true, false, false, KeyCode::Left) => self.editor.word_left(),
+            (true, false, false, KeyCode::Right) => self.editor.word_right(),
+            (true, false, false, KeyCode::Home) => self.editor.goto_top(),
+            (true, false, false, KeyCode::End) => self.editor.goto_bottom(),
+            // Ctrl+Shift+Left/Right: select by word
+            (true, true, false, KeyCode::Left) => self.editor.select_word_left(),
+            (true, true, false, KeyCode::Right) => self.editor.select_word_right(),
+            (true, true, false, KeyCode::Home) => self.editor.select_top(),
+            (true, true, false, KeyCode::End) => self.editor.select_bottom(),
+
+            // --- Search navigation ---
+            (false, false, false, KeyCode::F(3)) => { self.editor.next_search_match(); }
+            (false, true, false, KeyCode::F(3)) => { self.editor.prev_search_match(); }
+
+            // --- Block selection active: typing/backspace/delete ---
+            (false, false, false, KeyCode::Backspace) if self.editor.block_selection.is_some() => {
+                self.editor.block_backspace();
             }
-            // Fast navigation — Shift+Arrow jumps 5 lines, Ctrl+Arrow jumps by word
-            (_, true, KeyCode::Up) => self.editor.jump_up(),
-            (_, true, KeyCode::Down) => self.editor.jump_down(),
-            (true, _, KeyCode::Left) => self.editor.word_left(),
-            (true, _, KeyCode::Right) => self.editor.word_right(),
-            // Ctrl+Home/End: top/bottom of file
-            (true, _, KeyCode::Home) => self.editor.goto_top(),
-            (true, _, KeyCode::End) => self.editor.goto_bottom(),
-            // Normal movement
-            (false, _, KeyCode::Up) => self.editor.move_up(),
-            (false, _, KeyCode::Down) => self.editor.move_down(),
-            (false, _, KeyCode::Left) => self.editor.move_left(),
-            (false, _, KeyCode::Right) => self.editor.move_right(),
-            (false, _, KeyCode::Home) => self.editor.move_home(),
-            (false, _, KeyCode::End) => self.editor.move_end(),
-            (false, _, KeyCode::PageUp) => self.editor.page_up(),
-            (false, _, KeyCode::PageDown) => self.editor.page_down(),
-            (false, _, KeyCode::Enter) => self.editor.insert_newline(),
-            (false, _, KeyCode::Backspace) => self.editor.backspace(),
-            (false, _, KeyCode::Delete) => self.editor.delete_char(),
-            (false, _, KeyCode::Tab) => self.editor.insert_char('\t'),
-            (false, _, KeyCode::Char(c)) => self.editor.insert_char(c),
+            (false, false, false, KeyCode::Delete) if self.editor.block_selection.is_some() => {
+                self.editor.delete_block_selection();
+            }
+            (false, false, false, KeyCode::Char(c)) if self.editor.block_selection.is_some() => {
+                self.editor.block_insert_char(c);
+            }
+
+            // --- Normal movement & editing ---
+            (false, false, false, KeyCode::Up) => self.editor.move_up(),
+            (false, false, false, KeyCode::Down) => self.editor.move_down(),
+            (false, false, false, KeyCode::Left) => self.editor.move_left(),
+            (false, false, false, KeyCode::Right) => self.editor.move_right(),
+            (false, false, false, KeyCode::Home) => self.editor.move_home(),
+            (false, false, false, KeyCode::End) => self.editor.move_end(),
+            (false, false, false, KeyCode::PageUp) => self.editor.page_up(),
+            (false, false, false, KeyCode::PageDown) => self.editor.page_down(),
+            (false, false, false, KeyCode::Enter) => self.editor.insert_newline(),
+            (false, false, false, KeyCode::Backspace) => self.editor.backspace(),
+            (false, false, false, KeyCode::Delete) => self.editor.delete_char(),
+            (false, false, false, KeyCode::Tab) => self.editor.insert_char('\t'),
+            (false, false, false, KeyCode::Char(c)) => self.editor.insert_char(c),
             _ => {}
         }
         Ok(())
@@ -1231,6 +1991,242 @@ impl App {
     }
 
     // -----------------------------------------------------------------------
+    // Overlay mouse handlers
+    // -----------------------------------------------------------------------
+
+    fn handle_palette_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        let area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
+        let w = 56u16.min(area.width.saturating_sub(4));
+        let h = 24u16.min(area.height.saturating_sub(4));
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 3;
+        let palette_rect = Rect::new(x, y, w, h);
+
+        match mouse.kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                if !Self::rect_contains(palette_rect, mouse.column, mouse.row) {
+                    self.palette.close();
+                    self.overlay = Overlay::None;
+                } else {
+                    // Inner area: palette_rect minus borders (1 each side)
+                    // Input at inner.y, separator at inner.y+1, list starts at inner.y+2
+                    let list_start_y = y + 1 + 2; // border + input + separator
+                    if mouse.row >= list_start_y {
+                        let click_row = (mouse.row - list_start_y) as usize;
+                        self.palette.click_row(click_row);
+                        // Execute on click
+                        if let Some(cmd) = self.palette.execute() {
+                            self.execute_palette_command(&cmd)?;
+                        }
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => { self.palette.move_selection(-1); }
+            MouseEventKind::ScrollDown => { self.palette.move_selection(1); }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_picker_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        let area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
+        let w = 60u16.min(area.width.saturating_sub(4));
+        let h = 20u16.min(area.height.saturating_sub(4));
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + 2;
+        let picker_rect = Rect::new(x, y, w, h);
+
+        match mouse.kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                if !Self::rect_contains(picker_rect, mouse.column, mouse.row) {
+                    self.file_picker.close();
+                    self.overlay = Overlay::None;
+                } else {
+                    // Inner: border (1) + input line (1) = list starts at y+1+1+1 = y+3
+                    let list_start_y = y + 1 + 1; // border + input
+                    if mouse.row >= list_start_y {
+                        let click_row = (mouse.row - list_start_y) as usize;
+                        self.file_picker.click_row(click_row);
+                        // Execute on click (open/diff)
+                        if let Some((path, mode)) = self.file_picker.execute() {
+                            match mode {
+                                PickerMode::Open => {
+                                    match self.editor.open_file(&path) {
+                                        Ok(()) => {
+                                            self.overlay = Overlay::Editor;
+                                        }
+                                        Err(e) => {
+                                            self.set_status(format!("Error: {}", e));
+                                            self.overlay = Overlay::None;
+                                        }
+                                    }
+                                }
+                                PickerMode::Diff => {
+                                    let cwd = self.current_cwd();
+                                    let rel = path.strip_prefix(&format!("{}/", cwd)).unwrap_or(&path);
+                                    let diff_output = std::process::Command::new("git")
+                                        .args(["diff", "HEAD", "--", rel])
+                                        .current_dir(&cwd)
+                                        .output();
+                                    if let Ok(out) = diff_output {
+                                        let text = String::from_utf8_lossy(&out.stdout).to_string();
+                                        if text.trim().is_empty() {
+                                            // Try unstaged
+                                            let diff2 = std::process::Command::new("git")
+                                                .args(["diff", "--", rel])
+                                                .current_dir(&cwd)
+                                                .output();
+                                            if let Ok(out2) = diff2 {
+                                                let text2 = String::from_utf8_lossy(&out2.stdout).to_string();
+                                                if text2.trim().is_empty() {
+                                                    self.set_status("No changes detected");
+                                                    self.overlay = Overlay::None;
+                                                } else {
+                                                    self.diff_viewer.open_with(&text2);
+                                                    self.overlay = Overlay::Diff;
+                                                }
+                                            }
+                                        } else {
+                                            self.diff_viewer.open_with(&text);
+                                            self.overlay = Overlay::Diff;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => { self.file_picker.move_selection(-1); }
+            MouseEventKind::ScrollDown => { self.file_picker.move_selection(1); }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_provider_picker_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        let area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
+        let w = 40u16.min(area.width.saturating_sub(4));
+        let h = (PROVIDER_CHOICES.len() as u16 + 4).min(area.height.saturating_sub(4));
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let picker_rect = Rect::new(x, y, w, h);
+
+        match mouse.kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                if !Self::rect_contains(picker_rect, mouse.column, mouse.row) {
+                    self.overlay = Overlay::None;
+                } else {
+                    // Inner: border (1), list items start at y+1
+                    let list_start_y = y + 1; // border
+                    if mouse.row >= list_start_y {
+                        let click_row = (mouse.row - list_start_y) as usize;
+                        if click_row < PROVIDER_CHOICES.len() {
+                            self.provider_picker.selected = click_row;
+                            self.confirm_provider_picker()?;
+                        }
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => { self.provider_picker.move_selection(-1); }
+            MouseEventKind::ScrollDown => { self.provider_picker.move_selection(1); }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_diff_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        let main_area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
+
+        match mouse.kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                // Click outside the diff area closes it
+                // Diff uses the full main_area, so only the status bar is outside
+                // No close-on-click needed since it fills the view
+            }
+            MouseEventKind::ScrollUp => { self.diff_viewer.scroll_up(3); }
+            MouseEventKind::ScrollDown => { self.diff_viewer.scroll_down(3); }
+            _ => {}
+        }
+        let _ = main_area; // suppress unused warning
+        Ok(())
+    }
+
+    fn handle_deps_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        let area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
+        // The deps viewer uses 80% of area
+        let w = (area.width * 4 / 5).max(40).min(area.width);
+        let h = (area.height * 4 / 5).max(10).min(area.height);
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let overlay_rect = Rect::new(x, y, w, h);
+
+        match mouse.kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                if !Self::rect_contains(overlay_rect, mouse.column, mouse.row) {
+                    self.deps_viewer.close();
+                    self.overlay = Overlay::None;
+                } else {
+                    // Inner area minus border
+                    let inner_y = y + 1;
+                    let inner_h = h.saturating_sub(2);
+                    let half = (inner_h / 2).max(2);
+                    // Imports section: inner_y to inner_y + half
+                    // Imported-by section: inner_y + half to end
+                    if mouse.row >= inner_y && mouse.row < inner_y + half {
+                        self.deps_viewer.focus_imports();
+                    } else if mouse.row >= inner_y + half {
+                        self.deps_viewer.focus_imported_by();
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => { self.deps_viewer.scroll_up(1); }
+            MouseEventKind::ScrollDown => { self.deps_viewer.scroll_down(1); }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_outline_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        let area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
+        let w = 50u16.min(area.width.saturating_sub(4));
+        let h = 20u16.min(area.height.saturating_sub(4));
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 3;
+        let popup_rect = Rect::new(x, y, w, h);
+
+        match mouse.kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                if !Self::rect_contains(popup_rect, mouse.column, mouse.row) {
+                    self.editor.close_outline();
+                } else {
+                    // Inner: border (1) + input line (1), list starts at inner.y + 1
+                    let list_start_y = y + 1 + 1; // border + input
+                    if mouse.row >= list_start_y {
+                        let click_row = (mouse.row - list_start_y) as usize;
+                        let count = self.editor.filtered_outline().len();
+                        if click_row < count {
+                            // Select and confirm
+                            self.editor.outline_select(click_row);
+                            self.editor.outline_confirm();
+                        }
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => { self.editor.outline_move(-1); }
+            MouseEventKind::ScrollDown => { self.editor.outline_move(1); }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Sidebar
     // -----------------------------------------------------------------------
 
@@ -1242,6 +2238,18 @@ impl App {
                 self.file_tree.load(&new_cwd);
             }
         }
+    }
+
+    /// Ensure the sidebar is open and focused (used by palette commands).
+    fn ensure_sidebar_focused(&mut self) {
+        if !self.sidebar_open {
+            let cwd = self.current_cwd();
+            self.file_tree.load(&cwd);
+            self.sidebar_open = true;
+            let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+            self.handle_resize(term_cols, term_rows).ok();
+        }
+        self.sidebar_focused = true;
     }
 
     fn toggle_sidebar(&mut self) {
@@ -1266,6 +2274,59 @@ impl App {
 
     fn handle_sidebar_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // If inline input mode is active, route all keys there first.
+        if self.file_tree.is_input_active() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.file_tree.cancel_input();
+                    self.set_status("Cancelled");
+                }
+                KeyCode::Enter => {
+                    match self.file_tree.confirm_input() {
+                        Ok(Some(msg)) => {
+                            self.file_tree.refresh();
+                            self.set_status(msg);
+                        }
+                        Ok(None) => {}
+                        Err(e) => self.set_status(format!("Error: {}", e)),
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.file_tree.input_backspace();
+                }
+                KeyCode::Char(c) => {
+                    self.file_tree.input_char(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // If a move is pending, handle move-specific keys.
+        if self.file_tree.is_move_pending() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.file_tree.cancel_move();
+                    self.set_status("Move cancelled");
+                }
+                KeyCode::Enter => {
+                    match self.file_tree.complete_move() {
+                        Ok(msg) => {
+                            self.file_tree.refresh();
+                            self.set_status(msg);
+                        }
+                        Err(e) => self.set_status(format!("Move failed: {}", e)),
+                    }
+                }
+                // Still allow navigation while move is pending
+                KeyCode::Up | KeyCode::Char('k') => self.file_tree.move_up(),
+                KeyCode::Down | KeyCode::Char('j') => self.file_tree.move_down(),
+                _ => {}
+            }
+            return Ok(());
+        }
+
         match (ctrl, key.code) {
             // Ctrl+E or Esc/Tab: unfocus sidebar (or close if ctrl)
             (true, KeyCode::Char('e')) => {
@@ -1344,6 +2405,46 @@ impl App {
                         self.overlay = Overlay::Deps;
                     }
                 }
+            }
+            // 'n' — new file
+            (_, KeyCode::Char('n')) => {
+                self.file_tree.start_new_file();
+                self.set_status("New file: type name, Enter to create, Esc to cancel");
+            }
+            // 'N' (Shift+N) — new folder
+            (_, KeyCode::Char('N')) => {
+                self.file_tree.start_new_folder();
+                self.set_status("New folder: type name, Enter to create, Esc to cancel");
+            }
+            // F2 — rename
+            (_, KeyCode::F(2)) => {
+                self.file_tree.start_rename();
+                self.set_status("Rename: edit name, Enter to confirm, Esc to cancel");
+            }
+            // 'x' or Delete — delete
+            (_, KeyCode::Char('x')) | (_, KeyCode::Delete) => {
+                match self.file_tree.delete_selected() {
+                    Ok(msg) => {
+                        self.file_tree.refresh();
+                        self.set_status(msg);
+                    }
+                    Err(e) => self.set_status(format!("Delete failed: {}", e)),
+                }
+            }
+            // 'y' — duplicate
+            (_, KeyCode::Char('y')) => {
+                match self.file_tree.duplicate_selected() {
+                    Ok(msg) => {
+                        self.file_tree.refresh();
+                        self.set_status(msg);
+                    }
+                    Err(e) => self.set_status(format!("Duplicate failed: {}", e)),
+                }
+            }
+            // 'm' — start move
+            (_, KeyCode::Char('m')) => {
+                self.file_tree.start_move();
+                self.set_status("Move: navigate to destination, Enter to drop, Esc to cancel");
             }
             // 'r' — refresh tree
             (_, KeyCode::Char('r')) => {
@@ -1805,7 +2906,8 @@ impl App {
                     let instance =
                         terminal_id.and_then(|tid| self.terminal_mgr.get(tid));
                     let scroll = self.scroll_offsets.get(&agent.id).copied().unwrap_or(0);
-                    render::render_pane(frame, pane_area, agent, is_focused, instance, scroll, &self.theme);
+                    let sel = self.pane_selection.as_ref().filter(|s| s.agent_idx == i);
+                    render::render_pane(frame, pane_area, agent, is_focused, instance, scroll, sel, &self.theme);
                 }
             }
         }

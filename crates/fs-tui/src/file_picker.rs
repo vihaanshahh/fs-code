@@ -115,6 +115,14 @@ impl FilePicker {
         self.selected = new.clamp(0, self.filtered.len() as i32 - 1) as usize;
     }
 
+    /// Select the item at the given visual row (relative to list start).
+    pub fn click_row(&mut self, row: usize) {
+        let new_idx = row; // list starts at selected=0, items shown from index 0
+        if new_idx < self.filtered.len() {
+            self.selected = new_idx;
+        }
+    }
+
     /// Execute selection — returns (full_path, mode).
     pub fn execute(&mut self) -> Option<(String, PickerMode)> {
         let idx = self.filtered.get(self.selected).copied()?;

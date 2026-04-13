@@ -10,7 +10,6 @@ use alacritty_terminal::vte::ansi;
 use alacritty_terminal::Term;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
-
 // ---------------------------------------------------------------------------
 // EventProxy — required by Term, forwards events (bell, title, etc.)
 // ---------------------------------------------------------------------------
@@ -220,5 +219,33 @@ impl TerminalInstance {
             Ok(t) => t.mode().contains(TermMode::ALT_SCREEN),
             Err(_) => false,
         }
+    }
+
+    /// Extract visible text from the terminal screen buffer.
+    /// Returns the current viewport as a newline-separated string, stripping
+    /// trailing whitespace from each row.
+    pub fn visible_text(&self) -> String {
+        let Ok(t) = self.term.lock() else {
+            return String::new();
+        };
+        let grid = t.grid();
+        let rows = grid.screen_lines();
+        let cols = grid.columns();
+        let mut lines = Vec::with_capacity(rows);
+        for row_idx in 0..rows {
+            let row = &grid[alacritty_terminal::index::Line(row_idx as i32)];
+            let mut line = String::with_capacity(cols);
+            for col_idx in 0..cols {
+                let cell = &row[alacritty_terminal::index::Column(col_idx)];
+                let c = cell.c;
+                line.push(if c == '\0' { ' ' } else { c });
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        // Remove trailing empty lines
+        while lines.last().map_or(false, |l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
     }
 }
