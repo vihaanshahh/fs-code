@@ -221,6 +221,21 @@ impl TerminalInstance {
         }
     }
 
+    /// True if the running app has enabled any form of mouse event reporting
+    /// (DECSET 1000/1002/1003, with or without SGR extension). When this is
+    /// on, alt-screen TUIs typically handle wheel events themselves — e.g.
+    /// Ink-based CLIs (GitHub Copilot, Gemini) scroll their own chat log in
+    /// response to SGR wheel escapes, whereas plain arrow keys just navigate
+    /// the prompt history.
+    pub fn mouse_reporting_enabled(&self) -> bool {
+        match self.term.lock() {
+            Ok(t) => t.mode().intersects(
+                TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION,
+            ),
+            Err(_) => false,
+        }
+    }
+
     /// Extract visible text from the terminal screen buffer.
     /// Returns the current viewport as a newline-separated string, stripping
     /// trailing whitespace from each row.
