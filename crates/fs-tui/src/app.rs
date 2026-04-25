@@ -2534,13 +2534,30 @@ impl App {
         };
         let Some(instance) = self.terminal_mgr.get(&terminal_id) else { return };
 
-        // Alt-screen path: forward to PTY as arrow / PgUp / PgDn key sequences.
+        // Alt-screen path: forward to PTY. Ink-based chat UIs (Copilot,
+        // Gemini) enable mouse reporting and scroll in response to SGR
+        // wheel events, but treat arrow keys as prompt-history navigation —
+        // so we prefer wheel escapes whenever the app has mouse tracking
+        // on, and fall back to PgUp/PgDn + arrow keys otherwise (vim,
+        // less, fzf, etc).
         if instance.is_alt_screen() {
-            // Map magnitude → key sequence count.
-            // delta == ±1   → single arrow press
-            // delta == ±20  → single PgUp/PgDn press (page granularity)
-            // anything else → repeated arrow presses
-            let bytes: Vec<u8> = if delta <= -20 {
+            if delta == 0 {
+                return;
+            }
+            let bytes: Vec<u8> = if instance.mouse_reporting_enabled() && delta.abs() < 20 {
+                // SGR mouse wheel: ESC [ < 64 ; col ; row M  (wheel up)
+                //                  ESC [ < 65 ; col ; row M  (wheel down)
+                // One event per unit of delta; page-granularity scrolls
+                // (|delta| >= 20) still fall through to PgUp/PgDn below.
+                let button = if delta < 0 { 64 } else { 65 };
+                let n = delta.unsigned_abs() as usize;
+                let evt = format!("\x1b[<{button};1;1M");
+                let mut v = Vec::with_capacity(evt.len() * n);
+                for _ in 0..n {
+                    v.extend_from_slice(evt.as_bytes());
+                }
+                v
+            } else if delta <= -20 {
                 b"\x1b[5~".to_vec() // PgUp
             } else if delta >= 20 {
                 b"\x1b[6~".to_vec() // PgDn
@@ -2551,15 +2568,13 @@ impl App {
                     v.extend_from_slice(b"\x1b[A"); // Up
                 }
                 v
-            } else if delta > 0 {
+            } else {
                 let n = delta as usize;
                 let mut v = Vec::with_capacity(3 * n);
                 for _ in 0..n {
                     v.extend_from_slice(b"\x1b[B"); // Down
                 }
                 v
-            } else {
-                return;
             };
             let _ = instance.write(&bytes);
             return;

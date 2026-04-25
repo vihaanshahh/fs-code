@@ -1591,7 +1591,7 @@ impl Editor {
     #[allow(dead_code)]
     pub fn scroll_by(&mut self, delta: i32) {
         let visible = self.usable_viewport_height();
-        let max_scroll = self.lines.len().saturating_sub(visible);
+        let max_scroll = self.max_scroll();
         if delta < 0 {
             self.scroll = self.scroll.saturating_sub((-delta) as usize);
         } else {
@@ -1607,8 +1607,7 @@ impl Editor {
     }
 
     pub fn pan_vertical(&mut self, delta: i32) {
-        let visible = self.usable_viewport_height();
-        let max_scroll = self.lines.len().saturating_sub(visible);
+        let max_scroll = self.max_scroll();
         if delta < 0 {
             self.scroll = self.scroll.saturating_sub((-delta) as usize);
         } else {
@@ -2647,12 +2646,39 @@ impl Editor {
             .max(1)
     }
 
+    /// Greatest valid `scroll` value so the end of the file stays reachable.
+    ///
+    /// Without wrap this is just `lines - visible`. With wrap, a single
+    /// logical line may occupy multiple screen rows, so that formula caps
+    /// scroll too early and leaves trailing lines permanently off-screen.
+    /// Here we walk logical lines from the end, summing wrapped heights
+    /// until they fill the viewport, and return the earliest line index
+    /// whose content still fits — guaranteeing the last line is reachable.
+    fn max_scroll(&self) -> usize {
+        if self.lines.is_empty() {
+            return 0;
+        }
+        let visible = self.usable_viewport_height();
+        if !self.wrap || self.viewport_width == 0 {
+            return self.lines.len().saturating_sub(visible);
+        }
+        let mut rows = 0usize;
+        let mut count = 0usize;
+        for line in self.lines.iter().rev() {
+            let wrapped = line.chars().count().max(1).div_ceil(self.viewport_width);
+            if rows + wrapped > visible {
+                break;
+            }
+            rows += wrapped;
+            count += 1;
+        }
+        // Even if a single line exceeds the viewport, the user must still
+        // be able to scroll it to the top.
+        self.lines.len().saturating_sub(count.max(1))
+    }
+
     fn clamp_scroll(&mut self) {
-        let max_scroll = self
-            .lines
-            .len()
-            .saturating_sub(self.usable_viewport_height());
-        self.scroll = self.scroll.min(max_scroll);
+        self.scroll = self.scroll.min(self.max_scroll());
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -3728,6 +3754,23 @@ mod tests {
 
         assert_eq!(editor.scroll, 180);
         assert_eq!(editor.cursor.0, 180);
+    }
+
+    #[test]
+    fn scroll_reaches_end_when_lines_wrap() {
+        // 20 logical lines, each wraps to 2 screen rows at width=10.
+        // Viewport of 10 rows fits 5 wrapped lines, so max_scroll must
+        // allow reaching line 15 — not the 10 that the naive formula
+        // (lines - visible) would produce.
+        let mut editor = Editor::new();
+        editor.lines = (0..20).map(|_| "x".repeat(15)).collect();
+        editor.viewport_height = 10;
+        editor.viewport_width = 10;
+        editor.wrap = true;
+
+        editor.scroll_by(1000);
+
+        assert_eq!(editor.scroll, 15);
     }
 
     #[test]
