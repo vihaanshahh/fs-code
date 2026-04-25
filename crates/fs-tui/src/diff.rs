@@ -300,8 +300,11 @@ impl DiffViewer {
     }
 
     pub fn scroll_down(&mut self, n: usize) {
-        let total = self.total_lines();
-        let max = total.saturating_sub(self.viewport_height.max(1));
+        // Allow overscroll: the user can scroll until the last diff line
+        // sits on the top row of the viewport, with empty rows below.
+        // Otherwise the last line is pinned to the bottom row, which
+        // makes it feel like the end of long diffs is unreachable.
+        let max = self.total_lines().saturating_sub(1);
         self.scroll = (self.scroll + n).min(max);
     }
 
@@ -474,6 +477,33 @@ mod tests {
         assert_eq!(diffs[0].additions, 1);
         assert_eq!(diffs[0].deletions, 0);
         assert_eq!(diffs[0].lines.len(), 5); // header + 2 context + 1 added + 1 context
+    }
+
+    #[test]
+    fn scroll_down_overscrolls_to_last_line() {
+        // Overscroll: the user can scroll until the last line lands on
+        // the *top* row of the viewport (scroll = total - 1), not just
+        // the bottom row (which would be 80 with a 20-row viewport).
+        let lines: Vec<DiffLine> = (0..100)
+            .map(|i| DiffLine {
+                kind: DiffLineKind::Context,
+                old_num: Some(i + 1),
+                new_num: Some(i + 1),
+                content: format!("line {i}"),
+            })
+            .collect();
+        let mut viewer = DiffViewer::new();
+        viewer.diffs = vec![FileDiff {
+            path: "test.txt".into(),
+            lines,
+            additions: 0,
+            deletions: 0,
+        }];
+        viewer.viewport_height = 20;
+
+        viewer.scroll_down(10_000);
+
+        assert_eq!(viewer.scroll, 99);
     }
 
     #[test]

@@ -1591,23 +1591,26 @@ impl Editor {
     #[allow(dead_code)]
     pub fn scroll_by(&mut self, delta: i32) {
         let visible = self.usable_viewport_height();
-        let max_scroll = self.max_scroll();
+        let max_scroll = self.max_user_scroll();
         if delta < 0 {
             self.scroll = self.scroll.saturating_sub((-delta) as usize);
         } else {
             self.scroll = (self.scroll + delta as usize).min(max_scroll);
         }
+        // Keep the cursor anchored to actual content — don't drag it into
+        // the empty overscroll rows past the end of the file.
+        let last_line = self.lines.len().saturating_sub(1);
         if self.cursor.0 < self.scroll {
-            self.cursor.0 = self.scroll;
+            self.cursor.0 = self.scroll.min(last_line);
             self.clamp_col();
         } else if self.cursor.0 >= self.scroll + visible {
-            self.cursor.0 = self.scroll + visible.saturating_sub(1);
+            self.cursor.0 = (self.scroll + visible.saturating_sub(1)).min(last_line);
             self.clamp_col();
         }
     }
 
     pub fn pan_vertical(&mut self, delta: i32) {
-        let max_scroll = self.max_scroll();
+        let max_scroll = self.max_user_scroll();
         if delta < 0 {
             self.scroll = self.scroll.saturating_sub((-delta) as usize);
         } else {
@@ -2675,6 +2678,15 @@ impl Editor {
         // Even if a single line exceeds the viewport, the user must still
         // be able to scroll it to the top.
         self.lines.len().saturating_sub(count.max(1))
+    }
+
+    /// Like `max_scroll`, but allows overscroll so the last line can be
+    /// dragged all the way up to the top of the viewport. This is what
+    /// keyboard- and wheel-driven scrolls clamp to — cursor-following
+    /// scrolls (`ensure_visible`/`clamp_scroll`) still use `max_scroll`
+    /// so the cursor stays anchored to real content.
+    fn max_user_scroll(&self) -> usize {
+        self.lines.len().saturating_sub(1)
     }
 
     fn clamp_scroll(&mut self) {
@@ -3745,23 +3757,25 @@ mod tests {
     use crate::highlight::Lang;
 
     #[test]
-    fn scroll_by_respects_viewport_height() {
+    fn scroll_by_allows_overscroll_to_last_line() {
+        // User-driven scrolls (mouse wheel, PgDn) overscroll the buffer:
+        // the last line can be dragged all the way to the top of the
+        // viewport, leaving empty rows below — same behaviour as VS Code,
+        // Sublime, etc. So with 200 lines, max scroll is 199 (not 180).
         let mut editor = Editor::new();
         editor.lines = (0..200).map(|i| format!("line {i}")).collect();
         editor.viewport_height = 20;
 
         editor.scroll_by(500);
 
-        assert_eq!(editor.scroll, 180);
-        assert_eq!(editor.cursor.0, 180);
+        assert_eq!(editor.scroll, 199);
+        assert_eq!(editor.cursor.0, 199);
     }
 
     #[test]
-    fn scroll_reaches_end_when_lines_wrap() {
-        // 20 logical lines, each wraps to 2 screen rows at width=10.
-        // Viewport of 10 rows fits 5 wrapped lines, so max_scroll must
-        // allow reaching line 15 — not the 10 that the naive formula
-        // (lines - visible) would produce.
+    fn scroll_overscroll_works_when_lines_wrap() {
+        // With wrap on, overscroll still lets the user reach the very
+        // last logical line at the top of the viewport.
         let mut editor = Editor::new();
         editor.lines = (0..20).map(|_| "x".repeat(15)).collect();
         editor.viewport_height = 10;
@@ -3770,17 +3784,22 @@ mod tests {
 
         editor.scroll_by(1000);
 
-        assert_eq!(editor.scroll, 15);
+        assert_eq!(editor.scroll, 19);
     }
 
     #[test]
-    fn prompt_bar_reduces_scrollable_viewport() {
+    fn cursor_move_clamps_scroll_to_real_content() {
+        // Cursor-following scrolls (ensure_visible) still clamp to
+        // max_scroll — the cursor never sits in the empty overscroll
+        // region. Here viewport=10, footer=1 (Search prompt), usable=9,
+        // so max_scroll is 30 - 9 = 21.
         let mut editor = Editor::new();
         editor.lines = (0..30).map(|i| format!("line {i}")).collect();
         editor.viewport_height = 10;
         editor.prompt_mode = Some(PromptMode::Search);
+        editor.cursor = (29, 0);
 
-        editor.scroll_by(100);
+        editor.ensure_visible();
 
         assert_eq!(editor.scroll, 21);
     }

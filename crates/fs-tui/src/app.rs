@@ -377,6 +377,13 @@ pub struct App {
     ai_rx: mpsc::Receiver<AiEditResult>,
     ai_tx: mpsc::Sender<AiEditResult>,
     last_terminal_revisions: HashMap<String, u64>,
+    /// Snapshot of layout-relevant state from the last frame. Whenever
+    /// any of these change (editor opens/closes, sidebar toggles, split
+    /// is dragged, terminal resized, agent count changes), we re-fire
+    /// `handle_resize()` so each agent's PTY follows the visible pane
+    /// dimensions. Without this, Copilot/Ink keeps rendering at a stale
+    /// width and our mouse coords drift relative to its layout.
+    last_layout_sig: Option<(u16, u16, bool, bool, bool, u16, usize)>,
 }
 
 impl App {
@@ -417,6 +424,33 @@ impl App {
             ai_rx,
             ai_tx,
             last_terminal_revisions: HashMap::new(),
+            last_layout_sig: None,
+        }
+    }
+
+    /// Hash of layout-relevant state. Compared each frame to detect changes
+    /// (editor opened, sidebar toggled, split dragged, agents added) that
+    /// require resizing agent PTYs to match their visible pane dimensions.
+    fn layout_signature(&self) -> (u16, u16, bool, bool, bool, u16, usize) {
+        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        (
+            cols,
+            rows,
+            self.sidebar_open,
+            self.editor.is_open(),
+            self.editor_focus_mode,
+            self.editor_split_pct,
+            self.agents.len(),
+        )
+    }
+
+    /// Called at the top of each render. If the layout signature changed
+    /// since the previous frame, resize all agent PTYs.
+    fn relayout_if_needed(&mut self) {
+        let sig = self.layout_signature();
+        if Some(sig) != self.last_layout_sig {
+            let _ = self.handle_resize(0, 0);
+            self.last_layout_sig = Some(sig);
         }
     }
 
@@ -523,10 +557,15 @@ impl App {
         };
         let grid = t.grid();
         let cols = grid.columns();
+        let screen_rows = grid.screen_lines();
         let (s, e) = sel.ordered();
         let mut lines = Vec::new();
         for row in s.0..=e.0 {
-            let line_idx = row as i32 - scroll as i32;
+            // Clamp row to within the visible screen — drags that overshoot
+            // the pane bottom would otherwise read off the end of the alt
+            // screen (which has no scrollback to fall back on).
+            let clamped_row = row.min(screen_rows.saturating_sub(1));
+            let line_idx = clamped_row as i32 - scroll as i32;
             let row_ref = &grid[alacritty_terminal::index::Line(line_idx)];
             let col_start = if row == s.0 { s.1 } else { 0 };
             let col_end = if row == e.0 { e.1.min(cols.saturating_sub(1)) } else { cols.saturating_sub(1) };
@@ -706,6 +745,43 @@ impl App {
         }
     }
 
+    /// Compute the agent grid area (everything not used by sidebar, status
+    /// bar, or editor panel), mirroring the layout in `render()`.
+    fn agent_grid_area(&self) -> Rect {
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        let main_h = term_rows.saturating_sub(1);
+        let sidebar_w = if self.sidebar_open { SIDEBAR_WIDTH } else { 0 };
+        let content_x = sidebar_w;
+        let content_w = term_cols.saturating_sub(sidebar_w);
+        if self.editor.is_open() {
+            if self.editor_focus_mode {
+                let agent_w = ((content_w as u32 * 18 / 100) as u16).clamp(20, 36);
+                let editor_w = content_w.saturating_sub(agent_w);
+                Rect::new(content_x + editor_w, 0, agent_w, main_h)
+            } else {
+                let agent_pct = 100u16.saturating_sub(self.editor_split_pct);
+                let agent_w = (content_w as u32 * agent_pct as u32 / 100) as u16;
+                Rect::new(content_x, 0, agent_w, main_h)
+            }
+        } else {
+            Rect::new(content_x, 0, content_w, main_h)
+        }
+    }
+
+    /// Compute every agent pane rect with the correct sidebar/editor-split
+    /// layout — the source of truth for hit-testing and selection coords.
+    fn pane_rects(&self) -> Vec<Rect> {
+        if self.agents.is_empty() {
+            return Vec::new();
+        }
+        grid::compute_grid(self.agent_grid_area(), self.agents.len())
+    }
+
+    /// Compute the focused agent's pane rect.
+    fn focused_pane_rect(&self) -> Option<Rect> {
+        self.pane_rects().get(self.focused).copied()
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
         // Route to active overlay first — overlays consume all mouse events
         match self.overlay {
@@ -747,9 +823,7 @@ impl App {
                     self.editor.scroll_by(delta);
                 } else if self.overlay == Overlay::None && !self.agents.is_empty() {
                     // Scroll hovered agent pane
-                    let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
-                    let main_area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
-                    let pane_areas = grid::compute_grid(main_area, self.agents.len());
+                    let pane_areas = self.pane_rects();
                     let hovered = pane_areas.iter().position(|a| Self::rect_contains(*a, mouse.column, mouse.row));
                     if let Some(idx) = hovered {
                         let old_cwd = self.current_cwd();
@@ -881,9 +955,7 @@ impl App {
 
                 // --- Agent pane click: focus that agent + start text selection ---
                 if self.overlay == Overlay::None && !self.agents.is_empty() {
-                    let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
-                    let main_area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
-                    let pane_areas = grid::compute_grid(main_area, self.agents.len());
+                    let pane_areas = self.pane_rects();
                     if let Some(idx) = pane_areas.iter().position(|a| Self::rect_contains(*a, mouse.column, mouse.row)) {
                         let old_cwd = self.current_cwd();
                         self.focused = idx;
@@ -939,10 +1011,8 @@ impl App {
                     }
                 } else if self.dragging_pane_selection {
                     // Extend pane text selection via drag
+                    let pane_areas = self.pane_rects();
                     if let Some(ref mut sel) = self.pane_selection {
-                        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
-                        let main_area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
-                        let pane_areas = grid::compute_grid(main_area, self.agents.len());
                         if let Some(&pane) = pane_areas.get(sel.agent_idx) {
                             let inner_x = pane.x + 1;
                             let inner_y = pane.y + 1;
@@ -963,8 +1033,13 @@ impl App {
             // Left mouse up — clear all drag states
             // -----------------------------------------------------------------
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                let was_dragging_border = self.dragging_editor_border;
                 self.dragging_editor_border = false;
                 self.dragging_editor_selection = false;
+                if was_dragging_border {
+                    // Editor split changed — agent PTYs need to follow.
+                    let _ = self.handle_resize(0, 0);
+                }
                 if self.dragging_pane_selection {
                     self.dragging_pane_selection = false;
                     // Auto-copy selection to clipboard on mouse up (if non-empty)
@@ -2490,15 +2565,14 @@ impl App {
         }
     }
 
-    fn handle_resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
-        let sidebar_w = if self.sidebar_open { SIDEBAR_WIDTH } else { 0 };
-        let available_cols = cols.saturating_sub(sidebar_w);
-        let chrome = 1u16; // status bar
-        let areas = grid::compute_grid(
-            Rect::new(0, 0, available_cols, rows.saturating_sub(chrome)),
-            self.agents.len(),
-        );
-
+    fn handle_resize(&mut self, _cols: u16, _rows: u16) -> anyhow::Result<()> {
+        // Use the same geometry helper as render(): accounts for sidebar,
+        // status bar, AND the editor split panel. The previous version
+        // ignored the editor panel, so the PTY thought each pane was
+        // wider than it really was — Copilot/Ink would paint past the
+        // visible edge and mouse coords we sent didn't line up with what
+        // the CLI saw.
+        let areas = self.pane_rects();
         for (i, agent) in self.agents.iter().enumerate() {
             if let Some(area) = areas.get(i) {
                 // Account for border (2) on each side
@@ -2544,6 +2618,20 @@ impl App {
             if delta == 0 {
                 return;
             }
+            // Compute the focused pane's center in PTY-local coords (1-indexed).
+            // Copilot/Ink dispatches wheel events to whichever component is
+            // under the cursor — sending at (1,1) often lands on the header
+            // or input bar. Aiming at the pane center reliably hits the
+            // chat-history region.
+            let (cx, cy) = self
+                .focused_pane_rect()
+                .map(|r| {
+                    let col = r.width / 2 + 1;
+                    let row = r.height / 2 + 1;
+                    (col.max(1), row.max(1))
+                })
+                .unwrap_or((1, 1));
+
             let bytes: Vec<u8> = if instance.mouse_reporting_enabled() && delta.abs() < 20 {
                 // SGR mouse wheel: ESC [ < 64 ; col ; row M  (wheel up)
                 //                  ESC [ < 65 ; col ; row M  (wheel down)
@@ -2551,7 +2639,7 @@ impl App {
                 // (|delta| >= 20) still fall through to PgUp/PgDn below.
                 let button = if delta < 0 { 64 } else { 65 };
                 let n = delta.unsigned_abs() as usize;
-                let evt = format!("\x1b[<{button};1;1M");
+                let evt = format!("\x1b[<{button};{cx};{cy}M");
                 let mut v = Vec::with_capacity(evt.len() * n);
                 for _ in 0..n {
                     v.extend_from_slice(evt.as_bytes());
@@ -2561,18 +2649,28 @@ impl App {
                 b"\x1b[5~".to_vec() // PgUp
             } else if delta >= 20 {
                 b"\x1b[6~".to_vec() // PgDn
-            } else if delta < 0 {
-                let n = (-delta) as usize;
-                let mut v = Vec::with_capacity(3 * n);
+            } else if !instance.mouse_reporting_enabled() {
+                // No mouse reporting — Copilot-style apps won't see wheel
+                // events at all, and arrow keys collide with their prompt
+                // history nav. Use PgUp/PgDn as the universal scroll: it
+                // pages through chat history on Copilot and scrolls in
+                // less/vim. One press per wheel tick.
+                let evt: &[u8] = if delta < 0 { b"\x1b[5~" } else { b"\x1b[6~" };
+                let n = delta.unsigned_abs() as usize;
+                let mut v = Vec::with_capacity(evt.len() * n);
                 for _ in 0..n {
-                    v.extend_from_slice(b"\x1b[A"); // Up
+                    v.extend_from_slice(evt);
                 }
                 v
             } else {
-                let n = delta as usize;
-                let mut v = Vec::with_capacity(3 * n);
+                // Mouse reporting on but somehow we got here (delta in the
+                // arrow-key fallback range). Should not happen with current
+                // logic, but keep arrow keys as a safe default.
+                let arrow: &[u8] = if delta < 0 { b"\x1b[A" } else { b"\x1b[B" };
+                let n = delta.unsigned_abs() as usize;
+                let mut v = Vec::with_capacity(arrow.len() * n);
                 for _ in 0..n {
-                    v.extend_from_slice(b"\x1b[B"); // Down
+                    v.extend_from_slice(arrow);
                 }
                 v
             };
@@ -2853,6 +2951,12 @@ impl App {
     // -----------------------------------------------------------------------
 
     fn render(&mut self, frame: &mut Frame) {
+        // Resize agent PTYs to match the visible pane dimensions whenever
+        // the layout has changed (editor opened/closed, sidebar toggled,
+        // split dragged, etc.) — keeps Copilot/Ink's painted width and
+        // mouse coords aligned with what we render.
+        self.relayout_if_needed();
+
         let area = frame.area();
 
         // Split vertically: main content + 1-row status bar
