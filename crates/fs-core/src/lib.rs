@@ -70,54 +70,7 @@ pub struct AgentDescriptor {
     pub id: AgentId,
     pub name: String,
     pub cwd: String,
-    pub is_active: bool,
     pub provider: Provider,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AgentPhase {
-    Idle,
-    Thinking,
-    Tool,
-    Awaiting,
-    Done,
-}
-
-impl Default for AgentPhase {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
-
-impl std::fmt::Display for AgentPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Idle => write!(f, "Idle"),
-            Self::Thinking => write!(f, "Thinking"),
-            Self::Tool => write!(f, "Tool"),
-            Self::Awaiting => write!(f, "Awaiting"),
-            Self::Done => write!(f, "Done"),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Application events — flow from input/PTY/agent into the event loop
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub enum AppEvent {
-    /// A crossterm input event (key, mouse, resize)
-    Input(crossterm::event::Event),
-    /// PTY produced output for a terminal
-    PtyOutput {
-        terminal_id: TerminalId,
-        data: Vec<u8>,
-    },
-    /// PTY process exited
-    PtyExit { terminal_id: TerminalId, code: i32 },
-    /// Tick — periodic redraw trigger
-    Tick,
 }
 
 // ---------------------------------------------------------------------------
@@ -145,14 +98,10 @@ pub enum KeyAction {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub max_agents: usize,
-    pub default_shell: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            max_agents: 9,
-            default_shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into()),
-        }
+        Self { max_agents: 9 }
     }
 }

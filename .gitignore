@@ -1,15 +1,16 @@
-node_modules
-out
-dist
-*.tgz
+# Rust
+target/
+
+# macOS
+.DS_Store
+
+# Environment
 .env
 .env.*
-.DS_Store
-.cache
-*.tsbuildinfo
-.codex/
 
-# Tauri
-src-tauri/target/
-src-tauri/gen/
-target/
+# Local tooling
+.codex/
+.claude/settings.local.json
+
+# Release artifacts
+*.tgz

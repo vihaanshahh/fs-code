@@ -54,14 +54,4 @@ impl TerminalManager {
     pub fn close_all(&mut self) {
         self.terminals.clear();
     }
-
-    /// Number of active terminals.
-    pub fn count(&self) -> usize {
-        self.terminals.len()
-    }
-
-    /// Iterate over all terminal IDs.
-    pub fn ids(&self) -> impl Iterator<Item = &TerminalId> {
-        self.terminals.keys()
-    }
 }

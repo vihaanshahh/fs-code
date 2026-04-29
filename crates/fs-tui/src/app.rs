@@ -2791,7 +2791,6 @@ impl App {
             id,
             name,
             cwd,
-            is_active: true,
             provider,
         });
 

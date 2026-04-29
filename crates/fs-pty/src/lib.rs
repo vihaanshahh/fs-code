@@ -13,10 +13,3 @@ mod manager;
 
 pub use instance::{EventProxy, TerminalInstance};
 pub use manager::TerminalManager;
-
-/// Dimensions trait required by alacritty_terminal::Term
-#[derive(Debug, Clone, Copy)]
-pub struct TermDimensions {
-    pub cols: u16,
-    pub rows: u16,
-}
