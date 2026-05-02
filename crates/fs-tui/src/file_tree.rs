@@ -107,14 +107,28 @@ impl FileTree {
     // -----------------------------------------------------------------------
 
     pub fn move_up(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-        }
+        self.move_by(-1);
     }
 
     pub fn move_down(&mut self) {
-        if self.selected + 1 < self.nodes.len() {
-            self.selected += 1;
+        self.move_by(1);
+    }
+
+    pub fn move_by(&mut self, delta: i32) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let new = self.selected as i32 + delta;
+        self.selected = new.clamp(0, self.nodes.len() as i32 - 1) as usize;
+    }
+
+    pub fn move_first(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn move_last(&mut self) {
+        if !self.nodes.is_empty() {
+            self.selected = self.nodes.len() - 1;
         }
     }
 
@@ -487,11 +501,27 @@ impl FileTree {
 
     /// Scroll the tree by delta lines (negative = up).
     pub fn scroll_by(&mut self, delta: i32, visible_height: usize) {
+        if self.nodes.is_empty() || visible_height == 0 {
+            return;
+        }
         if delta < 0 {
             self.scroll = self.scroll.saturating_sub((-delta) as usize);
         } else {
             let max = self.nodes.len().saturating_sub(visible_height);
             self.scroll = (self.scroll + delta as usize).min(max);
+        }
+        self.keep_selection_in_scroll_window(visible_height);
+    }
+
+    fn keep_selection_in_scroll_window(&mut self, visible_height: usize) {
+        if self.nodes.is_empty() || visible_height == 0 {
+            return;
+        }
+        let last_visible = self.scroll + visible_height.saturating_sub(1);
+        if self.selected < self.scroll {
+            self.selected = self.scroll.min(self.nodes.len() - 1);
+        } else if self.selected > last_visible {
+            self.selected = last_visible.min(self.nodes.len() - 1);
         }
     }
 
@@ -853,5 +883,31 @@ mod tests {
         let result = tree.confirm_input();
         assert!(matches!(result, Ok(None)));
         assert!(tree.input_mode.is_none());
+    }
+
+    #[test]
+    fn mouse_scroll_keeps_selection_inside_scrolled_window() {
+        let mut tree = make_tree();
+        for i in 0..20 {
+            tree.nodes.push(TreeNode {
+                name: format!("file-{}.txt", i),
+                path: PathBuf::from(format!("/tmp/file-{}.txt", i)),
+                is_dir: false,
+                expanded: false,
+                depth: 0,
+                git_status: ' ',
+            });
+        }
+
+        tree.selected = 0;
+        tree.scroll_by(8, 5);
+
+        assert_eq!(tree.scroll, 8);
+        assert_eq!(tree.selected, 8);
+
+        tree.scroll_by(100, 5);
+
+        assert_eq!(tree.scroll, 15);
+        assert_eq!(tree.selected, 15);
     }
 }

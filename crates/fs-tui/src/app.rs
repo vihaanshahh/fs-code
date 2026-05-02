@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -101,6 +102,12 @@ enum Overlay {
     Editor,
     Diff,
     Deps,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FileOpenTarget {
+    Editor,
+    External,
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +544,39 @@ impl App {
         let _ = clipboard::copy_text(text);
     }
 
+    fn open_file_for_viewing(&mut self, path: &str) -> Result<FileOpenTarget, String> {
+        match file_open_target(path) {
+            FileOpenTarget::External => {
+                open_external_file(path)?;
+                Ok(FileOpenTarget::External)
+            }
+            FileOpenTarget::Editor => {
+                match self.editor.open_file(path) {
+                    Ok(()) => Ok(FileOpenTarget::Editor),
+                    Err(editor_err) if should_fallback_to_external(path, &editor_err) => {
+                        open_external_file(path)?;
+                        Ok(FileOpenTarget::External)
+                    }
+                    Err(editor_err) => Err(editor_err),
+                }
+            }
+        }
+    }
+
+    fn open_file_from_files_ui(&mut self, path: &str) {
+        match self.open_file_for_viewing(path) {
+            Ok(FileOpenTarget::Editor) => {
+                self.sidebar_focused = false;
+                self.overlay = Overlay::Editor;
+                self.set_status(format!("Opened {}", path));
+            }
+            Ok(FileOpenTarget::External) => {
+                self.set_status(format!("Opened {}", path));
+            }
+            Err(e) => self.set_status(format!("Error: {}", e)),
+        }
+    }
+
     /// Extract the selected text from an agent terminal pane.
     fn extract_pane_selection_text(&self, sel: &PaneSelection) -> String {
         let agent = match self.agents.get(sel.agent_idx) {
@@ -880,9 +920,7 @@ impl App {
                                     // Double-click: activate (open file / toggle dir)
                                     if let Some(path) = self.file_tree.activate_selected() {
                                         let path_str = path.to_string_lossy().to_string();
-                                        let _ = self.editor.open_file(&path_str);
-                                        self.overlay = Overlay::Editor;
-                                        self.sidebar_focused = false;
+                                        self.open_file_from_files_ui(&path_str);
                                     }
                                     self.last_sidebar_click = None;
                                     return Ok(());
@@ -1604,13 +1642,7 @@ impl App {
                     self.overlay = Overlay::None;
                     match mode {
                         PickerMode::Open => {
-                            match self.editor.open_file(&path) {
-                                Ok(()) => {
-                                    self.overlay = Overlay::Editor;
-                                    self.set_status(format!("Opened {}", path));
-                                }
-                                Err(e) => self.set_status(format!("Error: {}", e)),
-                            }
+                            self.open_file_from_files_ui(&path);
                         }
                         PickerMode::Diff => {
                             self.open_diff_for_file(&path);
@@ -1622,6 +1654,10 @@ impl App {
             KeyCode::Backspace => self.file_picker.backspace(),
             KeyCode::Up => self.file_picker.move_selection(-1),
             KeyCode::Down => self.file_picker.move_selection(1),
+            KeyCode::PageUp => self.file_picker.move_selection(-10),
+            KeyCode::PageDown => self.file_picker.move_selection(10),
+            KeyCode::Home => self.file_picker.move_first(),
+            KeyCode::End => self.file_picker.move_last(),
             _ => {}
         }
         Ok(())
@@ -2119,63 +2155,34 @@ impl App {
                     self.file_picker.close();
                     self.overlay = Overlay::None;
                 } else {
-                    // Inner: border (1) + input line (1) = list starts at y+1+1+1 = y+3
+                    // Inner starts after the border; the list starts after the input row.
                     let list_start_y = y + 1 + 1; // border + input
                     if mouse.row >= list_start_y {
                         let click_row = (mouse.row - list_start_y) as usize;
                         self.file_picker.click_row(click_row);
                         // Execute on click (open/diff)
                         if let Some((path, mode)) = self.file_picker.execute() {
+                            self.overlay = Overlay::None;
                             match mode {
                                 PickerMode::Open => {
-                                    match self.editor.open_file(&path) {
-                                        Ok(()) => {
-                                            self.overlay = Overlay::Editor;
-                                        }
-                                        Err(e) => {
-                                            self.set_status(format!("Error: {}", e));
-                                            self.overlay = Overlay::None;
-                                        }
-                                    }
+                                    self.open_file_from_files_ui(&path);
                                 }
                                 PickerMode::Diff => {
-                                    let cwd = self.current_cwd();
-                                    let rel = path.strip_prefix(&format!("{}/", cwd)).unwrap_or(&path);
-                                    let diff_output = std::process::Command::new("git")
-                                        .args(["diff", "HEAD", "--", rel])
-                                        .current_dir(&cwd)
-                                        .output();
-                                    if let Ok(out) = diff_output {
-                                        let text = String::from_utf8_lossy(&out.stdout).to_string();
-                                        if text.trim().is_empty() {
-                                            // Try unstaged
-                                            let diff2 = std::process::Command::new("git")
-                                                .args(["diff", "--", rel])
-                                                .current_dir(&cwd)
-                                                .output();
-                                            if let Ok(out2) = diff2 {
-                                                let text2 = String::from_utf8_lossy(&out2.stdout).to_string();
-                                                if text2.trim().is_empty() {
-                                                    self.set_status("No changes detected");
-                                                    self.overlay = Overlay::None;
-                                                } else {
-                                                    self.diff_viewer.open_with(&text2);
-                                                    self.overlay = Overlay::Diff;
-                                                }
-                                            }
-                                        } else {
-                                            self.diff_viewer.open_with(&text);
-                                            self.overlay = Overlay::Diff;
-                                        }
-                                    }
+                                    self.open_diff_for_file(&path);
                                 }
                             }
                         }
                     }
                 }
             }
-            MouseEventKind::ScrollUp => { self.file_picker.move_selection(-1); }
-            MouseEventKind::ScrollDown => { self.file_picker.move_selection(1); }
+            MouseEventKind::ScrollUp => {
+                let visible = h.saturating_sub(3) as usize;
+                self.file_picker.scroll_by(-3, visible);
+            }
+            MouseEventKind::ScrollDown => {
+                let visible = h.saturating_sub(3) as usize;
+                self.file_picker.scroll_by(3, visible);
+            }
             _ => {}
         }
         Ok(())
@@ -2397,6 +2404,10 @@ impl App {
                 // Still allow navigation while move is pending
                 KeyCode::Up | KeyCode::Char('k') => self.file_tree.move_up(),
                 KeyCode::Down | KeyCode::Char('j') => self.file_tree.move_down(),
+                KeyCode::PageUp => self.file_tree.move_by(-10),
+                KeyCode::PageDown => self.file_tree.move_by(10),
+                KeyCode::Home => self.file_tree.move_first(),
+                KeyCode::End => self.file_tree.move_last(),
                 _ => {}
             }
             return Ok(());
@@ -2414,18 +2425,15 @@ impl App {
             // Navigation
             (_, KeyCode::Up) | (_, KeyCode::Char('k')) => self.file_tree.move_up(),
             (_, KeyCode::Down) | (_, KeyCode::Char('j')) => self.file_tree.move_down(),
+            (_, KeyCode::PageUp) => self.file_tree.move_by(-10),
+            (_, KeyCode::PageDown) => self.file_tree.move_by(10),
+            (_, KeyCode::Home) => self.file_tree.move_first(),
+            (_, KeyCode::End) => self.file_tree.move_last(),
             // Activate: expand dir or open file
             (_, KeyCode::Enter) | (_, KeyCode::Char(' ')) => {
                 if let Some(path) = self.file_tree.activate_selected() {
                     let path_str = path.to_string_lossy().to_string();
-                    match self.editor.open_file(&path_str) {
-                        Ok(()) => {
-                            self.sidebar_focused = false;
-                            self.overlay = Overlay::Editor;
-                            self.set_status(format!("Opened {}", path_str));
-                        }
-                        Err(e) => self.set_status(format!("Error: {}", e)),
-                    }
+                    self.open_file_from_files_ui(&path_str);
                 }
             }
             // 'e' — explicitly open selected file in editor
@@ -2433,14 +2441,7 @@ impl App {
                 if let Some(path) = self.file_tree.selected_path() {
                     if !path.is_dir() {
                         let path_str = path.to_string_lossy().to_string();
-                        match self.editor.open_file(&path_str) {
-                            Ok(()) => {
-                                self.sidebar_focused = false;
-                                self.overlay = Overlay::Editor;
-                                self.set_status(format!("Opened {}", path_str));
-                            }
-                            Err(e) => self.set_status(format!("Error: {}", e)),
-                        }
+                        self.open_file_from_files_ui(&path_str);
                     }
                 }
             }
@@ -3041,7 +3042,7 @@ impl App {
             Overlay::Diff =>
                 " ↑↓/jk scroll │ ←→/hl prev/next file │ e edit │ q close ",
             Overlay::FilePicker =>
-                " ↑↓ navigate │ Enter open │ Esc cancel ",
+                " ↑↓ navigate │ PgUp/Dn │ Enter open │ Esc cancel ",
             Overlay::FolderInput =>
                 " Tab complete │ Enter confirm │ Esc cancel ",
             Overlay::ProviderPicker =>
@@ -3051,7 +3052,7 @@ impl App {
             Overlay::Deps =>
                 " Tab switch │ j/k scroll │ PgUp/Dn │ q/Esc close ",
             Overlay::None if self.sidebar_focused =>
-                " ↑↓/jk navigate │ Enter expand/open │ e edit │ d diff │ i deps │ r refresh │ Esc unfocus ",
+                " ↑↓/jk navigate │ PgUp/Dn │ Enter expand/open │ e open │ d diff │ i deps │ r refresh │ Esc unfocus ",
             Overlay::None if self.editor.is_open() =>
                 " ^F focus editor │ ^B big editor │ ^W close │ Tab cycle │ ^E tree │ ^D diff │ ^I deps │ ^K palette ",
             Overlay::None =>
@@ -3079,6 +3080,79 @@ impl App {
             Overlay::Deps       => self.deps_viewer.render(frame, main_area, &self.theme),
             Overlay::None       => {}
         }
+    }
+}
+
+fn is_image_file(path: &str) -> bool {
+    let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" |
+        "tif" | "tiff" | "ico" | "heic" | "avif" | "svg"
+    )
+}
+
+fn file_open_target(path: &str) -> FileOpenTarget {
+    if is_image_file(path) {
+        FileOpenTarget::External
+    } else {
+        FileOpenTarget::Editor
+    }
+}
+
+fn should_fallback_to_external(path: &str, editor_err: &str) -> bool {
+    Path::new(path).is_file() && editor_err.contains("stream did not contain valid UTF-8")
+}
+
+fn open_external_file(path: &str) -> Result<(), String> {
+    if !Path::new(path).exists() {
+        return Err("File does not exist".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .arg(path)
+            .status()
+            .map_err(|e| format!("Could not open external viewer: {}", e))?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("External viewer exited with status {}", status))
+        };
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "start", "", path])
+            .status()
+            .map_err(|e| format!("Could not open external viewer: {}", e))?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("External viewer exited with status {}", status))
+        };
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let status = std::process::Command::new("xdg-open")
+            .arg(path)
+            .status()
+            .map_err(|e| format!("Could not open external viewer: {}", e))?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("External viewer exited with status {}", status))
+        };
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err("External file opening is not supported on this platform".to_string())
     }
 }
 
@@ -3137,5 +3211,49 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
             _ => vec![],
         },
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_file_detection_is_case_insensitive() {
+        assert!(is_image_file("asset/photo.png"));
+        assert!(is_image_file("asset/photo.JPG"));
+        assert!(is_image_file("asset/icon.SVG"));
+        assert!(is_image_file("asset/preview.webp"));
+        assert!(!is_image_file("src/main.rs"));
+        assert!(!is_image_file("README"));
+    }
+
+    #[test]
+    fn file_open_target_routes_images_externally() {
+        assert_eq!(file_open_target("asset/photo.png"), FileOpenTarget::External);
+        assert_eq!(file_open_target("src/main.rs"), FileOpenTarget::Editor);
+    }
+
+    #[test]
+    fn utf8_read_errors_can_fallback_to_external() {
+        let root = std::env::temp_dir().join(format!(
+            "fs-code-app-open-target-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("binary-file");
+        std::fs::write(&file, [0xff, 0xfe, 0xfd]).unwrap();
+
+        assert!(should_fallback_to_external(
+            file.to_str().unwrap(),
+            "stream did not contain valid UTF-8"
+        ));
+        assert!(!should_fallback_to_external(
+            file.to_str().unwrap(),
+            "No such file or directory"
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -1,0 +1,76 @@
+name: Auto Bump Version
+
+on:
+  push:
+    branches:
+      - "**"
+    tags-ignore:
+      - "**"
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    if: github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[skip version bump]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check whether this push already bumped the version
+        id: check
+        shell: bash
+        run: |
+          current="$(awk '
+            /^\[workspace\.package\]$/ { in_workspace_package = 1; next }
+            /^\[/ && $0 !~ /^\[workspace\.package\]$/ { in_workspace_package = 0 }
+            in_workspace_package && $1 == "version" {
+              gsub(/"/, "", $3)
+              print $3
+              exit
+            }
+          ' Cargo.toml)"
+
+          previous=""
+          if git rev-parse HEAD^ >/dev/null 2>&1; then
+            previous="$(git show HEAD^:Cargo.toml | awk '
+              /^\[workspace\.package\]$/ { in_workspace_package = 1; next }
+              /^\[/ && $0 !~ /^\[workspace\.package\]$/ { in_workspace_package = 0 }
+              in_workspace_package && $1 == "version" {
+                gsub(/"/, "", $3)
+                print $3
+                exit
+              }
+            ')"
+          fi
+
+          if [ -n "$previous" ] && [ "$previous" != "$current" ]; then
+            echo "already_bumped=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_bumped=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump patch version
+        if: steps.check.outputs.already_bumped != 'true'
+        id: bump
+        shell: bash
+        run: |
+          next="$(scripts/bump-patch-version.sh)"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Commit version bump
+        if: steps.check.outputs.already_bumped != 'true'
+        shell: bash
+        run: |
+          if git diff --quiet -- Cargo.toml Cargo.lock; then
+            echo "No version changes to commit"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump version to v${{ steps.bump.outputs.next }} [skip version bump]"
+          git push

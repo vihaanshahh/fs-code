@@ -28,7 +28,6 @@ const IGNORE_DIRS: &[&str] = &[
 ];
 
 const IGNORE_EXTS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "ico", "svg",
     "woff", "woff2", "ttf", "eot",
     "lock", "pyc", "o", "so", "dylib",
 ];
@@ -53,6 +52,7 @@ pub struct FilePicker {
     file_statuses: Vec<char>,
     filtered: Vec<usize>, // indices into files
     selected: usize,
+    scroll: usize,
     cwd: String,
 }
 
@@ -66,6 +66,7 @@ impl FilePicker {
             file_statuses: Vec::new(),
             filtered: Vec::new(),
             selected: 0,
+            scroll: 0,
             cwd: String::new(),
         }
     }
@@ -76,6 +77,7 @@ impl FilePicker {
         self.mode = mode;
         self.input.clear();
         self.selected = 0;
+        self.scroll = 0;
         match mode {
             PickerMode::Diff => {
                 let (files, statuses) = collect_git_files(cwd);
@@ -99,12 +101,14 @@ impl FilePicker {
         self.input.push(c);
         self.refilter();
         self.selected = 0;
+        self.scroll = 0;
     }
 
     pub fn backspace(&mut self) {
         self.input.pop();
         self.refilter();
         self.selected = 0;
+        self.scroll = 0;
     }
 
     pub fn move_selection(&mut self, delta: i32) {
@@ -115,12 +119,36 @@ impl FilePicker {
         self.selected = new.clamp(0, self.filtered.len() as i32 - 1) as usize;
     }
 
+    pub fn move_first(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn move_last(&mut self) {
+        if !self.filtered.is_empty() {
+            self.selected = self.filtered.len() - 1;
+        }
+    }
+
     /// Select the item at the given visual row (relative to list start).
     pub fn click_row(&mut self, row: usize) {
-        let new_idx = row; // list starts at selected=0, items shown from index 0
+        let new_idx = self.scroll + row;
         if new_idx < self.filtered.len() {
             self.selected = new_idx;
         }
+    }
+
+    /// Scroll the visible result window by delta lines (negative = up).
+    pub fn scroll_by(&mut self, delta: i32, visible_height: usize) {
+        if self.filtered.is_empty() || visible_height == 0 {
+            return;
+        }
+        if delta < 0 {
+            self.scroll = self.scroll.saturating_sub((-delta) as usize);
+        } else {
+            let max = self.filtered.len().saturating_sub(visible_height);
+            self.scroll = (self.scroll + delta as usize).min(max);
+        }
+        self.keep_selection_in_scroll_window(visible_height);
     }
 
     /// Execute selection — returns (full_path, mode).
@@ -145,11 +173,10 @@ impl FilePicker {
             .enumerate()
             .filter(|(_, f)| query.is_empty() || fuzzy_match(&f.to_lowercase(), &query))
             .map(|(i, _)| i)
-            .take(100)
             .collect();
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let w = 60u16.min(area.width.saturating_sub(4));
         let h = 20u16.min(area.height.saturating_sub(4));
         let x = area.x + (area.width.saturating_sub(w)) / 2;
@@ -191,15 +218,17 @@ impl FilePicker {
         // File list
         let list_area = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
         let max_items = list_area.height as usize;
+        self.keep_selected_visible(max_items);
 
         let items: Vec<ListItem> = self
             .filtered
             .iter()
+            .skip(self.scroll)
             .take(max_items)
             .enumerate()
             .map(|(i, &file_idx)| {
                 let path = &self.files[file_idx];
-                let is_selected = i == self.selected;
+                let is_selected = self.scroll + i == self.selected;
 
                 let (prefix, style) = if is_selected {
                     ("▸ ", Style::default().fg(theme.text).add_modifier(Modifier::BOLD | Modifier::REVERSED))
@@ -231,6 +260,35 @@ impl FilePicker {
             .collect();
 
         frame.render_widget(List::new(items), list_area);
+    }
+
+    fn keep_selected_visible(&mut self, visible_height: usize) {
+        if visible_height == 0 || self.filtered.is_empty() {
+            self.scroll = 0;
+            return;
+        }
+        if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len() - 1;
+        }
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + visible_height {
+            self.scroll = self.selected - visible_height + 1;
+        }
+        let max_scroll = self.filtered.len().saturating_sub(visible_height);
+        self.scroll = self.scroll.min(max_scroll);
+    }
+
+    fn keep_selection_in_scroll_window(&mut self, visible_height: usize) {
+        if visible_height == 0 || self.filtered.is_empty() {
+            return;
+        }
+        let last_visible = self.scroll + visible_height.saturating_sub(1);
+        if self.selected < self.scroll {
+            self.selected = self.scroll.min(self.filtered.len() - 1);
+        } else if self.selected > last_visible {
+            self.selected = last_visible.min(self.filtered.len() - 1);
+        }
     }
 }
 
@@ -434,5 +492,49 @@ mod tests {
         let (files, statuses) = parse_git_status("");
         assert!(files.is_empty());
         assert!(statuses.is_empty());
+    }
+
+    #[test]
+    fn refilter_keeps_matches_past_first_hundred() {
+        let mut picker = FilePicker::new();
+        picker.files = (0..150).map(|i| format!("src/file-{}.rs", i)).collect();
+        picker.file_statuses = vec![' '; picker.files.len()];
+
+        picker.refilter();
+
+        assert_eq!(picker.filtered.len(), 150);
+    }
+
+    #[test]
+    fn scroll_by_reaches_later_results_and_click_uses_scroll_offset() {
+        let mut picker = FilePicker::new();
+        picker.files = (0..150).map(|i| format!("src/file-{}.rs", i)).collect();
+        picker.file_statuses = vec![' '; picker.files.len()];
+        picker.refilter();
+
+        picker.scroll_by(1_000, 10);
+
+        assert_eq!(picker.scroll, 140);
+        assert_eq!(picker.selected, 140);
+
+        picker.click_row(9);
+
+        assert_eq!(picker.selected, 149);
+    }
+
+    #[test]
+    fn collect_files_includes_images_for_external_opening() {
+        let root = std::env::temp_dir().join(format!(
+            "fs-code-file-picker-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("photo.png"), b"not a real image").unwrap();
+
+        let files = collect_files(root.to_str().unwrap(), 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(files.contains(&"photo.png".to_string()));
     }
 }
