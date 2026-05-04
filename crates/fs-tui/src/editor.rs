@@ -15,7 +15,8 @@
 //!   - Multi-tab file management
 //!   - Inline find/replace bar
 
-use std::collections::HashSet;
+use std::collections::{hash_map::DefaultHasher, HashSet};
+use std::hash::{Hash, Hasher};
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Scrollbar, ScrollbarOrientation, ScrollbarState};
@@ -168,6 +169,14 @@ pub enum PromptSubmit {
     GotoLine {
         line: usize,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenFileOutcome {
+    Opened,
+    Reloaded,
+    PreservedDirty,
+    PreservedDirtyWithDiskChanges,
 }
 
 #[derive(Clone)]
@@ -342,6 +351,7 @@ pub struct Editor {
     // -- Code folding --
     folded: HashSet<usize>,
     fold_hidden: Vec<(usize, usize)>, // cached sorted (start_exclusive, end_inclusive) ranges
+    disk_hash: Option<u64>,
     // -- Diagnostics --
     diagnostics: Vec<Diagnostic>,
     pub show_diagnostics: bool,
@@ -377,6 +387,7 @@ struct EditorTab {
     extra_cursors: Vec<(usize, usize)>,
     folded: HashSet<usize>,
     diagnostics: Vec<Diagnostic>,
+    disk_hash: Option<u64>,
 }
 
 #[allow(dead_code)]
@@ -421,6 +432,7 @@ impl Editor {
             // Code folding
             folded: HashSet::new(),
             fold_hidden: Vec::new(),
+            disk_hash: None,
             // Diagnostics
             diagnostics: Vec::new(),
             show_diagnostics: true,
@@ -473,17 +485,29 @@ impl Editor {
         self.wrap
     }
 
-    pub fn open_file(&mut self, path: &str) -> Result<(), String> {
+    pub fn open_file(&mut self, path: &str) -> Result<OpenFileOutcome, String> {
         // Tab deduplication: if this file is already open in a tab, switch to it
         if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
             self.save_current_tab();
             self.active_tab = idx;
             self.restore_active_tab();
+            // Explicitly opening a clean cached tab should reflect disk changes.
+            if !self.dirty {
+                self.reload()?;
+                self.open = true;
+                return Ok(OpenFileOutcome::Reloaded);
+            }
+            let outcome = if self.disk_changed_since_load() {
+                OpenFileOutcome::PreservedDirtyWithDiskChanges
+            } else {
+                OpenFileOutcome::PreservedDirty
+            };
             self.open = true;
-            return Ok(());
+            return Ok(outcome);
         }
 
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let disk_hash = Self::content_hash(&content);
 
         // Save current state to tab before switching
         if self.open && !self.path.is_empty() {
@@ -516,6 +540,7 @@ impl Editor {
         self.block_selection = None;
         self.folded.clear();
         self.fold_hidden.clear();
+        self.disk_hash = Some(disk_hash);
         self.diagnostics.clear();
         self.diagnostic_cursor = None;
         self.replace_open = false;
@@ -523,7 +548,10 @@ impl Editor {
 
         // Add/update tab
         self.save_current_tab();
-        Ok(())
+        // save_current_tab moves the live buffer into the tab slot; restore it
+        // so the newly opened file is visible immediately.
+        self.restore_active_tab();
+        Ok(OpenFileOutcome::Opened)
     }
 
     pub fn close(&mut self) {
@@ -579,6 +607,7 @@ impl Editor {
             extra_cursors: std::mem::take(&mut self.extra_cursors),
             folded: std::mem::take(&mut self.folded),
             diagnostics: std::mem::take(&mut self.diagnostics),
+            disk_hash: self.disk_hash,
         };
         // Safety: ensure lines is never empty after take
         if self.lines.is_empty() {
@@ -620,6 +649,7 @@ impl Editor {
         std::mem::swap(&mut self.extra_cursors, &mut tab.extra_cursors);
         std::mem::swap(&mut self.folded, &mut tab.folded);
         std::mem::swap(&mut self.diagnostics, &mut tab.diagnostics);
+        self.disk_hash = tab.disk_hash;
         // Safety: lines must never be empty
         if self.lines.is_empty() {
             self.lines.push(String::new());
@@ -631,6 +661,21 @@ impl Editor {
         self.replace_open = false;
         self.outline_open = false;
         self.rebuild_fold_cache();
+    }
+
+    fn content_hash(content: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn disk_changed_since_load(&self) -> bool {
+        let Some(disk_hash) = self.disk_hash else {
+            return false;
+        };
+        std::fs::read_to_string(&self.path)
+            .map(|content| Self::content_hash(&content) != disk_hash)
+            .unwrap_or(false)
     }
 
     /// Number of open tabs.
@@ -1309,10 +1354,16 @@ impl Editor {
     }
 
     pub fn save(&mut self) -> Result<(), String> {
-        let content = self.lines.join("\n") + "\n";
-        std::fs::write(&self.path, content).map_err(|e| e.to_string())?;
+        let content = self.content();
+        let disk_hash = Self::content_hash(&content);
+        std::fs::write(&self.path, &content).map_err(|e| e.to_string())?;
+        self.disk_hash = Some(disk_hash);
         self.dirty = false;
         Ok(())
+    }
+
+    pub fn content(&self) -> String {
+        self.lines.join("\n") + "\n"
     }
 
     pub fn open_ai_prompt(&mut self) {
@@ -1392,6 +1443,7 @@ impl Editor {
 
     pub fn reload(&mut self) -> Result<(), String> {
         let content = std::fs::read_to_string(&self.path).map_err(|e| e.to_string())?;
+        let disk_hash = Self::content_hash(&content);
         let old_cursor = self.cursor;
         self.lines = content.lines().map(|l| l.to_string()).collect();
         if self.lines.is_empty() {
@@ -1412,6 +1464,7 @@ impl Editor {
             self.set_search_query(query);
         }
         self.ensure_visible();
+        self.disk_hash = Some(disk_hash);
         self.dirty = false;
         Ok(())
     }
@@ -3753,8 +3806,19 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Editor, PromptMode, SelectionRange, SelectionSet};
+    use super::{Editor, OpenFileOutcome, PromptMode, SelectionRange, SelectionSet};
     use crate::highlight::Lang;
+
+    fn editor_test_dir(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "fs-code-editor-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
 
     #[test]
     fn scroll_by_allows_overscroll_to_last_line() {
@@ -4426,6 +4490,106 @@ mod tests {
     // -----------------------------------------------------------------------
     // Feature: Tab management
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn open_file_keeps_loaded_content_visible() {
+        let root = editor_test_dir("open-visible");
+        let file = root.join("visible.txt");
+        std::fs::write(&file, "alpha\nbeta\n").unwrap();
+
+        let mut editor = Editor::new();
+        let outcome = editor.open_file(file.to_str().unwrap()).unwrap();
+
+        assert_eq!(outcome, OpenFileOutcome::Opened);
+        assert_eq!(editor.lines, vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(editor.tab_count(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn opening_existing_clean_tab_reloads_disk_content() {
+        let root = editor_test_dir("open-reload-clean");
+        let file = root.join("reload.txt");
+        std::fs::write(&file, "old\n").unwrap();
+
+        let mut editor = Editor::new();
+        editor.open_file(file.to_str().unwrap()).unwrap();
+        assert_eq!(editor.lines, vec!["old".to_string()]);
+
+        std::fs::write(&file, "new\n").unwrap();
+        let outcome = editor.open_file(file.to_str().unwrap()).unwrap();
+
+        assert_eq!(outcome, OpenFileOutcome::Reloaded);
+        assert_eq!(editor.lines, vec!["new".to_string()]);
+        assert!(!editor.dirty);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn opening_existing_dirty_tab_without_disk_change_reports_preserved_dirty() {
+        let root = editor_test_dir("open-preserve-dirty-unchanged");
+        let file = root.join("dirty-unchanged.txt");
+        std::fs::write(&file, "local\n").unwrap();
+
+        let mut editor = Editor::new();
+        editor.open_file(file.to_str().unwrap()).unwrap();
+        editor.insert_char('X');
+
+        let outcome = editor.open_file(file.to_str().unwrap()).unwrap();
+
+        assert_eq!(outcome, OpenFileOutcome::PreservedDirty);
+        assert_eq!(editor.lines, vec!["Xlocal".to_string()]);
+        assert!(editor.dirty);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn opening_existing_dirty_tab_with_disk_change_reports_conflict() {
+        let root = editor_test_dir("open-preserve-dirty");
+        let file = root.join("dirty.txt");
+        std::fs::write(&file, "local\n").unwrap();
+
+        let mut editor = Editor::new();
+        editor.open_file(file.to_str().unwrap()).unwrap();
+        editor.insert_char('X');
+        assert_eq!(editor.lines, vec!["Xlocal".to_string()]);
+        assert!(editor.dirty);
+
+        std::fs::write(&file, "external\n").unwrap();
+        let outcome = editor.open_file(file.to_str().unwrap()).unwrap();
+
+        assert_eq!(outcome, OpenFileOutcome::PreservedDirtyWithDiskChanges);
+        assert_eq!(editor.lines, vec!["Xlocal".to_string()]);
+        assert!(editor.dirty);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tab_switching_preserves_file_contents_after_open_file() {
+        let root = editor_test_dir("switch-preserves-content");
+        let a = root.join("a.txt");
+        let b = root.join("b.txt");
+        std::fs::write(&a, "file_a\n").unwrap();
+        std::fs::write(&b, "file_b\n").unwrap();
+
+        let mut editor = Editor::new();
+        editor.open_file(a.to_str().unwrap()).unwrap();
+        editor.open_file(b.to_str().unwrap()).unwrap();
+
+        editor.switch_tab(0);
+        assert_eq!(editor.path, a.to_string_lossy().to_string());
+        assert_eq!(editor.lines, vec!["file_a".to_string()]);
+
+        editor.switch_tab(1);
+        assert_eq!(editor.path, b.to_string_lossy().to_string());
+        assert_eq!(editor.lines, vec!["file_b".to_string()]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn tab_management_tracks_open_files() {

@@ -537,7 +537,7 @@ impl FileTree {
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, is_focused: bool) {
         let border_style = if is_focused {
-            Style::default().fg(theme.accent)
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.border)
         };
@@ -551,7 +551,7 @@ impl FileTree {
         let title = Span::styled(
             title_label,
             Style::default()
-                .fg(if is_focused { theme.accent } else { theme.text_muted })
+                .fg(if is_focused { theme.text } else { theme.text_muted })
                 .add_modifier(if is_focused { Modifier::BOLD } else { Modifier::empty() }),
         );
 
@@ -613,44 +613,79 @@ impl FileTree {
 
                 let move_indicator = if is_move_src { " ✂" } else { "" };
 
-                let status_badge: &str = match node.git_status {
-                    'M' => " M",
-                    'A' => " A",
-                    'D' => " D",
-                    '?' => " ?",
-                    _ => "",
+                let (status_badge, status_color): (&str, Color) = match node.git_status {
+                    'M' => (" M", theme.amber),
+                    'A' => (" A", theme.green),
+                    'D' => (" D", theme.red),
+                    '?' => (" ?", theme.text_muted),
+                    _ => ("", theme.text_muted),
+                };
+
+                let type_color = if node.is_dir { theme.blue } else { theme.text };
+                let base_style = if is_sel && is_renaming {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(theme.amber)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_sel {
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_move_src {
+                    Style::default().fg(theme.text_muted).bg(theme.bg_surface)
+                } else {
+                    Style::default().fg(type_color).bg(theme.bg_surface)
+                };
+                let muted_style = if is_sel {
+                    base_style
+                } else {
+                    Style::default().fg(theme.text_muted).bg(theme.bg_surface)
+                };
+                let name_style = if is_sel || is_move_src {
+                    base_style
+                } else {
+                    Style::default().fg(type_color).bg(theme.bg_surface)
+                };
+                let status_style = if is_sel {
+                    base_style
+                } else {
+                    Style::default()
+                        .fg(status_color)
+                        .bg(theme.bg_surface)
+                        .add_modifier(if status_badge.is_empty() {
+                            Modifier::empty()
+                        } else {
+                            Modifier::BOLD
+                        })
+                };
+                let move_style = if is_sel {
+                    base_style
+                } else {
+                    Style::default()
+                        .fg(theme.amber)
+                        .bg(theme.bg_surface)
+                        .add_modifier(Modifier::BOLD)
                 };
 
                 // Truncate name to fit, leaving room for indent, icon, badge, move indicator
-                let overhead = indent.len() + icon.len() + status_badge.len() + move_indicator.len();
+                let overhead = indent.chars().count()
+                    + icon.chars().count()
+                    + status_badge.chars().count()
+                    + move_indicator.chars().count();
                 let name_max = max_w.saturating_sub(overhead);
                 let name_display: String = name_part.chars().take(name_max).collect();
+                let row_len = overhead + name_display.chars().count();
+                let trailing = " ".repeat(max_w.saturating_sub(row_len));
 
-                let label = format!("{}{}{}{}{}", indent, icon, name_display, status_badge, move_indicator);
-
-                let (fg, bg) = if is_sel && is_renaming {
-                    // Highlight the rename input
-                    (theme.text, theme.accent)
-                } else if is_sel {
-                    (Color::White, theme.accent)
-                } else if is_move_src {
-                    (theme.text_muted, theme.bg_surface)
-                } else {
-                    let fg = match node.git_status {
-                        'M' => theme.amber,
-                        'A' => theme.green,
-                        'D' => theme.red,
-                        '?' => theme.text_muted,
-                        _ if node.is_dir => theme.blue,
-                        _ => theme.text,
-                    };
-                    (fg, theme.bg_surface)
-                };
-
-                ListItem::new(Line::from(Span::styled(
-                    label,
-                    Style::default().fg(fg).bg(bg),
-                )))
+                ListItem::new(Line::from(vec![
+                    Span::styled(indent, muted_style),
+                    Span::styled(icon, if node.is_dir { name_style } else { muted_style }),
+                    Span::styled(name_display, name_style),
+                    Span::styled(status_badge, status_style),
+                    Span::styled(move_indicator, move_style),
+                    Span::styled(trailing, base_style),
+                ]))
             })
             .collect();
 
@@ -676,11 +711,15 @@ impl FileTree {
                 };
                 let input_display = format!("{}{}|", prompt_label, self.input_buf);
                 let truncated: String = input_display.chars().take(max_w).collect();
+                let trailing = " ".repeat(max_w.saturating_sub(truncated.chars().count()));
                 let input_area = Rect::new(inner.x, input_y, inner.width, 1);
                 frame.render_widget(
                     ratatui::widgets::Paragraph::new(Line::from(Span::styled(
-                        truncated,
-                        Style::default().fg(theme.text).bg(theme.accent),
+                        format!("{}{}", truncated, trailing),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme.amber)
+                            .add_modifier(Modifier::BOLD),
                     ))),
                     input_area,
                 );

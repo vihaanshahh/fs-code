@@ -21,7 +21,7 @@ use fs_pty::TerminalManager;
 use crate::clipboard;
 use crate::deps::DepsViewer;
 use crate::diff::DiffViewer;
-use crate::editor::{Editor, PromptSubmit};
+use crate::editor::{Editor, OpenFileOutcome, PromptSubmit};
 use crate::file_picker::{FilePicker, PickerMode};
 use crate::file_tree::{FileTree, SIDEBAR_WIDTH};
 use crate::grid;
@@ -100,6 +100,7 @@ enum Overlay {
     FolderInput,
     ProviderPicker,
     QuitConfirm,
+    FileConflict,
     Editor,
     Diff,
     Deps,
@@ -110,6 +111,29 @@ enum FileOpenTarget {
     Editor,
     External,
 }
+
+enum FileOpenResult {
+    Editor(OpenFileOutcome),
+    External,
+}
+
+struct FileConflict {
+    path: String,
+    selected: usize,
+}
+
+impl FileConflict {
+    fn new(path: String) -> Self {
+        Self { path, selected: 0 }
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        let count = FILE_CONFLICT_CHOICES.len() as i32;
+        self.selected = (self.selected as i32 + delta).rem_euclid(count) as usize;
+    }
+}
+
+const FILE_CONFLICT_CHOICES: &[&str] = &["Keep mine", "Reload disk", "Show diff"];
 
 // ---------------------------------------------------------------------------
 // Provider picker — small popup for choosing which agent to spawn
@@ -349,6 +373,7 @@ pub struct App {
     file_picker: FilePicker,
     folder_input: FolderInput,
     provider_picker: ProviderPicker,
+    file_conflict: Option<FileConflict>,
     file_tree: FileTree,
     editor: Editor,
     diff_viewer: DiffViewer,
@@ -408,6 +433,7 @@ impl App {
             file_picker: FilePicker::new(),
             folder_input: FolderInput::new(),
             provider_picker: ProviderPicker::new(),
+            file_conflict: None,
             file_tree: FileTree::new(),
             editor: Editor::new(),
             diff_viewer: DiffViewer::new(),
@@ -561,18 +587,18 @@ impl App {
         let _ = clipboard::copy_text(text);
     }
 
-    fn open_file_for_viewing(&mut self, path: &str) -> Result<FileOpenTarget, String> {
+    fn open_file_for_viewing(&mut self, path: &str) -> Result<FileOpenResult, String> {
         match file_open_target(path) {
             FileOpenTarget::External => {
                 open_external_file(path)?;
-                Ok(FileOpenTarget::External)
+                Ok(FileOpenResult::External)
             }
             FileOpenTarget::Editor => {
                 match self.editor.open_file(path) {
-                    Ok(()) => Ok(FileOpenTarget::Editor),
+                    Ok(outcome) => Ok(FileOpenResult::Editor(outcome)),
                     Err(editor_err) if should_fallback_to_external(path, &editor_err) => {
                         open_external_file(path)?;
-                        Ok(FileOpenTarget::External)
+                        Ok(FileOpenResult::External)
                     }
                     Err(editor_err) => Err(editor_err),
                 }
@@ -582,15 +608,34 @@ impl App {
 
     fn open_file_from_files_ui(&mut self, path: &str) {
         match self.open_file_for_viewing(path) {
-            Ok(FileOpenTarget::Editor) => {
+            Ok(FileOpenResult::Editor(outcome)) => {
                 self.sidebar_focused = false;
                 self.overlay = Overlay::Editor;
-                self.set_status(format!("Opened {}", path));
+                self.handle_editor_open_outcome(path, outcome, format!("Opened {}", path));
             }
-            Ok(FileOpenTarget::External) => {
+            Ok(FileOpenResult::External) => {
                 self.set_status(format!("Opened {}", path));
             }
             Err(e) => self.set_status(format!("Error: {}", e)),
+        }
+    }
+
+    fn handle_editor_open_outcome(
+        &mut self,
+        path: &str,
+        outcome: OpenFileOutcome,
+        opened_status: String,
+    ) {
+        match outcome {
+            OpenFileOutcome::Opened | OpenFileOutcome::Reloaded => self.set_status(opened_status),
+            OpenFileOutcome::PreservedDirty => {
+                self.set_status(format!("Kept unsaved changes for {}", path));
+            }
+            OpenFileOutcome::PreservedDirtyWithDiskChanges => {
+                self.file_conflict = Some(FileConflict::new(path.to_string()));
+                self.overlay = Overlay::FileConflict;
+                self.set_status("Disk changed while this file has unsaved edits");
+            }
         }
     }
 
@@ -759,6 +804,7 @@ impl App {
                 }
             }
             Overlay::QuitConfirm => {}
+            Overlay::FileConflict => {}
             Overlay::FilePicker => {
                 for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
                     self.file_picker.input(c);
@@ -800,6 +846,22 @@ impl App {
         };
         let h = if area.height > 4 {
             7u16.min(area.height.saturating_sub(4))
+        } else {
+            area.height
+        };
+        let x = area.x + area.width.saturating_sub(w) / 2;
+        let y = area.y + area.height.saturating_sub(h) / 2;
+        Rect::new(x, y, w, h)
+    }
+
+    fn file_conflict_rect(area: Rect) -> Rect {
+        let w = if area.width > 4 {
+            72u16.min(area.width.saturating_sub(4))
+        } else {
+            area.width
+        };
+        let h = if area.height > 4 {
+            11u16.min(area.height.saturating_sub(4))
         } else {
             area.height
         };
@@ -863,6 +925,7 @@ impl App {
             Overlay::FilePicker => return self.handle_picker_mouse(mouse),
             Overlay::ProviderPicker => return self.handle_provider_picker_mouse(mouse),
             Overlay::QuitConfirm => return self.handle_quit_confirm_mouse(mouse),
+            Overlay::FileConflict => return self.handle_file_conflict_mouse(mouse),
             Overlay::Diff => return self.handle_diff_mouse(mouse),
             Overlay::Deps => return self.handle_deps_mouse(mouse),
             Overlay::Editor if self.editor.outline_open => return self.handle_outline_mouse(mouse),
@@ -1144,6 +1207,7 @@ impl App {
             Overlay::FolderInput => return self.handle_folder_input_key(key),
             Overlay::ProviderPicker => return self.handle_provider_picker_key(key),
             Overlay::QuitConfirm => return self.handle_quit_confirm_key(key),
+            Overlay::FileConflict => return self.handle_file_conflict_key(key),
             Overlay::Editor => return self.handle_editor_key(key),
             Overlay::Diff => return self.handle_diff_key(key),
             Overlay::Deps => return self.handle_deps_key(key),
@@ -1651,6 +1715,94 @@ impl App {
         Ok(())
     }
 
+    fn handle_file_conflict_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('1') | KeyCode::Char('k') | KeyCode::Char('K') => {
+                self.keep_file_conflict();
+            }
+            KeyCode::Char('2') | KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.reload_file_conflict();
+            }
+            KeyCode::Char('3') | KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.show_file_conflict_diff();
+            }
+            KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
+                if let Some(conflict) = self.file_conflict.as_mut() {
+                    conflict.move_selection(-1);
+                }
+            }
+            KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
+                if let Some(conflict) = self.file_conflict.as_mut() {
+                    conflict.move_selection(1);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.file_conflict.as_ref().map(|c| c.selected).unwrap_or(0);
+                match selected {
+                    0 => self.keep_file_conflict(),
+                    1 => self.reload_file_conflict(),
+                    2 => self.show_file_conflict_diff(),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn keep_file_conflict(&mut self) {
+        let path = self.file_conflict.take().map(|c| c.path).unwrap_or_else(|| self.editor.path.clone());
+        self.overlay = Overlay::Editor;
+        self.set_status(format!("Kept unsaved changes for {}", path));
+    }
+
+    fn reload_file_conflict(&mut self) {
+        let path = self.file_conflict
+            .as_ref()
+            .map(|c| c.path.clone())
+            .unwrap_or_else(|| self.editor.path.clone());
+
+        match self.editor.reload() {
+            Ok(()) => {
+                self.file_conflict = None;
+                self.overlay = Overlay::Editor;
+                self.set_status(format!("Reloaded {} from disk", path));
+            }
+            Err(e) => {
+                self.set_status(format!("Reload failed: {}", e));
+            }
+        }
+    }
+
+    fn show_file_conflict_diff(&mut self) {
+        let path = self.file_conflict
+            .as_ref()
+            .map(|c| c.path.clone())
+            .unwrap_or_else(|| self.editor.path.clone());
+
+        let disk_content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) => {
+                self.set_status(format!("Could not read disk copy: {}", e));
+                return;
+            }
+        };
+
+        let buffer_content = self.editor.content();
+        let diff_text = crate::diff::unified_diff(&path, &buffer_content, &disk_content);
+        if diff_text.is_empty() {
+            self.file_conflict = None;
+            self.overlay = Overlay::Editor;
+            self.set_status("No difference between buffer and disk");
+            return;
+        }
+
+        self.file_conflict = None;
+        self.diff_viewer.open_with(&diff_text);
+        self.overlay = Overlay::Diff;
+        self.set_status(format!("Showing buffer vs disk diff for {}", path));
+    }
+
     // -----------------------------------------------------------------------
     // Overlay: Folder Input
     // -----------------------------------------------------------------------
@@ -2077,10 +2229,14 @@ impl App {
                 if let Some(path) = path {
                     self.diff_viewer.close();
                     match self.editor.open_file(&path) {
-                        Ok(()) => {
+                        Ok(outcome) => {
                             self.editor.goto_line(source_line);
                             self.overlay = Overlay::Editor;
-                            self.set_status(format!("Editing {} :{}", path, source_line + 1));
+                            self.handle_editor_open_outcome(
+                                &path,
+                                outcome,
+                                format!("Editing {} :{}", path, source_line + 1),
+                            );
                         }
                         Err(e) => {
                             self.overlay = Overlay::None;
@@ -2164,6 +2320,42 @@ impl App {
         if let MouseEventKind::Down(crossterm::event::MouseButton::Left) = mouse.kind {
             if !Self::rect_contains(dialog_rect, mouse.column, mouse.row) {
                 self.cancel_quit_confirmation();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_file_conflict_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        let area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
+        let dialog_rect = Self::file_conflict_rect(area);
+
+        if let MouseEventKind::Down(crossterm::event::MouseButton::Left) = mouse.kind {
+            if !Self::rect_contains(dialog_rect, mouse.column, mouse.row) {
+                return Ok(());
+            }
+
+            let inner = dialog_rect.inner(Margin { horizontal: 1, vertical: 1 });
+            let button_y = inner.y + inner.height.saturating_sub(2);
+            if mouse.row != button_y {
+                return Ok(());
+            }
+
+            let button_width = inner.width / FILE_CONFLICT_CHOICES.len() as u16;
+            if button_width == 0 {
+                return Ok(());
+            }
+
+            let idx = ((mouse.column.saturating_sub(inner.x)) / button_width) as usize;
+            if let Some(conflict) = self.file_conflict.as_mut() {
+                conflict.selected = idx.min(FILE_CONFLICT_CHOICES.len().saturating_sub(1));
+            }
+            match idx {
+                0 => self.keep_file_conflict(),
+                1 => self.reload_file_conflict(),
+                2 => self.show_file_conflict_diff(),
+                _ => {}
             }
         }
 
@@ -3066,6 +3258,95 @@ impl App {
         );
     }
 
+    fn render_file_conflict(&self, frame: &mut Frame, area: Rect) {
+        let Some(conflict) = self.file_conflict.as_ref() else {
+            return;
+        };
+
+        let dialog_area = Self::file_conflict_rect(area);
+        if dialog_area.width < 36 || dialog_area.height < 7 {
+            return;
+        }
+
+        frame.render_widget(Clear, dialog_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.amber))
+            .title(Span::styled(
+                " File Changed On Disk ",
+                Style::default().fg(self.theme.text).add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        if inner.height < 5 || inner.width == 0 {
+            return;
+        }
+
+        let filename = Path::new(&conflict.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| conflict.path.clone());
+
+        let message = vec![
+            Line::from(Span::styled(
+                filename,
+                Style::default().fg(self.theme.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "You have unsaved edits, and the file on disk changed.",
+                Style::default().fg(self.theme.text),
+            )),
+            Line::from(Span::styled(
+                "Choose how to resolve it.",
+                Style::default().fg(self.theme.text_muted),
+            )),
+        ];
+
+        frame.render_widget(
+            Paragraph::new(Text::from(message))
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(self.theme.text)),
+            Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(2)),
+        );
+
+        let button_y = inner.y + inner.height.saturating_sub(2);
+        let button_w = inner.width / FILE_CONFLICT_CHOICES.len() as u16;
+        if button_w == 0 {
+            return;
+        }
+
+        for (idx, label) in FILE_CONFLICT_CHOICES.iter().enumerate() {
+            let x = inner.x + button_w.saturating_mul(idx as u16);
+            let width = if idx + 1 == FILE_CONFLICT_CHOICES.len() {
+                inner.x + inner.width - x
+            } else {
+                button_w
+            };
+            let selected = idx == conflict.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(self.theme.amber)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(self.theme.text)
+                    .bg(self.theme.bg_surface)
+            };
+            let text = format!(" {}. {} ", idx + 1, label);
+            let truncated: String = text.chars().take(width as usize).collect();
+            let trailing = " ".repeat((width as usize).saturating_sub(truncated.chars().count()));
+            frame.render_widget(
+                Paragraph::new(format!("{}{}", truncated, trailing))
+                    .alignment(Alignment::Center)
+                    .style(style),
+                Rect::new(x, button_y, width, 1),
+            );
+        }
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         // Resize agent PTYs to match the visible pane dimensions whenever
         // the layout has changed (editor opened/closed, sidebar toggled,
@@ -3165,6 +3446,8 @@ impl App {
                 " ↑↓ navigate │ 1-3 select │ Enter confirm │ Esc cancel ",
             Overlay::QuitConfirm =>
                 " Ctrl+Q again to quit │ Esc/n cancel ",
+            Overlay::FileConflict =>
+                " ←/→ choose │ Enter confirm │ 1 keep │ 2 reload │ 3 diff │ Esc keep ",
             Overlay::Palette =>
                 " ↑↓ navigate │ Enter run │ Esc cancel ",
             Overlay::Deps =>
@@ -3194,6 +3477,7 @@ impl App {
             Overlay::FolderInput => self.folder_input.render(frame, area, &self.theme),
             Overlay::ProviderPicker => self.provider_picker.render(frame, area, &self.theme),
             Overlay::QuitConfirm => self.render_quit_confirm(frame, area),
+            Overlay::FileConflict => self.render_file_conflict(frame, area),
             Overlay::Editor     => {} // rendered inline as side panel above
             Overlay::Diff       => self.diff_viewer.render(frame, main_area, &self.theme),
             Overlay::Deps       => self.deps_viewer.render(frame, main_area, &self.theme),
@@ -3336,6 +3620,34 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn app_test_dir(name: &str) -> std::path::PathBuf {
+        static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "fs-code-app-{}-{}-{}",
+            name,
+            std::process::id(),
+            NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn open_dirty_file_with_disk_change(app: &mut App, content: &str, disk_content: &str) -> std::path::PathBuf {
+        let root = app_test_dir("file-conflict");
+        let file = root.join("conflict.txt");
+        std::fs::write(&file, content).unwrap();
+        let path = file.to_str().unwrap();
+
+        app.open_file_from_files_ui(path);
+        app.editor.insert_char('X');
+        std::fs::write(&file, disk_content).unwrap();
+        app.open_file_from_files_ui(path);
+
+        file
+    }
 
     #[test]
     fn image_file_detection_is_case_insensitive() {
@@ -3374,6 +3686,52 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dirty_disk_change_opens_file_conflict_modal() {
+        let mut app = App::new();
+        let file = open_dirty_file_with_disk_change(&mut app, "local\n", "external\n");
+
+        assert_eq!(app.overlay, Overlay::FileConflict);
+        assert_eq!(
+            app.file_conflict.as_ref().map(|c| c.path.as_str()),
+            Some(file.to_str().unwrap())
+        );
+        assert!(app.editor.dirty);
+        assert_eq!(app.editor.content(), "Xlocal\n");
+
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn file_conflict_reload_discards_buffer_after_choice() {
+        let mut app = App::new();
+        let file = open_dirty_file_with_disk_change(&mut app, "local\n", "external\n");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)).unwrap();
+
+        assert_eq!(app.overlay, Overlay::Editor);
+        assert!(app.file_conflict.is_none());
+        assert!(!app.editor.dirty);
+        assert_eq!(app.editor.content(), "external\n");
+
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn file_conflict_diff_preserves_buffer() {
+        let mut app = App::new();
+        let file = open_dirty_file_with_disk_change(&mut app, "local\n", "external\n");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)).unwrap();
+
+        assert_eq!(app.overlay, Overlay::Diff);
+        assert!(app.file_conflict.is_none());
+        assert!(app.editor.dirty);
+        assert_eq!(app.editor.content(), "Xlocal\n");
+
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
     #[test]
