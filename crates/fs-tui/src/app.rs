@@ -12,7 +12,7 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 use fs_agent;
 use fs_core::{uid, AgentDescriptor, AgentId, Config, KeyAction, Provider};
@@ -99,6 +99,7 @@ enum Overlay {
     FilePicker,
     FolderInput,
     ProviderPicker,
+    QuitConfirm,
     Editor,
     Diff,
     Deps,
@@ -523,6 +524,22 @@ impl App {
         self.status_msg = Some((msg.into(), std::time::Instant::now()));
     }
 
+    fn is_quit_shortcut(key: KeyEvent) -> bool {
+        key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+    }
+
+    fn request_quit_confirmation(&mut self) {
+        self.overlay = Overlay::QuitConfirm;
+        self.sidebar_focused = false;
+        self.set_status("Press Ctrl+Q again to quit, or Esc to cancel");
+    }
+
+    fn cancel_quit_confirmation(&mut self) {
+        self.overlay = Overlay::None;
+        self.set_status("Quit cancelled");
+    }
+
     fn toggle_editor_focus_mode(&mut self) {
         if !self.editor.is_open() {
             self.set_status("Open a file first to enter editor focus mode");
@@ -741,6 +758,7 @@ impl App {
                     self.palette.input(c);
                 }
             }
+            Overlay::QuitConfirm => {}
             Overlay::FilePicker => {
                 for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
                     self.file_picker.input(c);
@@ -772,6 +790,22 @@ impl App {
     /// Check if a screen position is inside a rect.
     fn rect_contains(area: Rect, col: u16, row: u16) -> bool {
         col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
+    }
+
+    fn quit_confirm_rect(area: Rect) -> Rect {
+        let w = if area.width > 4 {
+            50u16.min(area.width.saturating_sub(4))
+        } else {
+            area.width
+        };
+        let h = if area.height > 4 {
+            7u16.min(area.height.saturating_sub(4))
+        } else {
+            area.height
+        };
+        let x = area.x + area.width.saturating_sub(w) / 2;
+        let y = area.y + area.height.saturating_sub(h) / 2;
+        Rect::new(x, y, w, h)
     }
 
     /// Compute the sidebar area (if open) for hit-testing.
@@ -828,6 +862,7 @@ impl App {
             Overlay::Palette => return self.handle_palette_mouse(mouse),
             Overlay::FilePicker => return self.handle_picker_mouse(mouse),
             Overlay::ProviderPicker => return self.handle_provider_picker_mouse(mouse),
+            Overlay::QuitConfirm => return self.handle_quit_confirm_mouse(mouse),
             Overlay::Diff => return self.handle_diff_mouse(mouse),
             Overlay::Deps => return self.handle_deps_mouse(mouse),
             Overlay::Editor if self.editor.outline_open => return self.handle_outline_mouse(mouse),
@@ -1108,6 +1143,7 @@ impl App {
             Overlay::FilePicker => return self.handle_picker_key(key),
             Overlay::FolderInput => return self.handle_folder_input_key(key),
             Overlay::ProviderPicker => return self.handle_provider_picker_key(key),
+            Overlay::QuitConfirm => return self.handle_quit_confirm_key(key),
             Overlay::Editor => return self.handle_editor_key(key),
             Overlay::Diff => return self.handle_diff_key(key),
             Overlay::Deps => return self.handle_deps_key(key),
@@ -1131,7 +1167,7 @@ impl App {
         let action = Self::map_key(key);
 
         match action {
-            KeyAction::Quit => self.should_quit = true,
+            KeyAction::Quit => self.request_quit_confirmation(),
             KeyAction::NewAgent => self.open_provider_picker(),
             KeyAction::NewAgentInFolder => {
                 let cwd = self.current_cwd();
@@ -1593,8 +1629,23 @@ impl App {
             "palette" => {
                 // Already closing from execute()
             }
-            "quit" => self.should_quit = true,
+            "quit" => self.request_quit_confirmation(),
             // Editor-only commands are informational in palette
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Overlay: Quit Confirmation
+    // -----------------------------------------------------------------------
+
+    fn handle_quit_confirm_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+        match key.code {
+            _ if Self::is_quit_shortcut(key) => self.should_quit = true,
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.cancel_quit_confirmation();
+            }
             _ => {}
         }
         Ok(())
@@ -2104,6 +2155,20 @@ impl App {
     // -----------------------------------------------------------------------
     // Overlay mouse handlers
     // -----------------------------------------------------------------------
+
+    fn handle_quit_confirm_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        let area = Rect::new(0, 0, term_cols, term_rows.saturating_sub(1));
+        let dialog_rect = Self::quit_confirm_rect(area);
+
+        if let MouseEventKind::Down(crossterm::event::MouseButton::Left) = mouse.kind {
+            if !Self::rect_contains(dialog_rect, mouse.column, mouse.row) {
+                self.cancel_quit_confirmation();
+            }
+        }
+
+        Ok(())
+    }
 
     fn handle_palette_mouse(&mut self, mouse: MouseEvent) -> anyhow::Result<()> {
         let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
@@ -2950,6 +3015,57 @@ impl App {
     // Rendering
     // -----------------------------------------------------------------------
 
+    fn render_quit_confirm(&self, frame: &mut Frame, area: Rect) {
+        let dialog_area = Self::quit_confirm_rect(area);
+        if dialog_area.width < 24 || dialog_area.height < 5 {
+            return;
+        }
+
+        frame.render_widget(Clear, dialog_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.red))
+            .title(Span::styled(
+                " Quit FluidState? ",
+                Style::default().fg(self.theme.text).add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        if inner.height == 0 {
+            return;
+        }
+
+        let lines = vec![
+            Line::from(Span::styled(
+                "Are you sure you want to quit?",
+                Style::default().fg(self.theme.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    "Ctrl+Q",
+                    Style::default().fg(self.theme.text).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" again to quit", Style::default().fg(self.theme.text)),
+            ]),
+            Line::from(vec![
+                Span::styled("Esc", Style::default().fg(self.theme.text).add_modifier(Modifier::BOLD)),
+                Span::styled(" or ", Style::default().fg(self.theme.text_muted)),
+                Span::styled("n", Style::default().fg(self.theme.text).add_modifier(Modifier::BOLD)),
+                Span::styled(" to cancel", Style::default().fg(self.theme.text_muted)),
+            ]),
+        ];
+
+        frame.render_widget(
+            Paragraph::new(Text::from(lines))
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(self.theme.text)),
+            inner,
+        );
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         // Resize agent PTYs to match the visible pane dimensions whenever
         // the layout has changed (editor opened/closed, sidebar toggled,
@@ -3047,6 +3163,8 @@ impl App {
                 " Tab complete │ Enter confirm │ Esc cancel ",
             Overlay::ProviderPicker =>
                 " ↑↓ navigate │ 1-3 select │ Enter confirm │ Esc cancel ",
+            Overlay::QuitConfirm =>
+                " Ctrl+Q again to quit │ Esc/n cancel ",
             Overlay::Palette =>
                 " ↑↓ navigate │ Enter run │ Esc cancel ",
             Overlay::Deps =>
@@ -3075,6 +3193,7 @@ impl App {
             Overlay::FilePicker => self.file_picker.render(frame, area, &self.theme),
             Overlay::FolderInput => self.folder_input.render(frame, area, &self.theme),
             Overlay::ProviderPicker => self.provider_picker.render(frame, area, &self.theme),
+            Overlay::QuitConfirm => self.render_quit_confirm(frame, area),
             Overlay::Editor     => {} // rendered inline as side panel above
             Overlay::Diff       => self.diff_viewer.render(frame, main_area, &self.theme),
             Overlay::Deps       => self.deps_viewer.render(frame, main_area, &self.theme),
@@ -3255,5 +3374,34 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ctrl_q_requires_confirmation_before_quitting() {
+        let mut app = App::new();
+        let ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+
+        app.handle_key(ctrl_q).unwrap();
+        assert_eq!(app.overlay, Overlay::QuitConfirm);
+        assert!(!app.should_quit);
+
+        app.handle_key(ctrl_q).unwrap();
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn quit_confirmation_can_be_cancelled() {
+        let mut app = App::new();
+        let ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+
+        app.handle_key(ctrl_q).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap();
+        assert_eq!(app.overlay, Overlay::QuitConfirm);
+        assert!(!app.should_quit);
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).unwrap();
+
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(!app.should_quit);
     }
 }
