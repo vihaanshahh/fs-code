@@ -104,6 +104,7 @@ enum Overlay {
     Editor,
     Diff,
     Deps,
+    RenameAgent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -357,6 +358,87 @@ impl FolderInput {
 }
 
 // ---------------------------------------------------------------------------
+// Rename agent — short text input (≤ MAX_AGENT_NAME_LEN chars) for renaming
+// the focused agent's pane label. Triggered by Ctrl+R.
+// ---------------------------------------------------------------------------
+
+const MAX_AGENT_NAME_LEN: usize = 8;
+
+struct RenameAgent {
+    input: String,
+    agent_idx: usize,
+}
+
+impl RenameAgent {
+    fn new() -> Self {
+        Self { input: String::new(), agent_idx: 0 }
+    }
+
+    fn open(&mut self, idx: usize, current: &str) {
+        self.agent_idx = idx;
+        self.input = current.chars().take(MAX_AGENT_NAME_LEN).collect();
+    }
+
+    fn close(&mut self) {
+        self.input.clear();
+    }
+
+    fn input_char(&mut self, c: char) {
+        if c.is_control() { return; }
+        if self.input.chars().count() < MAX_AGENT_NAME_LEN {
+            self.input.push(c);
+        }
+    }
+
+    fn backspace(&mut self) {
+        self.input.pop();
+    }
+
+    fn render(&self, frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
+        let w = 40u16.min(area.width.saturating_sub(4));
+        let h = 5u16;
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 3;
+
+        let dialog_area = Rect::new(x, y, w, h);
+        frame.render_widget(Clear, dialog_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.text))
+            .title(Span::styled(
+                " Rename Agent (max 8) ",
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ));
+
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        if inner.height < 2 { return; }
+
+        let prompt = format!("❯ {}", self.input);
+        frame.render_widget(
+            Paragraph::new(prompt).style(Style::default().fg(theme.text)),
+            Rect::new(inner.x, inner.y, inner.width, 1),
+        );
+
+        frame.render_widget(
+            Paragraph::new("Enter to save · Esc to cancel")
+                .style(Style::default().fg(theme.text_muted)),
+            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+        );
+    }
+}
+
+/// If `name` matches the auto-generated `Agent <n>` pattern, return `n`.
+/// Used to skip custom-named agents during renumber-on-close and to compute
+/// the next available default number for new agents.
+fn parse_default_agent_number(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("Agent ")?;
+    rest.parse::<u32>().ok()
+}
+
+// ---------------------------------------------------------------------------
 // AppState
 // ---------------------------------------------------------------------------
 
@@ -373,6 +455,7 @@ pub struct App {
     file_picker: FilePicker,
     folder_input: FolderInput,
     provider_picker: ProviderPicker,
+    rename_agent: RenameAgent,
     file_conflict: Option<FileConflict>,
     file_tree: FileTree,
     editor: Editor,
@@ -433,6 +516,7 @@ impl App {
             file_picker: FilePicker::new(),
             folder_input: FolderInput::new(),
             provider_picker: ProviderPicker::new(),
+            rename_agent: RenameAgent::new(),
             file_conflict: None,
             file_tree: FileTree::new(),
             editor: Editor::new(),
@@ -817,6 +901,11 @@ impl App {
                     self.folder_input.input_char(c);
                 }
             }
+            Overlay::RenameAgent => {
+                for c in text.chars().filter(|c| !c.is_control()) {
+                    self.rename_agent.input_char(c);
+                }
+            }
             Overlay::None => {
                 // Forward the full paste to the focused terminal as a single write
                 if !self.agents.is_empty() {
@@ -929,6 +1018,7 @@ impl App {
             Overlay::Diff => return self.handle_diff_mouse(mouse),
             Overlay::Deps => return self.handle_deps_mouse(mouse),
             Overlay::Editor if self.editor.outline_open => return self.handle_outline_mouse(mouse),
+            Overlay::RenameAgent => return Ok(()),
             _ => {}
         }
 
@@ -1211,6 +1301,7 @@ impl App {
             Overlay::Editor => return self.handle_editor_key(key),
             Overlay::Diff => return self.handle_diff_key(key),
             Overlay::Deps => return self.handle_deps_key(key),
+            Overlay::RenameAgent => return self.handle_rename_agent_key(key),
             Overlay::None => {}
         }
 
@@ -1286,6 +1377,13 @@ impl App {
                     // Sidebar toggle — Ctrl+E
                     (true, _, KeyCode::Char('e')) => {
                         self.toggle_sidebar();
+                    }
+                    // Ctrl+R or F2: rename the focused agent.
+                    // F2 is a fallback in case the host terminal grabs Ctrl+R
+                    // (e.g. for reverse-i-search) before it reaches us.
+                    (true, false, KeyCode::Char('r'))
+                    | (_, _, KeyCode::F(2)) => {
+                        self.open_rename_agent();
                     }
                     (true, _, KeyCode::Char('o')) => {
                         let cwd = self.current_cwd();
@@ -1488,6 +1586,7 @@ impl App {
                     self.close_focused_agent();
                 }
             }
+            "rename_agent" => self.open_rename_agent(),
             "open" => {
                 let cwd = self.current_cwd();
                 self.file_picker.open(&cwd, PickerMode::Open);
@@ -1801,6 +1900,56 @@ impl App {
         self.diff_viewer.open_with(&diff_text);
         self.overlay = Overlay::Diff;
         self.set_status(format!("Showing buffer vs disk diff for {}", path));
+    }
+
+    // -----------------------------------------------------------------------
+    // Overlay: Rename Agent
+    // -----------------------------------------------------------------------
+
+    fn open_rename_agent(&mut self) {
+        if self.agents.is_empty() {
+            self.set_status("No agent to rename");
+            return;
+        }
+        let idx = self.focused;
+        let current = self.agents[idx].name.clone();
+        self.rename_agent.open(idx, &current);
+        self.overlay = Overlay::RenameAgent;
+    }
+
+    fn handle_rename_agent_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.rename_agent.close();
+                self.overlay = Overlay::None;
+            }
+            KeyCode::Enter => {
+                let new_name = self.rename_agent.input.trim().to_string();
+                let idx = self.rename_agent.agent_idx;
+                self.rename_agent.close();
+                self.overlay = Overlay::None;
+                if new_name.is_empty() {
+                    self.set_status("Rename cancelled (empty name)");
+                } else if idx < self.agents.len() {
+                    self.agents[idx].name = new_name.clone();
+                    self.set_status(format!("Renamed to {}", new_name));
+                }
+            }
+            KeyCode::Backspace => self.rename_agent.backspace(),
+            KeyCode::Char(c) => {
+                // Reject any modifier-Char combo (Ctrl+R, Alt+X, etc.) so
+                // the trigger key doesn't accidentally type itself, and so
+                // shortcut-style keys can't mutate the name.
+                let mods = key.modifiers;
+                if !mods.contains(KeyModifiers::CONTROL)
+                    && !mods.contains(KeyModifiers::ALT)
+                {
+                    self.rename_agent.input_char(c);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -2988,7 +3137,16 @@ impl App {
         }
         let id = uid();
         let terminal_id = uid();
-        let name = format!("Agent {}", self.agents.len() + 1);
+        // Pick the lowest "Agent N" number not already in use so default
+        // names stay sequential even when customs are mixed in.
+        let used: std::collections::HashSet<u32> = self
+            .agents
+            .iter()
+            .filter_map(|a| parse_default_agent_number(&a.name))
+            .collect();
+        let mut n = 1u32;
+        while used.contains(&n) { n += 1; }
+        let name = format!("Agent {}", n);
 
         let (program, args) = match provider {
             Provider::Claude => {
@@ -3080,9 +3238,14 @@ impl App {
         }
         self.scroll_offsets.remove(&agent.id);
 
-        // Renumber remaining agents
-        for (i, a) in self.agents.iter_mut().enumerate() {
-            a.name = format!("Agent {}", i + 1);
+        // Renumber default-named agents only — custom names (set via Ctrl+R)
+        // are preserved across closes.
+        let mut next = 1u32;
+        for a in self.agents.iter_mut() {
+            if parse_default_agent_number(&a.name).is_some() {
+                a.name = format!("Agent {}", next);
+                next += 1;
+            }
         }
 
         if !self.agents.is_empty() {
@@ -3452,12 +3615,14 @@ impl App {
                 " ↑↓ navigate │ Enter run │ Esc cancel ",
             Overlay::Deps =>
                 " Tab switch │ j/k scroll │ PgUp/Dn │ q/Esc close ",
+            Overlay::RenameAgent =>
+                " type ≤8 chars │ Enter save │ Esc cancel ",
             Overlay::None if self.sidebar_focused =>
                 " ↑↓/jk navigate │ PgUp/Dn │ Enter expand/open │ e open │ d diff │ i deps │ r refresh │ Esc unfocus ",
             Overlay::None if self.editor.is_open() =>
                 " ^F focus editor │ ^B big editor │ ^W close │ Tab cycle │ ^E tree │ ^D diff │ ^I deps │ ^K palette ",
             Overlay::None =>
-                " ^N new │ ^W close │ Tab cycle │ ^E tree │ ^O open │ Alt+↑↓ scroll chat │ ^K palette │ ^Q quit ",
+                " ^N new │ ^W close │ ^R rename │ Tab cycle │ ^E tree │ ^O open │ Alt+↑↓ scroll │ ^K palette │ ^Q quit ",
         };
 
         render::render_status_bar(
@@ -3481,6 +3646,7 @@ impl App {
             Overlay::Editor     => {} // rendered inline as side panel above
             Overlay::Diff       => self.diff_viewer.render(frame, main_area, &self.theme),
             Overlay::Deps       => self.deps_viewer.render(frame, main_area, &self.theme),
+            Overlay::RenameAgent => self.rename_agent.render(frame, area, &self.theme),
             Overlay::None       => {}
         }
     }
@@ -3647,6 +3813,54 @@ mod tests {
         app.open_file_from_files_ui(path);
 
         file
+    }
+
+    #[test]
+    fn parse_default_agent_number_recognizes_default_names() {
+        assert_eq!(parse_default_agent_number("Agent 1"), Some(1));
+        assert_eq!(parse_default_agent_number("Agent 12"), Some(12));
+        assert_eq!(parse_default_agent_number("agent 1"), None);
+        assert_eq!(parse_default_agent_number("main"), None);
+        assert_eq!(parse_default_agent_number("Agent"), None);
+        assert_eq!(parse_default_agent_number("Agent x"), None);
+    }
+
+    #[test]
+    fn rename_agent_caps_at_max_and_handles_backspace() {
+        let mut r = RenameAgent::new();
+        r.open(0, "");
+        for c in "abcdefghij".chars() {
+            r.input_char(c);
+        }
+        // input_char must not exceed MAX_AGENT_NAME_LEN chars.
+        assert_eq!(r.input.chars().count(), MAX_AGENT_NAME_LEN);
+        assert_eq!(r.input, "abcdefgh");
+        r.backspace();
+        assert_eq!(r.input, "abcdefg");
+        // Control chars are rejected.
+        r.input_char('\n');
+        r.input_char('\t');
+        assert_eq!(r.input, "abcdefg");
+    }
+
+    #[test]
+    fn rename_agent_backspace_handles_multibyte_chars() {
+        let mut r = RenameAgent::new();
+        r.open(0, "");
+        r.input_char('ñ');
+        r.input_char('日');
+        assert_eq!(r.input.chars().count(), 2);
+        r.backspace();
+        assert_eq!(r.input.chars().count(), 1);
+        assert_eq!(r.input, "ñ");
+    }
+
+    #[test]
+    fn rename_agent_truncates_long_initial_name_on_open() {
+        let mut r = RenameAgent::new();
+        r.open(3, "this-is-way-too-long");
+        assert_eq!(r.input.chars().count(), MAX_AGENT_NAME_LEN);
+        assert_eq!(r.agent_idx, 3);
     }
 
     #[test]

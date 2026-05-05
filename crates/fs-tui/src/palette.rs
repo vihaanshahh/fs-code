@@ -25,6 +25,7 @@ const COMMANDS: &[PaletteEntry] = &[
     PaletteEntry { id: "new_gemini",  label: "New Agent (Gemini)",      shortcut: "",              category: "Agents" },
     PaletteEntry { id: "new_folder",  label: "New Agent in Folder…",    shortcut: "Ctrl+T",       category: "Agents" },
     PaletteEntry { id: "close",       label: "Close Agent / Editor",    shortcut: "Ctrl+W",       category: "Agents" },
+    PaletteEntry { id: "rename_agent",label: "Rename Focused Agent",    shortcut: "Ctrl+R / F2",  category: "Agents" },
     PaletteEntry { id: "focus_next",  label: "Focus Next Agent",        shortcut: "Ctrl+→ / Tab", category: "Agents" },
     PaletteEntry { id: "focus_prev",  label: "Focus Previous Agent",    shortcut: "Ctrl+←",       category: "Agents" },
     // Files
