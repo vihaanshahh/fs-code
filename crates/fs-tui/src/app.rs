@@ -610,6 +610,7 @@ impl App {
         loop {
             needs_redraw |= self.expire_status_if_needed(Instant::now());
             needs_redraw |= self.poll_ai_results();
+            needs_redraw |= self.reap_exited_terminals();
             needs_redraw |= self.sync_terminal_revisions();
 
             if needs_redraw {
@@ -821,6 +822,38 @@ impl App {
             }
         }
         changed
+    }
+
+    /// Auto-close any Terminal-provider panes whose shell has exited (user
+    /// typed `exit`, hit Ctrl+D, etc). AI panes are left alone — keeping a
+    /// crashed agent visible is useful for reading its error output.
+    /// Returns true when at least one pane was reaped (caller should redraw).
+    fn reap_exited_terminals(&mut self) -> bool {
+        if self.agents.is_empty() {
+            return false;
+        }
+        let mut reap_idxs: Vec<usize> = Vec::new();
+        for (i, agent) in self.agents.iter().enumerate() {
+            if agent.provider != Provider::Terminal {
+                continue;
+            }
+            let Some(tid) = self.agent_terminals.get(&agent.id) else { continue };
+            let Some(inst) = self.terminal_mgr.get(tid) else { continue };
+            if inst.has_exited() {
+                reap_idxs.push(i);
+            }
+        }
+        if reap_idxs.is_empty() {
+            return false;
+        }
+        // Remove from highest index downward so earlier indices stay valid.
+        for idx in reap_idxs.into_iter().rev() {
+            self.remove_agent_at(idx);
+        }
+        self.set_status("Terminal exited");
+        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        self.handle_resize(cols, rows).ok();
+        true
     }
 
     fn sync_terminal_revisions(&mut self) -> bool {
@@ -1310,6 +1343,14 @@ impl App {
             return self.handle_sidebar_key(key);
         }
 
+        // Terminal panes (plain shell) get a near-raw key stream so all the
+        // standard shell bindings work — Ctrl+W word-delete, Ctrl+R history,
+        // Ctrl+L clear, Tab completion, etc. We keep a tight whitelist of
+        // app-level escapes so the user is never trapped in the shell.
+        if self.focused_is_terminal() && self.handle_terminal_pane_key(key)? {
+            return Ok(());
+        }
+
         // Tab into the editor when it's open but not currently focused
         if key.code == KeyCode::Tab
             && !key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1481,6 +1522,72 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// True when the focused agent pane is a plain Terminal (shell), not an
+    /// AI provider. Used to decide whether to forward keys raw to the PTY.
+    fn focused_is_terminal(&self) -> bool {
+        self.agents
+            .get(self.focused)
+            .map(|a| a.provider == Provider::Terminal)
+            .unwrap_or(false)
+    }
+
+    /// Key handler for plain Terminal panes. Forwards almost every keystroke
+    /// straight to the shell PTY so standard line-edit bindings (Ctrl+W,
+    /// Ctrl+R, Ctrl+L, Ctrl+K, Ctrl+U, Ctrl+A/E, Tab, …) work as users
+    /// expect. Returns `Ok(true)` when the key was consumed, `Ok(false)`
+    /// when the caller should fall through to the normal app dispatch.
+    ///
+    /// Whitelisted (still routed to the app, never the shell):
+    ///   * `Ctrl+Q`         — quit confirmation (universal escape)
+    ///   * `Ctrl+1..9`      — focus another pane by index
+    ///   * `Ctrl+←/→/↑/↓`   — focus next/prev pane
+    ///   * `Ctrl+Shift+C`   — copy pane selection
+    ///   * `Shift+↑/↓/PgUp/PgDn`, `Alt+↑/↓/PgUp/PgDn` — scroll the pane
+    fn handle_terminal_pane_key(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+        // Quit — always escape-hatched
+        if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
+            return Ok(false);
+        }
+        // Pane navigation
+        if ctrl && matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down) {
+            return Ok(false);
+        }
+        if ctrl {
+            if let KeyCode::Char(c) = key.code {
+                if ('1'..='9').contains(&c) {
+                    return Ok(false);
+                }
+            }
+        }
+        // Copy
+        if ctrl && shift && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
+            return Ok(false);
+        }
+        // Scroll keys (Shift+arrows / Alt+arrows / PgUp/PgDn variants)
+        if (shift || alt)
+            && matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+            )
+        {
+            return Ok(false);
+        }
+
+        // Everything else goes straight to the shell. Snap back to live view
+        // and clear any in-flight pane selection — same behavior as the
+        // normal forward path.
+        if let Some(agent) = self.agents.get(self.focused) {
+            self.scroll_offsets.insert(agent.id.clone(), 0);
+        }
+        self.pane_selection = None;
+        self.forward_key_to_terminal(key)?;
+        Ok(true)
     }
 
     fn map_key(key: KeyEvent) -> KeyAction {
@@ -3232,9 +3339,20 @@ impl App {
         if self.agents.is_empty() {
             return;
         }
-
-        let old_cwd = self.current_cwd();
         let idx = self.focused;
+        self.remove_agent_at(idx);
+        let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+        self.handle_resize(term_cols, term_rows).ok();
+        self.set_status("Agent closed");
+    }
+
+    /// Remove the agent at `idx` and clean up its associated state. Caller
+    /// is responsible for triggering a resize once batched removals finish.
+    fn remove_agent_at(&mut self, idx: usize) {
+        if idx >= self.agents.len() {
+            return;
+        }
+        let old_cwd = self.current_cwd();
         let agent = self.agents.remove(idx);
 
         if let Some(tid) = self.agent_terminals.remove(&agent.id) {
@@ -3254,17 +3372,18 @@ impl App {
         }
 
         if !self.agents.is_empty() {
+            // If we removed at or before the focused index, shift focus left
+            // so we don't skip past a neighbor.
+            if idx < self.focused {
+                self.focused -= 1;
+            }
             self.focused = self.focused.min(self.agents.len() - 1);
             self.refresh_sidebar_if_cwd_changed(&old_cwd);
-            // Resize remaining panes to fill the now-larger grid slots.
-            let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
-            self.handle_resize(term_cols, term_rows).ok();
         } else {
             self.focused = 0;
             // Falls back to process cwd — refresh sidebar if it's open
             self.refresh_sidebar_if_cwd_changed(&old_cwd);
         }
-        self.set_status("Agent closed");
     }
 
     /// Spawn `claude --print` in a background thread to apply an AI edit.
