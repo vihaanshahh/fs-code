@@ -183,10 +183,15 @@ pub async fn check_background() -> Option<String> {
 /// 2. Download platform-specific binary
 /// 3. Download & verify SHA-256 checksum
 /// 4. Atomic-swap into the current binary's location
-pub async fn perform_update() -> Result<String> {
+///
+/// When `force` is true, the latest release is downloaded and reinstalled
+/// even if it matches the current version — useful for recovering from a
+/// stale or partial install.
+pub async fn perform_update(force: bool) -> Result<String> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()?;
 
     println!("Checking for updates...");
@@ -196,13 +201,25 @@ pub async fn perform_update() -> Result<String> {
         .await?
         .error_for_status()?
         .json()
-        .await?;
+        .await
+        .context("failed to parse release JSON from fluidstate.ai")?;
 
-    let tag = &release.tag_name;
-    let latest = normalize_tag(tag).to_string();
-    if !is_newer(VERSION, &latest) {
-        println!("Already up to date ({VERSION}).");
+    let tag = release.tag_name.clone();
+    let latest = normalize_tag(&tag).to_string();
+    println!("Current: v{VERSION}   Latest: v{latest}");
+    if !is_newer(VERSION, &latest) && !force {
+        if VERSION == latest {
+            println!("Already up to date (v{VERSION}).");
+        } else {
+            println!(
+                "Already up to date (v{VERSION}); remote tag v{latest} is not newer. \
+                 Pass --force to reinstall anyway."
+            );
+        }
         return Ok(VERSION.to_string());
+    }
+    if force && !is_newer(VERSION, &latest) {
+        println!("--force: reinstalling v{latest} over v{VERSION}.");
     }
 
     let wanted = asset_name()?;
