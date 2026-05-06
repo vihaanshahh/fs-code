@@ -9,7 +9,8 @@
 //! Usage:
 //!   fluidstate              # launch with current directory
 //!   fluidstate /path        # launch with specific directory
-//!   fluidstate update       # check for and install updates
+//!   fluidstate update          # check for and install updates
+//!   fluidstate update --force  # reinstall the latest release unconditionally
 //!   fluidstate version      # print current version
 
 use tracing_subscriber::EnvFilter;
@@ -19,7 +20,10 @@ fn main() -> anyhow::Result<()> {
 
     // Handle non-TUI subcommands before initializing the terminal.
     match args.first().map(|s| s.as_str()) {
-        Some("update") => return run_update(),
+        Some("update") => {
+            let force = args.iter().skip(1).any(|a| a == "--force" || a == "-f");
+            return run_update(force);
+        }
         Some("version" | "--version" | "-V") => {
             println!("fluidstate {}", fs_update::VERSION);
             return Ok(());
@@ -74,7 +78,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Synchronous wrapper that builds a minimal runtime for the update command.
-fn run_update() -> anyhow::Result<()> {
+fn run_update(force: bool) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
@@ -87,7 +91,7 @@ fn run_update() -> anyhow::Result<()> {
         .build()?;
 
     rt.block_on(async {
-        match fs_update::perform_update().await {
+        match fs_update::perform_update(force).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 eprintln!("Update failed: {e:#}");
