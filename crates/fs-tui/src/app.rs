@@ -1563,67 +1563,76 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Key handler for plain Terminal panes. Forwards almost every keystroke
-    /// straight to the shell PTY so standard line-edit bindings (Ctrl+W,
-    /// Ctrl+R, Ctrl+L, Ctrl+K, Ctrl+U, Ctrl+A/E, Tab, …) work as users
-    /// expect. Returns `Ok(true)` when the key was consumed, `Ok(false)`
-    /// when the caller should fall through to the normal app dispatch.
+    /// Key handler for plain Terminal panes. Forwards keystrokes to the
+    /// shell PTY by default, but lets app-bound `Ctrl+letter` shortcuts win
+    /// so the user is never trapped in the shell. The escape list is the
+    /// authoritative set of letters reserved by the app at the global
+    /// level — bookkeeping in one place keeps it from drifting away from
+    /// `map_key` and the `KeyAction::None` handler.
     ///
-    /// Whitelisted (still routed to the app, never the shell):
-    ///   * `Ctrl+Q`         — quit confirmation (universal escape)
-    ///   * `Ctrl+Shift+W`   — close this Terminal pane (kills the shell)
-    ///   * `Ctrl+1..9`      — focus another pane by index
-    ///   * `Ctrl+←/→/↑/↓`   — focus next/prev pane
-    ///   * `Shift+Tab`      — cycle to the previous pane (Tab-out escape)
-    ///   * `Ctrl+Shift+C`   — copy pane selection
-    ///   * `Shift+↑/↓/PgUp/PgDn`, `Alt+↑/↓/PgUp/PgDn` — scroll the pane
-    ///   * `Tab`, `Ctrl+F`  — when an editor side-panel is open, escape into it
+    /// Reserved by the app (always escape, never sent to the shell):
+    ///   * `Ctrl+Q` quit, `Ctrl+N` new agent, `Ctrl+T` new in folder
+    ///   * `Ctrl+K` palette, `Ctrl+E` sidebar, `Ctrl+B` focus mode
+    ///   * `Ctrl+O` open, `Ctrl+D` diff, `Ctrl+I` deps, `Ctrl+R` rename
+    ///   * `Ctrl+F` focus editor, `Ctrl+1..9` focus pane N
+    ///   * `Ctrl+Shift+W` close pane, `Ctrl+Shift+C` copy
+    ///   * `Ctrl+←/→/↑/↓` cycle panes, `Shift+Tab` previous pane
+    ///   * `Shift+/Alt+ ↑/↓/PgUp/PgDn` scroll the pane
+    ///   * `Tab` when an editor panel is open
+    ///
+    /// The trade-off: a few shell line-edit conventions (Ctrl+E end-of-line,
+    /// Ctrl+N next-history, Ctrl+R reverse-i-search, Ctrl+T transpose,
+    /// Ctrl+B backward-char, Ctrl+F forward-char, Ctrl+O, Ctrl+D EOF, Ctrl+K
+    /// kill-line, Ctrl+I tab via Ctrl+W word-delete is preserved) are taken
+    /// over by the app. Use F2 as a Ctrl+R fallback for reverse-i-search.
     fn handle_terminal_pane_key(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
-        // Quit — always escape-hatched
-        if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
-            return Ok(false);
-        }
-        // Pane navigation
+        // Pane navigation (Ctrl+arrow)
         if ctrl && matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down) {
             return Ok(false);
         }
-        if ctrl {
+        // Universal pane-cycle escape — Shift+Tab steps to the previous pane.
+        // Plain Tab still goes to the shell so tab-completion works.
+        if key.code == KeyCode::BackTab {
+            return Ok(false);
+        }
+        // Editor escape — when the editor side-panel is open, let Tab reach
+        // the global "focus editor" path so the user can return to it
+        // without a mouse. (When no editor is open, plain Tab falls through
+        // to the shell as tab-completion.)
+        if self.editor.is_open() && !ctrl && !alt && key.code == KeyCode::Tab {
+            return Ok(false);
+        }
+        // App-reserved Ctrl+letter shortcuts — these always escape so the
+        // user can drive the app from inside a Terminal pane. Plain Ctrl+W
+        // is intentionally NOT in this set so the shell still gets word-
+        // delete; Ctrl+Shift+W is the app's close-pane key.
+        if ctrl && !alt {
             if let KeyCode::Char(c) = key.code {
-                if ('1'..='9').contains(&c) {
+                let lower = c.to_ascii_lowercase();
+                // Ctrl+1..9: focus pane by index
+                if ('1'..='9').contains(&lower) {
+                    return Ok(false);
+                }
+                // Ctrl+Shift+C / Ctrl+Shift+W: copy / close pane
+                if shift && matches!(lower, 'c' | 'w') {
+                    return Ok(false);
+                }
+                // Plain-Ctrl app shortcuts. 'w' deliberately omitted.
+                if !shift && matches!(lower, 'q' | 'n' | 't' | 'k' | 'e' | 'b' | 'o' | 'd' | 'i' | 'r' | 'f') {
                     return Ok(false);
                 }
             }
         }
-        // Copy
-        if ctrl && shift && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
+        // F2 — rename agent (alias for Ctrl+R)
+        if matches!(key.code, KeyCode::F(2)) {
             return Ok(false);
         }
-        // Close pane — Ctrl+Shift+W is the keyboard escape hatch from Terminal panes
-        // (plain Ctrl+W is reserved for shell word-delete).
-        if ctrl && shift && matches!(key.code, KeyCode::Char('w') | KeyCode::Char('W')) {
-            return Ok(false);
-        }
-        // Editor escape — when the editor side-panel is open, let Tab and Ctrl+F
-        // reach the global "focus editor" path so the user can get back to it
-        // without a mouse. (When no editor is open, plain Tab falls through to
-        // the shell as tab-completion.)
-        if self.editor.is_open() {
-            if !ctrl && !alt && key.code == KeyCode::Tab {
-                return Ok(false);
-            }
-            if ctrl && !shift && matches!(key.code, KeyCode::Char('f') | KeyCode::Char('F')) {
-                return Ok(false);
-            }
-        }
-        // Universal pane-cycle escape — Shift+Tab steps to the previous pane
-        // even from inside a Terminal. Plain Tab still goes to the shell so
-        // tab-completion keeps working; Shift+Tab is otherwise unused by
-        // shells, so it's the safe escape hatch.
-        if key.code == KeyCode::BackTab {
+        // Alt+Z — toggle word wrap in the editor
+        if alt && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z')) {
             return Ok(false);
         }
         // Scroll keys (Shift+arrows / Alt+arrows / PgUp/PgDn variants)
