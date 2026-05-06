@@ -23,7 +23,7 @@ cd your-project
 fluidstate
 ```
 
-At least one of the supported provider CLIs must be installed and signed in:
+For AI providers, install and sign in to the relevant CLI. The Terminal provider uses your existing shell and does not require a provider login:
 
 | Provider | CLI | Install |
 |---|---|---|
@@ -31,7 +31,7 @@ At least one of the supported provider CLIs must be installed and signed in:
 | Codex | `codex` | `npm i -g @openai/codex` |
 | Copilot | `copilot` | `npm i -g @github/copilot` |
 | Gemini | `gemini` | `npm i -g @google/gemini-cli` |
-| Terminal | your `$SHELL` | (already installed) |
+| Terminal | your shell (`$SHELL` / `COMSPEC`) | (already installed) |
 
 The Terminal provider opens a plain interactive shell in a pane — handy for `npm run dev`, lint runs, or anything else you'd reach for a terminal tab for.
 

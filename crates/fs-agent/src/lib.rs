@@ -93,15 +93,35 @@ pub fn build_clean_env() -> HashMap<String, String> {
         })
         .collect();
 
-    // Ensure PATH includes common tool locations
-    let path = env.get("PATH").cloned().unwrap_or_default();
-    let extras = "/usr/local/bin:/opt/homebrew/bin";
-    if !path.contains(extras) {
-        env.insert("PATH".into(), format!("{extras}:{path}"));
-    }
+    add_common_unix_paths(&mut env);
     env.insert("TERM".into(), "xterm-256color".into());
     env
 }
+
+#[cfg(unix)]
+fn add_common_unix_paths(env: &mut HashMap<String, String>) {
+    // Ensure PATH includes common tool locations on macOS/Linux. Keep this
+    // Unix-only so Windows keeps its native Path casing and ';' separators.
+    let path = env.get("PATH").cloned().unwrap_or_default();
+    let mut parts = Vec::new();
+    for extra in ["/usr/local/bin", "/opt/homebrew/bin"] {
+        if !path.split(':').any(|p| p == extra) {
+            parts.push(extra.to_string());
+        }
+    }
+    if parts.is_empty() {
+        return;
+    }
+    if path.is_empty() {
+        env.insert("PATH".into(), parts.join(":"));
+    } else {
+        parts.push(path);
+        env.insert("PATH".into(), parts.join(":"));
+    }
+}
+
+#[cfg(windows)]
+fn add_common_unix_paths(_env: &mut HashMap<String, String>) {}
 
 // ---------------------------------------------------------------------------
 // Command builder — construct the claude CLI command for a PTY
@@ -169,6 +189,7 @@ pub fn gemini_args() -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// Find the user's interactive shell, falling back to common system shells.
+#[cfg(unix)]
 pub fn find_shell() -> PathBuf {
     if let Ok(s) = std::env::var("SHELL") {
         let pb = PathBuf::from(&s);
@@ -191,9 +212,38 @@ pub fn find_shell() -> PathBuf {
     PathBuf::from("/bin/sh")
 }
 
-/// Build arguments for launching an interactive login shell in a PTY.
+/// Find the user's interactive shell on Windows.
+#[cfg(windows)]
+pub fn find_shell() -> PathBuf {
+    if let Ok(s) = std::env::var("COMSPEC") {
+        let pb = PathBuf::from(&s);
+        if pb.exists() {
+            return pb;
+        }
+    }
+    if let Ok(root) = std::env::var("SystemRoot") {
+        let cmd = PathBuf::from(root).join("System32").join("cmd.exe");
+        if cmd.exists() {
+            return cmd;
+        }
+    }
+    let cmd = PathBuf::from(r"C:\Windows\System32\cmd.exe");
+    if cmd.exists() {
+        return cmd;
+    }
+    PathBuf::from("cmd.exe")
+}
+
+/// Build arguments for launching an interactive shell in a PTY.
+#[cfg(unix)]
 pub fn shell_args() -> Vec<String> {
     // `-l` gives a login shell so the user's profile (PATH, aliases, nvm, etc.)
     // is loaded — same expectations as a fresh terminal tab.
     vec!["-l".into()]
+}
+
+/// Build arguments for launching an interactive shell in a PTY.
+#[cfg(windows)]
+pub fn shell_args() -> Vec<String> {
+    Vec::new()
 }
