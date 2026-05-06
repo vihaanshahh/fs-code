@@ -668,8 +668,17 @@ impl App {
         }
     }
 
-    fn copy_to_system_clipboard(&self, text: &str) {
-        let _ = clipboard::copy_text(text);
+    /// Copy `text` to the system clipboard. Returns `true` on success;
+    /// on failure, sets a status message and returns `false` so callers
+    /// can suppress their own success status.
+    fn copy_to_system_clipboard(&mut self, text: &str) -> bool {
+        match clipboard::copy_text(text) {
+            Ok(()) => true,
+            Err(e) => {
+                self.set_status(format!("Copy failed: {e}"));
+                false
+            }
+        }
     }
 
     fn open_file_for_viewing(&mut self, path: &str) -> Result<FileOpenResult, String> {
@@ -1305,8 +1314,7 @@ impl App {
                     if let Some(ref sel) = self.pane_selection {
                         if sel.start != sel.end {
                             let text = self.extract_pane_selection_text(sel);
-                            if !text.is_empty() {
-                                self.copy_to_system_clipboard(&text);
+                            if !text.is_empty() && self.copy_to_system_clipboard(&text) {
                                 self.set_status("Copied selection");
                             }
                         } else {
@@ -1503,24 +1511,31 @@ impl App {
                     }
                     // Ctrl+Shift+C: copy selected text (or full visible terminal text)
                     (true, true, KeyCode::Char('c')) | (true, true, KeyCode::Char('C')) => {
-                        // Prefer pane selection if present
-                        if let Some(ref sel) = self.pane_selection {
+                        // Resolve text first, then copy — keeps borrows of
+                        // self.agents/terminal_mgr disjoint from &mut self
+                        // needed by copy_to_system_clipboard.
+                        enum CopyKind { Selection, Visible }
+                        let captured: Option<(String, CopyKind)> = if let Some(ref sel) = self.pane_selection {
                             if sel.start != sel.end {
                                 let text = self.extract_pane_selection_text(sel);
-                                if !text.is_empty() {
-                                    self.copy_to_system_clipboard(&text);
-                                    self.set_status("Copied selection");
+                                if text.is_empty() { None } else { Some((text, CopyKind::Selection)) }
+                            } else { None }
+                        } else {
+                            self.agents.get(self.focused)
+                                .and_then(|agent| self.agent_terminals.get(&agent.id))
+                                .and_then(|tid| self.terminal_mgr.get(tid))
+                                .map(|inst| inst.visible_text())
+                                .filter(|t| !t.is_empty())
+                                .map(|t| (t, CopyKind::Visible))
+                        };
+                        if let Some((text, kind)) = captured {
+                            if self.copy_to_system_clipboard(&text) {
+                                self.set_status(match kind {
+                                    CopyKind::Selection => "Copied selection",
+                                    CopyKind::Visible => "Copied terminal text",
+                                });
+                                if matches!(kind, CopyKind::Selection) {
                                     self.pane_selection = None;
-                                }
-                            }
-                        } else if let Some(agent) = self.agents.get(self.focused) {
-                            if let Some(tid) = self.agent_terminals.get(&agent.id) {
-                                if let Some(inst) = self.terminal_mgr.get(tid) {
-                                    let text = inst.visible_text();
-                                    if !text.is_empty() {
-                                        self.copy_to_system_clipboard(&text);
-                                        self.set_status("Copied terminal text");
-                                    }
                                 }
                             }
                         }
@@ -1559,6 +1574,7 @@ impl App {
     ///   * `Ctrl+Shift+W`   — close this Terminal pane (kills the shell)
     ///   * `Ctrl+1..9`      — focus another pane by index
     ///   * `Ctrl+←/→/↑/↓`   — focus next/prev pane
+    ///   * `Shift+Tab`      — cycle to the previous pane (Tab-out escape)
     ///   * `Ctrl+Shift+C`   — copy pane selection
     ///   * `Shift+↑/↓/PgUp/PgDn`, `Alt+↑/↓/PgUp/PgDn` — scroll the pane
     ///   * `Tab`, `Ctrl+F`  — when an editor side-panel is open, escape into it
@@ -1593,8 +1609,8 @@ impl App {
         }
         // Editor escape — when the editor side-panel is open, let Tab and Ctrl+F
         // reach the global "focus editor" path so the user can get back to it
-        // without a mouse. (When no editor is open, both fall through to the
-        // shell as Tab-completion / forward-char.)
+        // without a mouse. (When no editor is open, plain Tab falls through to
+        // the shell as tab-completion.)
         if self.editor.is_open() {
             if !ctrl && !alt && key.code == KeyCode::Tab {
                 return Ok(false);
@@ -1602,6 +1618,13 @@ impl App {
             if ctrl && !shift && matches!(key.code, KeyCode::Char('f') | KeyCode::Char('F')) {
                 return Ok(false);
             }
+        }
+        // Universal pane-cycle escape — Shift+Tab steps to the previous pane
+        // even from inside a Terminal. Plain Tab still goes to the shell so
+        // tab-completion keeps working; Shift+Tab is otherwise unused by
+        // shells, so it's the safe escape hatch.
+        if key.code == KeyCode::BackTab {
+            return Ok(false);
         }
         // Scroll keys (Shift+arrows / Alt+arrows / PgUp/PgDn variants)
         if (shift || alt)
@@ -1651,6 +1674,9 @@ impl App {
 
         if key.code == KeyCode::Tab {
             return KeyAction::FocusNext;
+        }
+        if key.code == KeyCode::BackTab {
+            return KeyAction::FocusPrev;
         }
 
         KeyAction::None
