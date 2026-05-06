@@ -140,7 +140,7 @@ const FILE_CONFLICT_CHOICES: &[&str] = &["Keep mine", "Reload disk", "Show diff"
 // Provider picker — small popup for choosing which agent to spawn
 // ---------------------------------------------------------------------------
 
-const PROVIDER_CHOICES: &[Provider] = &[Provider::Claude, Provider::Codex, Provider::Copilot, Provider::Gemini];
+const PROVIDER_CHOICES: &[Provider] = &[Provider::Claude, Provider::Codex, Provider::Copilot, Provider::Gemini, Provider::Terminal];
 
 struct ProviderPicker {
     selected: usize,
@@ -1569,6 +1569,7 @@ impl App {
             "new_codex" => self.add_agent_with_provider(Provider::Codex)?,
             "new_copilot" => self.add_agent_with_provider(Provider::Copilot)?,
             "new_gemini" => self.add_agent_with_provider(Provider::Gemini)?,
+            "new_terminal" => self.add_agent_with_provider(Provider::Terminal)?,
             "toggle_focus" => self.toggle_editor_focus_mode(),
             "toggle_wrap" => {
                 let on = self.editor.toggle_wrap();
@@ -3180,6 +3181,10 @@ impl App {
                     self.set_status("Gemini CLI not found — install with: npm i -g @google/gemini-cli");
                     return Ok(());
                 }
+            }
+            Provider::Terminal => {
+                let shell = fs_agent::find_shell();
+                (shell.to_string_lossy().to_string(), fs_agent::shell_args())
             }
         };
 

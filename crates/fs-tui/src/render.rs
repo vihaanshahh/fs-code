@@ -70,6 +70,7 @@ pub fn render_pane(
         fs_core::Provider::Codex => " [Codex]",
         fs_core::Provider::Copilot => " [Copilot]",
         fs_core::Provider::Gemini => " [Gemini]",
+        fs_core::Provider::Terminal => " [Terminal]",
     };
     let folder = std::path::Path::new(&agent.cwd)
         .file_name()
@@ -249,6 +250,7 @@ pub fn render_status_bar(
                 fs_core::Provider::Codex => " ᶜˣ",
                 fs_core::Provider::Copilot => " ᵍᶜ",
                 fs_core::Provider::Gemini => " ᵍᵐ",
+                fs_core::Provider::Terminal => " ᵗᵐ",
                 _ => "",
             };
             if i == focused {

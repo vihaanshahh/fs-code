@@ -162,3 +162,38 @@ pub fn find_gemini_cli() -> Option<PathBuf> {
 pub fn gemini_args() -> Vec<String> {
     Vec::new()
 }
+
+// ---------------------------------------------------------------------------
+// Plain shell — for the "Terminal" provider, which spawns an interactive
+// shell instead of an AI agent so the user can run dev servers, linters, etc.
+// ---------------------------------------------------------------------------
+
+/// Find the user's interactive shell, falling back to common system shells.
+pub fn find_shell() -> PathBuf {
+    if let Ok(s) = std::env::var("SHELL") {
+        let pb = PathBuf::from(&s);
+        if pb.exists() {
+            return pb;
+        }
+    }
+    for c in [
+        "/bin/zsh",
+        "/bin/bash",
+        "/usr/bin/zsh",
+        "/usr/bin/bash",
+        "/bin/sh",
+    ] {
+        let pb = PathBuf::from(c);
+        if pb.exists() {
+            return pb;
+        }
+    }
+    PathBuf::from("/bin/sh")
+}
+
+/// Build arguments for launching an interactive login shell in a PTY.
+pub fn shell_args() -> Vec<String> {
+    // `-l` gives a login shell so the user's profile (PATH, aliases, nvm, etc.)
+    // is loaded — same expectations as a fresh terminal tab.
+    vec!["-l".into()]
+}

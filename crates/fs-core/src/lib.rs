@@ -27,6 +27,7 @@ pub enum Provider {
     Codex,
     Copilot,
     Gemini,
+    Terminal,
 }
 
 impl Provider {
@@ -36,6 +37,7 @@ impl Provider {
             Self::Codex => "Codex",
             Self::Copilot => "Copilot",
             Self::Gemini => "Gemini",
+            Self::Terminal => "Terminal",
         }
     }
 
@@ -45,6 +47,7 @@ impl Provider {
             Self::Codex => "codex",
             Self::Copilot => "copilot",
             Self::Gemini => "gemini",
+            Self::Terminal => "terminal",
         }
     }
 }
