@@ -1556,6 +1556,7 @@ impl App {
     ///   * `Ctrl+←/→/↑/↓`   — focus next/prev pane
     ///   * `Ctrl+Shift+C`   — copy pane selection
     ///   * `Shift+↑/↓/PgUp/PgDn`, `Alt+↑/↓/PgUp/PgDn` — scroll the pane
+    ///   * `Tab`, `Ctrl+F`  — when an editor side-panel is open, escape into it
     fn handle_terminal_pane_key(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -1584,6 +1585,18 @@ impl App {
         // (plain Ctrl+W is reserved for shell word-delete).
         if ctrl && shift && matches!(key.code, KeyCode::Char('w') | KeyCode::Char('W')) {
             return Ok(false);
+        }
+        // Editor escape — when the editor side-panel is open, let Tab and Ctrl+F
+        // reach the global "focus editor" path so the user can get back to it
+        // without a mouse. (When no editor is open, both fall through to the
+        // shell as Tab-completion / forward-char.)
+        if self.editor.is_open() {
+            if !ctrl && !alt && key.code == KeyCode::Tab {
+                return Ok(false);
+            }
+            if ctrl && !shift && matches!(key.code, KeyCode::Char('f') | KeyCode::Char('F')) {
+                return Ok(false);
+            }
         }
         // Scroll keys (Shift+arrows / Alt+arrows / PgUp/PgDn variants)
         if (shift || alt)

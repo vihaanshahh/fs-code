@@ -1,6 +1,6 @@
 # fluidstate
 
-Multi-agent coding in your terminal. Run parallel Claude agents across your codebase, monitor progress in real-time, and only get interrupted when something actually needs you.
+Multi-agent coding in your terminal. Run parallel coding agents — Claude, Codex, GitHub Copilot, Gemini — or plain shells side-by-side across your codebase, monitor progress in real-time, and only get interrupted when something actually needs you.
 
 → [fluidstate.ai](https://fluidstate.ai)
 
@@ -23,13 +23,23 @@ cd your-project
 fluidstate
 ```
 
-Requires Claude Code to be installed and logged in (`claude auth login`).
+At least one of the supported provider CLIs must be installed and signed in:
+
+| Provider | CLI | Install |
+|---|---|---|
+| Claude | `claude` | `npm i -g @anthropic-ai/claude-code` |
+| Codex | `codex` | `npm i -g @openai/codex` |
+| Copilot | `copilot` | `npm i -g @github/copilot` |
+| Gemini | `gemini` | `npm i -g @google/gemini-cli` |
+| Terminal | your `$SHELL` | (already installed) |
+
+The Terminal provider opens a plain interactive shell in a pane — handy for `npm run dev`, lint runs, or anything else you'd reach for a terminal tab for.
 
 ## What it is
 
 A pure Rust TUI built on ratatui and alacritty_terminal. No Electron, no Node, no webview — a single binary that runs anywhere you have a terminal.
 
-- **Multi-agent grid** — open multiple Claude agents side-by-side, each with full context in its own pane
+- **Multi-agent grid** — open multiple agents side-by-side (Claude, Codex, Copilot, Gemini, or plain shells), each with full context in its own pane
 - **Live terminal emulation** — real pty, real keystrokes, scrollback, not a log viewer
 - **File picker / editor / diff viewer** — browse, open, and diff files without leaving the TUI
 - **Command palette** — fuzzy-search everything with a single keypress
