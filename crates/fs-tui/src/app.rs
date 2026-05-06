@@ -1488,8 +1488,13 @@ impl App {
                     }
                     // Ctrl+Shift+W: alias for Close Agent that survives the Terminal-pane
                     // forward path (where plain Ctrl+W is reserved for shell word-delete).
+                    // For Terminal panes this is the *only* keyboard close path, so it
+                    // must always kill the focused pane — never get diverted into closing
+                    // the editor side panel.
                     (true, true, KeyCode::Char('w')) | (true, true, KeyCode::Char('W')) => {
-                        if self.editor.is_open() {
+                        if self.focused_is_terminal() {
+                            self.close_focused_agent();
+                        } else if self.editor.is_open() {
                             self.editor.close();
                             self.overlay = Overlay::None;
                         } else {
@@ -3775,10 +3780,10 @@ impl App {
                 " type ≤8 chars │ Enter save │ Esc cancel ",
             Overlay::None if self.sidebar_focused =>
                 " ↑↓/jk navigate │ PgUp/Dn │ Enter expand/open │ e open │ d diff │ i deps │ r refresh │ Esc unfocus ",
-            Overlay::None if self.editor.is_open() =>
-                " ^F focus editor │ ^B big editor │ ^W close │ Tab cycle │ ^E tree │ ^D diff │ ^I deps │ ^K palette ",
             Overlay::None if self.focused_is_terminal() =>
                 " shell keys forwarded │ ^Shift+W close pane │ ^→/^← switch pane │ Wheel/Shift+↑↓ scroll │ ^Q quit ",
+            Overlay::None if self.editor.is_open() =>
+                " ^F focus editor │ ^B big editor │ ^W close │ Tab cycle │ ^E tree │ ^D diff │ ^I deps │ ^K palette ",
             Overlay::None =>
                 " ^N new │ ^W close │ ^R rename │ Tab cycle │ ^E tree │ ^O open │ Alt+↑↓ scroll │ ^K palette │ ^Q quit ",
         };
