@@ -1486,6 +1486,16 @@ impl App {
                     {
                         self.scroll_focused(20);
                     }
+                    // Ctrl+Shift+W: alias for Close Agent that survives the Terminal-pane
+                    // forward path (where plain Ctrl+W is reserved for shell word-delete).
+                    (true, true, KeyCode::Char('w')) | (true, true, KeyCode::Char('W')) => {
+                        if self.editor.is_open() {
+                            self.editor.close();
+                            self.overlay = Overlay::None;
+                        } else {
+                            self.close_focused_agent();
+                        }
+                    }
                     // Ctrl+Shift+C: copy selected text (or full visible terminal text)
                     (true, true, KeyCode::Char('c')) | (true, true, KeyCode::Char('C')) => {
                         // Prefer pane selection if present
@@ -1541,6 +1551,7 @@ impl App {
     ///
     /// Whitelisted (still routed to the app, never the shell):
     ///   * `Ctrl+Q`         — quit confirmation (universal escape)
+    ///   * `Ctrl+Shift+W`   — close this Terminal pane (kills the shell)
     ///   * `Ctrl+1..9`      — focus another pane by index
     ///   * `Ctrl+←/→/↑/↓`   — focus next/prev pane
     ///   * `Ctrl+Shift+C`   — copy pane selection
@@ -1567,6 +1578,11 @@ impl App {
         }
         // Copy
         if ctrl && shift && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
+            return Ok(false);
+        }
+        // Close pane — Ctrl+Shift+W is the keyboard escape hatch from Terminal panes
+        // (plain Ctrl+W is reserved for shell word-delete).
+        if ctrl && shift && matches!(key.code, KeyCode::Char('w') | KeyCode::Char('W')) {
             return Ok(false);
         }
         // Scroll keys (Shift+arrows / Alt+arrows / PgUp/PgDn variants)
@@ -3720,7 +3736,11 @@ impl App {
             self.editor.render(frame, ea, self.overlay == Overlay::Editor, &self.theme);
         }
 
-        let hint = match self.overlay {
+        let provider_picker_hint = format!(
+            " ↑↓ navigate │ 1-{} select │ Enter confirm │ Esc cancel ",
+            PROVIDER_CHOICES.len()
+        );
+        let hint: &str = match self.overlay {
             Overlay::Editor =>
                 " ^G ask AI │ ^S save │ ^W close │ Esc unfocus editor ",
             Overlay::Diff =>
@@ -3729,8 +3749,7 @@ impl App {
                 " ↑↓ navigate │ PgUp/Dn │ Enter open │ Esc cancel ",
             Overlay::FolderInput =>
                 " Tab complete │ Enter confirm │ Esc cancel ",
-            Overlay::ProviderPicker =>
-                " ↑↓ navigate │ 1-3 select │ Enter confirm │ Esc cancel ",
+            Overlay::ProviderPicker => &provider_picker_hint,
             Overlay::QuitConfirm =>
                 " Ctrl+Q again to quit │ Esc/n cancel ",
             Overlay::FileConflict =>
@@ -3745,6 +3764,8 @@ impl App {
                 " ↑↓/jk navigate │ PgUp/Dn │ Enter expand/open │ e open │ d diff │ i deps │ r refresh │ Esc unfocus ",
             Overlay::None if self.editor.is_open() =>
                 " ^F focus editor │ ^B big editor │ ^W close │ Tab cycle │ ^E tree │ ^D diff │ ^I deps │ ^K palette ",
+            Overlay::None if self.focused_is_terminal() =>
+                " shell keys forwarded │ ^Shift+W close pane │ ^→/^← switch pane │ Wheel/Shift+↑↓ scroll │ ^Q quit ",
             Overlay::None =>
                 " ^N new │ ^W close │ ^R rename │ Tab cycle │ ^E tree │ ^O open │ Alt+↑↓ scroll │ ^K palette │ ^Q quit ",
         };
@@ -3855,11 +3876,17 @@ fn open_external_file(path: &str) -> Result<(), String> {
 
 fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
 
     if ctrl {
         match key.code {
             KeyCode::Char(c) if c.is_ascii_lowercase() => {
-                return vec![(c as u8) - b'a' + 1];
+                let mut v = Vec::with_capacity(2);
+                if alt {
+                    v.push(0x1b);
+                }
+                v.push((c as u8) - b'a' + 1);
+                return v;
             }
             KeyCode::Char('[') => return vec![0x1b],
             KeyCode::Char(']') => return vec![0x1d],
@@ -3868,7 +3895,7 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
         }
     }
 
-    match key.code {
+    let base: Vec<u8> = match key.code {
         KeyCode::Char(c) => {
             let mut buf = [0u8; 4];
             let s = c.encode_utf8(&mut buf);
@@ -3904,7 +3931,19 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
             _ => vec![],
         },
         _ => vec![],
+    };
+
+    // Alt = Meta: prefix with ESC for plain chars and Tab/Backspace/Enter so
+    // readline-style bindings (M-f, M-b, M-., M-Backspace, M-d, …) work.
+    // Don't prefix sequences that already start with ESC (arrows, F-keys,
+    // Esc itself), which would create ambiguous double-ESC streams.
+    if alt && !base.is_empty() && base[0] != 0x1b {
+        let mut v = Vec::with_capacity(base.len() + 1);
+        v.push(0x1b);
+        v.extend_from_slice(&base);
+        return v;
     }
+    base
 }
 
 #[cfg(test)]
