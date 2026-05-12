@@ -1494,11 +1494,12 @@ impl App {
                     {
                         self.scroll_focused(20);
                     }
-                    // Ctrl+Shift+W: alias for Close Agent that survives the Terminal-pane
-                    // forward path (where plain Ctrl+W is reserved for shell word-delete).
-                    // For Terminal panes this is the *only* keyboard close path, so it
-                    // must always kill the focused pane — never get diverted into closing
-                    // the editor side panel.
+                    // Ctrl+Shift+W: explicit close-pane alias. Plain Ctrl+W already
+                    // closes the focused agent (including Terminal panes) via the
+                    // primary KeyAction::CloseAgent path, but Shift+W is preserved
+                    // for muscle memory and for terminals that swallow plain Ctrl+W.
+                    // For Terminal panes this must always kill the focused pane —
+                    // never get diverted into closing the editor side panel.
                     (true, true, KeyCode::Char('w')) | (true, true, KeyCode::Char('W')) => {
                         if self.focused_is_terminal() {
                             self.close_focused_agent();
@@ -1575,16 +1576,16 @@ impl App {
     ///   * `Ctrl+K` palette, `Ctrl+E` sidebar, `Ctrl+B` focus mode
     ///   * `Ctrl+O` open, `Ctrl+D` diff, `Ctrl+I` deps, `Ctrl+R` rename
     ///   * `Ctrl+F` focus editor, `Ctrl+1..9` focus pane N
-    ///   * `Ctrl+Shift+W` close pane, `Ctrl+Shift+C` copy
-    ///   * `Ctrl+←/→/↑/↓` cycle panes, `Shift+Tab` previous pane
+    ///   * `Ctrl+W` / `Ctrl+Shift+W` close pane, `Ctrl+Shift+C` copy
+    ///   * `Ctrl+←/→/↑/↓` cycle panes, `Tab` / `Shift+Tab` next/prev pane
     ///   * `Shift+/Alt+ ↑/↓/PgUp/PgDn` scroll the pane
-    ///   * `Tab` when an editor panel is open
     ///
-    /// The trade-off: a few shell line-edit conventions (Ctrl+E end-of-line,
-    /// Ctrl+N next-history, Ctrl+R reverse-i-search, Ctrl+T transpose,
-    /// Ctrl+B backward-char, Ctrl+F forward-char, Ctrl+O, Ctrl+D EOF, Ctrl+K
-    /// kill-line, Ctrl+I tab via Ctrl+W word-delete is preserved) are taken
-    /// over by the app. Use F2 as a Ctrl+R fallback for reverse-i-search.
+    /// The trade-off: shell line-edit conventions on these letters (Ctrl+E
+    /// end-of-line, Ctrl+N next-history, Ctrl+R reverse-i-search, Ctrl+T
+    /// transpose, Ctrl+B backward-char, Ctrl+F forward-char, Ctrl+O, Ctrl+D
+    /// EOF, Ctrl+K kill-line, Ctrl+I tab) and Ctrl+W word-delete plus plain
+    /// Tab completion are taken over by the app. Use F2 as a Ctrl+R fallback
+    /// for reverse-i-search; Alt+Backspace works as a word-delete substitute.
     fn handle_terminal_pane_key(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -1594,22 +1595,17 @@ impl App {
         if ctrl && matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down) {
             return Ok(false);
         }
-        // Universal pane-cycle escape — Shift+Tab steps to the previous pane.
-        // Plain Tab still goes to the shell so tab-completion works.
-        if key.code == KeyCode::BackTab {
-            return Ok(false);
-        }
-        // Editor escape — when the editor side-panel is open, let Tab reach
-        // the global "focus editor" path so the user can return to it
-        // without a mouse. (When no editor is open, plain Tab falls through
-        // to the shell as tab-completion.)
-        if self.editor.is_open() && !ctrl && !alt && key.code == KeyCode::Tab {
+        // Universal pane-cycle escape — Tab / Shift+Tab step to the next /
+        // previous pane. Tab no longer reaches the shell as tab-completion;
+        // most shells (zsh/bash) accept Esc+Tab or Ctrl+I as a substitute.
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) && !ctrl && !alt {
             return Ok(false);
         }
         // App-reserved Ctrl+letter shortcuts — these always escape so the
-        // user can drive the app from inside a Terminal pane. Plain Ctrl+W
-        // is intentionally NOT in this set so the shell still gets word-
-        // delete; Ctrl+Shift+W is the app's close-pane key.
+        // user can drive the app from inside a Terminal pane. Ctrl+W closes
+        // the pane (the shell loses word-delete here; Alt+Backspace is a
+        // common substitute). Ctrl+Shift+W is kept as an alias for muscle
+        // memory and for terminals that swallow plain Ctrl+W.
         if ctrl && !alt {
             if let KeyCode::Char(c) = key.code {
                 let lower = c.to_ascii_lowercase();
@@ -1621,8 +1617,8 @@ impl App {
                 if shift && matches!(lower, 'c' | 'w') {
                     return Ok(false);
                 }
-                // Plain-Ctrl app shortcuts. 'w' deliberately omitted.
-                if !shift && matches!(lower, 'q' | 'n' | 't' | 'k' | 'e' | 'b' | 'o' | 'd' | 'i' | 'r' | 'f') {
+                // Plain-Ctrl app shortcuts.
+                if !shift && matches!(lower, 'q' | 'n' | 't' | 'w' | 'k' | 'e' | 'b' | 'o' | 'd' | 'i' | 'r' | 'f') {
                     return Ok(false);
                 }
             }
