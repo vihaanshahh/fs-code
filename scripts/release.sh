@@ -343,8 +343,9 @@ elif [ "$dry_run" -eq 1 ]; then
   if [ -z "${FS_LANDING_REVALIDATE_SECRET:-}" ]; then
     warn "FS_LANDING_REVALIDATE_SECRET unset — real run will need it"
   fi
-  # We still do a HEAD check so the URL is at least reachable.
-  if curl -fsI --max-time 5 "$landing_url" >/dev/null 2>&1; then
+  # We still do a HEAD check so the URL is at least reachable (follow redirects
+  # — apex → www on many setups).
+  if curl -fsLI --max-time 5 "$landing_url" >/dev/null 2>&1; then
     ok "landing $landing_url reachable"
   else
     warn "landing $landing_url not reachable from here (ok in dry-run)"
@@ -356,7 +357,7 @@ else
     exit 3
   fi
 
-  http_code="$(curl -sS -o /tmp/fs-release-revalidate.out -w '%{http_code}' \
+  http_code="$(curl -sSL -o /tmp/fs-release-revalidate.out -w '%{http_code}' \
     -X POST \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${FS_LANDING_REVALIDATE_SECRET}" \
