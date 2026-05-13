@@ -267,12 +267,14 @@ else
         fail "timed out waiting for workflow to start"
         exit 2
       fi
+      # Filter out completed runs so we don't latch onto a previous
+      # failed attempt with the same tag.
       run_id="$(gh run list \
         --workflow=release.yml \
         --event=push \
         --limit 20 \
         --json databaseId,headBranch,event,status,createdAt \
-        -q "[.[] | select(.headBranch == \"$tag\")] | .[0].databaseId" 2>/dev/null || true)"
+        -q "[.[] | select(.headBranch == \"$tag\" and .status != \"completed\")] | .[0].databaseId" 2>/dev/null || true)"
       if [ -z "$run_id" ]; then
         sleep 5
       fi
