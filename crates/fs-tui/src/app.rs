@@ -787,6 +787,48 @@ impl App {
         }
     }
 
+    /// Pull the system clipboard and forward it into the focused Terminal pane.
+    /// Used by middle-click and Ctrl+Shift+V so paste works without relying on
+    /// the host terminal forwarding a bracketed-paste event.
+    fn paste_into_focused_terminal(&mut self) -> anyhow::Result<()> {
+        if let Some(text) = clipboard::paste_text() {
+            if !text.is_empty() {
+                self.forward_paste_to_terminal(&text)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write pasted text to the focused Terminal pane's PTY. If the child app
+    /// has bracketed paste mode on (shells, Claude Code, vim, …), wrap it in
+    /// `ESC[200~` … `ESC[201~` so a multi-line paste is treated as one literal
+    /// block instead of being executed/submitted line-by-line. Any markers the
+    /// pasted text already contains are stripped so we can't be tricked into
+    /// closing the bracket early.
+    fn forward_paste_to_terminal(&mut self, text: &str) -> anyhow::Result<()> {
+        if self.agents.is_empty() {
+            return Ok(());
+        }
+        let agent = &self.agents[self.focused];
+        let Some(tid) = self.agent_terminals.get(&agent.id) else {
+            return Ok(());
+        };
+        let Some(inst) = self.terminal_mgr.get(tid) else {
+            return Ok(());
+        };
+        if inst.bracketed_paste_enabled() {
+            let cleaned = text.replace("\x1b[200~", "").replace("\x1b[201~", "");
+            let mut buf = Vec::with_capacity(cleaned.len() + 12);
+            buf.extend_from_slice(b"\x1b[200~");
+            buf.extend_from_slice(cleaned.as_bytes());
+            buf.extend_from_slice(b"\x1b[201~");
+            inst.write(&buf)?;
+        } else {
+            inst.write(text.as_bytes())?;
+        }
+        Ok(())
+    }
+
     fn expire_status_if_needed(&mut self, now: Instant) -> bool {
         if let Some((_, at)) = &self.status_msg {
             if now.duration_since(*at) > Duration::from_secs(3) {
@@ -949,15 +991,9 @@ impl App {
                 }
             }
             Overlay::None => {
-                // Forward the full paste to the focused terminal as a single write
-                if !self.agents.is_empty() {
-                    let agent = &self.agents[self.focused];
-                    if let Some(tid) = self.agent_terminals.get(&agent.id) {
-                        if let Some(inst) = self.terminal_mgr.get(tid) {
-                            inst.write(text.as_bytes())?;
-                        }
-                    }
-                }
+                // Forward the full host-terminal paste to the focused pane,
+                // wrapped in bracketed-paste markers when the child supports it.
+                self.forward_paste_to_terminal(text)?;
             }
             _ => {}
         }
@@ -1256,6 +1292,10 @@ impl App {
                     if !self.editor.is_open() {
                         self.overlay = Overlay::None;
                     }
+                } else if self.overlay == Overlay::None && self.focused_is_terminal() {
+                    // Middle-click over a Terminal pane: paste the system
+                    // clipboard, the standard X11 / Unix terminal convention.
+                    self.paste_into_focused_terminal()?;
                 }
             }
 
@@ -1541,6 +1581,11 @@ impl App {
                             }
                         }
                     }
+                    // Ctrl+Shift+V: paste the system clipboard into the focused
+                    // pane (bracketed-paste wrapped when the child supports it).
+                    (true, true, KeyCode::Char('v')) | (true, true, KeyCode::Char('V')) => {
+                        self.paste_into_focused_terminal()?;
+                    }
                     _ => {
                         // Any regular keypress snaps back to live view and clears selection
                         if let Some(agent) = self.agents.get(self.focused) {
@@ -1577,7 +1622,7 @@ impl App {
     ///   * `Ctrl+O` open, `Ctrl+D` diff, `Ctrl+I` deps, `Ctrl+R` rename
     ///   * `Ctrl+F` focus editor, `Ctrl+1..9` focus pane N
     ///   * `Ctrl+W` / `Ctrl+Shift+W` close pane, `Ctrl+Shift+C` copy
-    ///   * `Ctrl+←/→/↑/↓` cycle panes, `Tab` / `Shift+Tab` next/prev pane
+    ///   * `Ctrl+←/→/↑/↓` cycle panes, `Tab` next pane (Shift+Tab → shell)
     ///   * `Shift+/Alt+ ↑/↓/PgUp/PgDn` scroll the pane
     ///
     /// The trade-off: shell line-edit conventions on these letters (Ctrl+E
@@ -1595,10 +1640,15 @@ impl App {
         if ctrl && matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down) {
             return Ok(false);
         }
-        // Universal pane-cycle escape — Tab / Shift+Tab step to the next /
-        // previous pane. Tab no longer reaches the shell as tab-completion;
-        // most shells (zsh/bash) accept Esc+Tab or Ctrl+I as a substitute.
-        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) && !ctrl && !alt {
+        // Pane-cycle escape — plain Tab steps to the next pane. Tab no longer
+        // reaches the shell as tab-completion; most shells (zsh/bash) accept
+        // Esc+Tab or Ctrl+I as a substitute.
+        //
+        // Shift+Tab (BackTab) is deliberately NOT intercepted here: it falls
+        // through to the shell as CSI Z (`ESC [ Z`) so TUIs running inside a
+        // pane can use it — e.g. Claude Code's permission-mode toggle. Cycle
+        // to the previous pane with Ctrl+Left / Ctrl+Up instead.
+        if key.code == KeyCode::Tab && !ctrl && !alt {
             return Ok(false);
         }
         // App-reserved Ctrl+letter shortcuts — these always escape so the
@@ -1613,8 +1663,10 @@ impl App {
                 if ('1'..='9').contains(&lower) {
                     return Ok(false);
                 }
-                // Ctrl+Shift+C / Ctrl+Shift+W: copy / close pane
-                if shift && matches!(lower, 'c' | 'w') {
+                // Ctrl+Shift+C / Ctrl+Shift+V / Ctrl+Shift+W: copy / paste /
+                // close pane. These escape to the app rather than reaching the
+                // shell (where Ctrl+V would be a literal "quoted insert").
+                if shift && matches!(lower, 'c' | 'v' | 'w') {
                     return Ok(false);
                 }
                 // Plain-Ctrl app shortcuts.
@@ -3812,7 +3864,7 @@ impl App {
             Overlay::None if self.sidebar_focused =>
                 " ↑↓/jk navigate │ PgUp/Dn │ Enter expand/open │ e open │ d diff │ i deps │ r refresh │ Esc unfocus ",
             Overlay::None if self.focused_is_terminal() =>
-                " shell keys forwarded │ ^Shift+W close pane │ ^→/^← switch pane │ Wheel/Shift+↑↓ scroll │ ^Q quit ",
+                " shell keys forwarded │ drag/^Shift+C copy │ ^Shift+V/middle-click paste │ ^Shift+W close │ ^→/^← switch pane ",
             Overlay::None if self.editor.is_open() =>
                 " ^F focus editor │ ^B big editor │ ^W close │ Tab cycle │ ^E tree │ ^D diff │ ^I deps │ ^K palette ",
             Overlay::None =>
@@ -3953,6 +4005,9 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Backspace => vec![0x7f],
         KeyCode::Tab => vec![b'\t'],
+        // Shift+Tab — CSI Z, the back-tab sequence TUIs (e.g. Claude Code)
+        // read as Shift+Tab. Without this it would forward as empty bytes.
+        KeyCode::BackTab => b"\x1b[Z".to_vec(),
         KeyCode::Esc => vec![0x1b],
         KeyCode::Up => b"\x1b[A".to_vec(),
         KeyCode::Down => b"\x1b[B".to_vec(),
@@ -3999,6 +4054,20 @@ fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn shift_tab_encodes_as_back_tab_csi_z() {
+        // Shift+Tab must reach the shell as CSI Z so TUIs (Claude Code's
+        // permission-mode toggle) see it. Empty bytes would mean "swallowed".
+        let key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(key_to_bytes(key), b"\x1b[Z".to_vec());
+    }
+
+    #[test]
+    fn plain_tab_still_encodes_as_horizontal_tab() {
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(key_to_bytes(key), vec![b'\t']);
+    }
 
     fn app_test_dir(name: &str) -> std::path::PathBuf {
         static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);

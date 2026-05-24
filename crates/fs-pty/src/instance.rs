@@ -236,6 +236,19 @@ impl TerminalInstance {
         }
     }
 
+    /// True if the running app has enabled bracketed paste mode (DECSET 2004).
+    /// When on, pasted text should be wrapped in `ESC[200~` … `ESC[201~` so the
+    /// app treats it as a single literal block rather than typed input — this
+    /// stops multi-line pastes from being executed line-by-line in shells and
+    /// lets TUIs like Claude Code accept a whole snippet without submitting on
+    /// each embedded newline.
+    pub fn bracketed_paste_enabled(&self) -> bool {
+        match self.term.lock() {
+            Ok(t) => t.mode().contains(TermMode::BRACKETED_PASTE),
+            Err(_) => false,
+        }
+    }
+
     /// Extract visible text from the terminal screen buffer.
     /// Returns the current viewport as a newline-separated string, stripping
     /// trailing whitespace from each row.
