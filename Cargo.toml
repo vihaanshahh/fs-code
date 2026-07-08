@@ -25,6 +25,6 @@ which = "6"
 dirs = "5"
 
 [workspace.package]
-version = "0.9.19"
+version = "0.9.21"
 edition = "2021"
 license = "MIT"

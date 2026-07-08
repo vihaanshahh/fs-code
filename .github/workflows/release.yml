@@ -21,7 +21,7 @@ jobs:
             target: x86_64-apple-darwin
             asset_os: darwin
             asset_arch: x86_64
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             asset_os: linux
             asset_arch: x86_64
@@ -37,6 +37,19 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Verify glibc requirement (Linux)
+        if: matrix.asset_os == 'linux'
+        run: |
+          BIN=target/${{ matrix.target }}/release/fluidstate
+          MAX=$(objdump -T "$BIN" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1)
+          echo "Max required glibc symbol: $MAX"
+          # Fail if the binary requires anything newer than 2.35 (Ubuntu 22.04).
+          HIGHEST_ALLOWED=GLIBC_2.35
+          if [ "$(printf '%s\n%s\n' "$MAX" "$HIGHEST_ALLOWED" | sort -uV | tail -1)" != "$HIGHEST_ALLOWED" ]; then
+            echo "::error::Binary requires $MAX, newer than $HIGHEST_ALLOWED — it will not run on older distros."
+            exit 1
+          fi
 
       - name: Prepare artifacts
         run: |
