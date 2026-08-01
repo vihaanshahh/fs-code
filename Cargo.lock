@@ -346,7 +346,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fluidstate"
-version = "0.9.21"
+version = "0.9.23"
 dependencies = [
  "anyhow",
  "fs-core",
@@ -374,20 +374,11 @@ dependencies = [
 
 [[package]]
 name = "fs-agent"
-version = "0.9.21"
-dependencies = [
- "anyhow",
- "dirs",
- "fs-core",
- "serde_json",
- "tokio",
- "tracing",
- "which",
-]
+version = "0.9.23"
 
 [[package]]
 name = "fs-core"
-version = "0.9.21"
+version = "0.9.23"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -398,19 +389,18 @@ dependencies = [
 
 [[package]]
 name = "fs-pty"
-version = "0.9.21"
+version = "0.9.23"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
  "fs-core",
+ "libc",
  "portable-pty",
- "tokio",
- "tracing",
 ]
 
 [[package]]
 name = "fs-tui"
-version = "0.9.21"
+version = "0.9.23"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -419,14 +409,12 @@ dependencies = [
  "fs-core",
  "fs-pty",
  "ratatui",
- "tokio",
- "tracing",
  "unicode-width 0.2.0",
 ]
 
 [[package]]
 name = "fs-update"
-version = "0.9.21"
+version = "0.9.23"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2260,18 +2248,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "which"
-version = "6.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ee928febd44d98f2f459a4a79bd4d928591333a494a10a868418ac1b39cf1f"
-dependencies = [
- "either",
- "home",
- "rustix 0.38.44",
- "winsafe",
-]
-
-[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2464,12 +2440,6 @@ checksum = "80d0f4e272c85def139476380b12f9ac60926689dd2e01d4923222f40580869d"
 dependencies = [
  "winapi",
 ]
-
-[[package]]
-name = "winsafe"
-version = "0.0.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "wit-bindgen"

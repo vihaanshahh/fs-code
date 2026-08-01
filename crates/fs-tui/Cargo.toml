@@ -10,7 +10,5 @@ fs-agent = { path = "../fs-agent" }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 alacritty_terminal = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
 anyhow = { workspace = true }
 unicode-width = "0.2"

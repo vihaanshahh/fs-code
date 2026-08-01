@@ -4,8 +4,8 @@
 //! Enter/Space to expand dirs or open files in editor.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem};
@@ -19,8 +19,15 @@ use crate::theme::Theme;
 pub const SIDEBAR_WIDTH: u16 = 30;
 
 const IGNORE_DIRS: &[&str] = &[
-    "node_modules", ".git", "target", "dist", ".next",
-    ".cache", "__pycache__", ".turbo", "out",
+    "node_modules",
+    ".git",
+    "target",
+    "dist",
+    ".next",
+    ".cache",
+    "__pycache__",
+    ".turbo",
+    "out",
 ];
 
 // ---------------------------------------------------------------------------
@@ -70,6 +77,10 @@ pub struct FileTree {
     move_source: Option<usize>,
 }
 
+// The compact terminal-only UI exposes a deliberate subset of these tree
+// operations. The remaining operations stay available for the tree's unit
+// tests and future keyboard bindings without affecting runtime state.
+#[allow(dead_code)]
 impl FileTree {
     pub fn new() -> Self {
         Self {
@@ -339,7 +350,8 @@ impl FileTree {
 
         let result = match mode {
             TreeInputMode::NewFile => {
-                let parent = self.selected_parent_dir()
+                let parent = self
+                    .selected_parent_dir()
                     .ok_or_else(|| "No directory selected".to_string())?;
                 let path = parent.join(&name);
                 if path.exists() {
@@ -353,7 +365,8 @@ impl FileTree {
                 Ok(Some(format!("Created {}", name)))
             }
             TreeInputMode::NewFolder => {
-                let parent = self.selected_parent_dir()
+                let parent = self
+                    .selected_parent_dir()
                     .ok_or_else(|| "No directory selected".to_string())?;
                 let path = parent.join(&name);
                 if path.exists() {
@@ -363,17 +376,20 @@ impl FileTree {
                 Ok(Some(format!("Created folder {}", name)))
             }
             TreeInputMode::Rename => {
-                let old_path = self.input_target.clone()
+                let old_path = self
+                    .input_target
+                    .clone()
                     .ok_or_else(|| "No rename target".to_string())?;
-                let new_path = old_path.parent()
+                let new_path = old_path
+                    .parent()
                     .ok_or_else(|| "Cannot determine parent".to_string())?
                     .join(&name);
                 if new_path.exists() && new_path != old_path {
                     return Err(format!("'{}' already exists", name));
                 }
-                fs::rename(&old_path, &new_path)
-                    .map_err(|e| format!("rename failed: {}", e))?;
-                let old_name = old_path.file_name()
+                fs::rename(&old_path, &new_path).map_err(|e| format!("rename failed: {}", e))?;
+                let old_name = old_path
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
                 Ok(Some(format!("Renamed '{}' → '{}'", old_name, name)))
@@ -386,7 +402,9 @@ impl FileTree {
 
     /// Delete the selected file/folder. Returns `Ok(message)` or `Err`.
     pub fn delete_selected(&self) -> Result<String, String> {
-        let node = self.nodes.get(self.selected)
+        let node = self
+            .nodes
+            .get(self.selected)
             .ok_or_else(|| "Nothing selected".to_string())?;
         let path = &node.path;
         let name = &node.name;
@@ -396,36 +414,38 @@ impl FileTree {
             if fs::remove_dir(path).is_ok() {
                 return Ok(format!("Deleted empty folder '{}'", name));
             }
-            fs::remove_dir_all(path)
-                .map_err(|e| format!("delete folder failed: {}", e))?;
+            fs::remove_dir_all(path).map_err(|e| format!("delete folder failed: {}", e))?;
             Ok(format!("Deleted folder '{}'", name))
         } else {
-            fs::remove_file(path)
-                .map_err(|e| format!("delete failed: {}", e))?;
+            fs::remove_file(path).map_err(|e| format!("delete failed: {}", e))?;
             Ok(format!("Deleted '{}'", name))
         }
     }
 
     /// Duplicate the selected file. Returns `Ok(new_path_display)` or `Err`.
     pub fn duplicate_selected(&mut self) -> Result<String, String> {
-        let node = self.nodes.get(self.selected)
+        let node = self
+            .nodes
+            .get(self.selected)
             .ok_or_else(|| "Nothing selected".to_string())?;
         if node.is_dir {
             return Err("Cannot duplicate a directory".to_string());
         }
         let path = &node.path;
-        let parent = path.parent()
+        let parent = path
+            .parent()
             .ok_or_else(|| "Cannot determine parent".to_string())?;
-        let stem = path.file_stem()
+        let stem = path
+            .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
-        let ext = path.extension()
+        let ext = path
+            .extension()
             .map(|e| format!(".{}", e.to_string_lossy()))
             .unwrap_or_default();
         let new_name = format!("{} (copy){}", stem, ext);
         let new_path = parent.join(&new_name);
-        fs::copy(path, &new_path)
-            .map_err(|e| format!("copy failed: {}", e))?;
+        fs::copy(path, &new_path).map_err(|e| format!("copy failed: {}", e))?;
         Ok(format!("Duplicated as '{}'", new_name))
     }
 
@@ -439,14 +459,19 @@ impl FileTree {
     /// Complete a move — moves the source to the selected directory.
     /// Returns `Ok(message)` or `Err`.
     pub fn complete_move(&mut self) -> Result<String, String> {
-        let src_idx = self.move_source.take()
+        let src_idx = self
+            .move_source
+            .take()
             .ok_or_else(|| "No move source".to_string())?;
-        let src_node = self.nodes.get(src_idx)
+        let src_node = self
+            .nodes
+            .get(src_idx)
             .ok_or_else(|| "Source no longer exists in tree".to_string())?;
         let src_path = src_node.path.clone();
         let src_name = src_node.name.clone();
 
-        let dest_dir = self.selected_parent_dir()
+        let dest_dir = self
+            .selected_parent_dir()
             .ok_or_else(|| "No destination directory".to_string())?;
         let dest_path = dest_dir.join(&src_name);
 
@@ -457,8 +482,7 @@ impl FileTree {
             return Err(format!("'{}' already exists at destination", src_name));
         }
 
-        fs::rename(&src_path, &dest_path)
-            .map_err(|e| format!("move failed: {}", e))?;
+        fs::rename(&src_path, &dest_path).map_err(|e| format!("move failed: {}", e))?;
         Ok(format!("Moved '{}' to '{}'", src_name, dest_dir.display()))
     }
 
@@ -551,8 +575,16 @@ impl FileTree {
         let title = Span::styled(
             title_label,
             Style::default()
-                .fg(if is_focused { theme.text } else { theme.text_muted })
-                .add_modifier(if is_focused { Modifier::BOLD } else { Modifier::empty() }),
+                .fg(if is_focused {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
+                .add_modifier(if is_focused {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
         );
 
         let block = Block::default()
@@ -570,7 +602,10 @@ impl FileTree {
 
         // Reserve one row for the inline input line when active (NewFile/NewFolder).
         // Rename replaces the selected item's name, so no extra row needed.
-        let input_row_needed = matches!(self.input_mode, Some(TreeInputMode::NewFile) | Some(TreeInputMode::NewFolder));
+        let input_row_needed = matches!(
+            self.input_mode,
+            Some(TreeInputMode::NewFile) | Some(TreeInputMode::NewFolder)
+        );
         let visible = if input_row_needed {
             (inner.height as usize).saturating_sub(1)
         } else {
@@ -599,7 +634,11 @@ impl FileTree {
 
                 let indent = "  ".repeat(node.depth);
                 let icon = if node.is_dir {
-                    if node.expanded { "▼ " } else { "▶ " }
+                    if node.expanded {
+                        "▼ "
+                    } else {
+                        "▶ "
+                    }
                 } else {
                     "  "
                 };
@@ -754,7 +793,12 @@ fn load_git_statuses(cwd: &str) -> HashMap<String, char> {
         let path_part = &line[3..];
 
         let path = if path_part.contains(" -> ") {
-            path_part.split(" -> ").nth(1).unwrap_or(path_part).trim_matches('"').to_string()
+            path_part
+                .split(" -> ")
+                .nth(1)
+                .unwrap_or(path_part)
+                .trim_matches('"')
+                .to_string()
         } else {
             path_part.trim_matches('"').to_string()
         };

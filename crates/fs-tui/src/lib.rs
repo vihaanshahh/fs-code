@@ -5,15 +5,7 @@
 //! and diff view.
 
 mod app;
-mod clipboard;
-mod deps;
-mod diff;
-mod editor;
-mod file_picker;
 mod file_tree;
-mod grid;
-mod highlight;
-mod palette;
 mod render;
 pub mod theme;
 

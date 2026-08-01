@@ -7,6 +7,5 @@ edition.workspace = true
 fs-core = { path = "../fs-core" }
 alacritty_terminal = { workspace = true }
 portable-pty = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
 anyhow = { workspace = true }
+libc = "0.2"

@@ -1,10 +1,12 @@
-# fluidstate
+# FluidState
 
-Multi-agent coding in your terminal. Run parallel coding agents — Claude, Codex, GitHub Copilot, Gemini — or plain shells side-by-side across your codebase, monitor progress in real-time, and only get interrupted when something actually needs you.
+Terminal tabs for your project, with a lightweight file tree and no background agent/editor services.
 
 → [fluidstate.ai](https://fluidstate.ai)
 
 ## Install
+
+FluidState installs as one native binary. It has no Node, Electron, provider-CLI, or configuration-file requirement.
 
 ```sh
 curl -fsSL https://fluidstate.ai/install.sh | bash
@@ -23,44 +25,44 @@ cd your-project
 fluidstate
 ```
 
-For AI providers, install and sign in to the relevant CLI. The Terminal provider uses your existing shell and does not require a provider login:
+FluidState opens your existing shell (`$SHELL` / `COMSPEC`) in each tab—use it for dev servers, tests, or anything else you’d do in a terminal.
 
-| Provider | CLI | Install |
-|---|---|---|
-| Claude | `claude` | `npm i -g @anthropic-ai/claude-code` |
-| Codex | `codex` | `npm i -g @openai/codex` |
-| Copilot | `copilot` | `npm i -g @github/copilot` |
-| Gemini | `gemini` | `npm i -g @google/gemini-cli` |
-| Terminal | your shell (`$SHELL` / `COMSPEC`) | (already installed) |
+### Requirements
 
-The Terminal provider opens a plain interactive shell in a pane — handy for `npm run dev`, lint runs, or anything else you'd reach for a terminal tab for.
+- macOS, Linux, or Windows on `x86_64` or `aarch64`
+- An interactive terminal
+- A shell: `$SHELL` on macOS/Linux, or `COMSPEC` on Windows
+
+### Clean removal
+
+Remove the installed `fluidstate` binary from your `PATH`. The application does not create project files or persistent UI/session state. The optional update check stores only a small version cache in the operating system cache directory; it is safe to remove:
+
+```sh
+# macOS / Linux
+rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/fluidstate"
+```
 
 ## What it is
 
 A pure Rust TUI built on ratatui and alacritty_terminal. No Electron, no Node, no webview — a single binary that runs anywhere you have a terminal.
 
-- **Multi-agent grid** — open multiple agents side-by-side (Claude, Codex, Copilot, Gemini, or plain shells), each with full context in its own pane
+- **Terminal tabs** — open, rename, close, and cycle independent shell sessions
 - **Live terminal emulation** — real pty, real keystrokes, scrollback, not a log viewer
-- **File picker / editor / diff viewer** — browse, open, and diff files without leaving the TUI
-- **Command palette** — fuzzy-search everything with a single keypress
 - **File tree sidebar** — project navigator with git status indicators
-- **Journey bar** — visualizes agent phase (planning → coding → testing → done) across all panes
+- **Explicit cleanup** — closing a tab kills and reaps its child process, closes its PTY, and joins its reader thread
+- **Minimal runtime** — no provider integrations, editor services, session persistence, or project configuration
 
 ## Keyboard shortcuts
 
 | Key | Action |
 |---|---|
-| `Ctrl+N` | New agent pane |
-| `Ctrl+W` | Close focused pane |
-| `Tab` / `Shift+Tab` | Cycle focus between panes |
-| `Ctrl+P` | Command palette |
-| `Ctrl+O` | File picker |
-| `Ctrl+D` | Diff viewer |
-| `Ctrl+E` | Open file in editor |
-| `Ctrl+B` | Toggle file tree sidebar |
-| `Ctrl+T` | Cycle theme |
+| `Ctrl+N` | New terminal tab |
+| `Ctrl+W` | Close focused tab |
+| `Ctrl+R` / `F2` | Rename focused tab |
+| `Tab` / `Shift+Tab` | Cycle terminal tabs |
+| `Ctrl+Left` / `Ctrl+Right` | Cycle terminal tabs |
+| `Ctrl+E` | Toggle and focus file tree |
 | `Ctrl+Q` | Quit |
-| `PageUp` / `PageDown` | Scroll terminal output |
 
 ## Build from source
 
@@ -73,22 +75,29 @@ cargo build --release
 
 Requires Rust 1.78+.
 
+For a release-equivalent build with no development artifacts in the install location:
+
+```sh
+cargo build --release --locked
+install -m 755 target/release/fluidstate /usr/local/bin/fluidstate
+```
+
 ## Architecture
 
 ```
 crates/
 ├── fs-app/      # Binary entry point (main.rs)
-├── fs-tui/      # ratatui UI — app loop, grid, palette, overlays, theme
-├── fs-agent/    # Claude agent runner (streaming, permissions, tools)
+├── fs-tui/      # ratatui terminal-tab UI, file tree, theme
+├── fs-agent/    # shell/environment discovery (std-only)
 ├── fs-pty/      # PTY management via alacritty_terminal + portable-pty
 └── fs-core/     # Shared types (AgentDescriptor, Config, KeyAction)
 ```
 
-Runtime dependencies: none. The binary links only against system libc on Linux. On macOS it is fully self-contained.
+Runtime dependencies: none beyond the system terminal and shell. The binary links only against system libraries on Linux; on macOS it is self-contained.
 
 ## Logging
 
-Logs go to stderr. Set `RUST_LOG=info` (or `debug`) for verbose output:
+Logs go to stderr. Set `RUST_LOG=info` (or `debug`) for verbose output. The optional background update check uses the OS cache directory noted above and makes no project-directory changes:
 
 ```sh
 RUST_LOG=info fluidstate 2>fluidstate.log

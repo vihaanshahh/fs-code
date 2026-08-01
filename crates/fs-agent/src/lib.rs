@@ -1,98 +1,19 @@
-//! fs-agent — Claude CLI detection, environment setup, and session management.
-//!
-//! Ported from src-tauri/src/agent.rs. For the TUI, agents run interactively
-//! inside PTY terminals (no --print mode). This crate handles CLI discovery
-//! and building the clean environment for spawning.
+//! Shell discovery and a sanitized environment for FluidState terminal tabs.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-// ---------------------------------------------------------------------------
-// CLI detection — find the `claude` binary
-// ---------------------------------------------------------------------------
-
-pub fn find_claude_cli() -> Option<PathBuf> {
-    // 1. Env var override
-    if let Ok(p) = std::env::var("FLUIDSTATE_CLAUDE_PATH") {
-        let pb = PathBuf::from(&p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-
-    // 2. `which claude`
-    if let Ok(p) = which::which("claude") {
-        return Some(p);
-    }
-
-    // 3. Known install locations
-    let home = dirs::home_dir().unwrap_or_default();
-    let candidates = [
-        home.join(".claude/local/claude"),
-        home.join(".claude/bin/claude"),
-        home.join(".npm-global/bin/claude"),
-        PathBuf::from("/usr/local/bin/claude"),
-        PathBuf::from("/opt/homebrew/bin/claude"),
-    ];
-    for c in &candidates {
-        if c.exists() {
-            return Some(c.clone());
-        }
-    }
-
-    None
-}
-
-/// Find the codex CLI binary.
-pub fn find_codex_cli() -> Option<PathBuf> {
-    which::which("codex").ok()
-}
-
-/// Find the GitHub Copilot CLI binary.
-///
-/// Looks for the interactive `copilot` binary shipped by `@github/copilot`.
-/// Falls back to common npm global install locations.
-pub fn find_copilot_cli() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("FLUIDSTATE_COPILOT_PATH") {
-        let pb = PathBuf::from(&p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-
-    if let Ok(p) = which::which("copilot") {
-        return Some(p);
-    }
-
-    let home = dirs::home_dir().unwrap_or_default();
-    let candidates = [
-        home.join(".npm-global/bin/copilot"),
-        PathBuf::from("/usr/local/bin/copilot"),
-        PathBuf::from("/opt/homebrew/bin/copilot"),
-    ];
-    for c in &candidates {
-        if c.exists() {
-            return Some(c.clone());
-        }
-    }
-
-    None
-}
-
-// ---------------------------------------------------------------------------
-// Clean environment — filter out Electron/Vite vars, ensure PATH is complete
-// ---------------------------------------------------------------------------
-
+/// Build an environment for a child shell without variables injected by an
+/// Electron or package-manager host process.
 pub fn build_clean_env() -> HashMap<String, String> {
-    let mut env: HashMap<String, String> = std::env::vars()
-        .filter(|(k, _)| {
-            !k.starts_with("ELECTRON")
-                && k != "VITE_TAURI"
-                && k != "npm_config_cache"
-                && k != "npm_lifecycle_script"
+    let mut env = std::env::vars()
+        .filter(|(key, _)| {
+            !key.starts_with("ELECTRON")
+                && key != "VITE_TAURI"
+                && key != "npm_config_cache"
+                && key != "npm_lifecycle_script"
         })
-        .collect();
-
+        .collect::<HashMap<_, _>>();
     add_common_unix_paths(&mut env);
     env.insert("TERM".into(), "xterm-256color".into());
     env
@@ -100,149 +21,57 @@ pub fn build_clean_env() -> HashMap<String, String> {
 
 #[cfg(unix)]
 fn add_common_unix_paths(env: &mut HashMap<String, String>) {
-    // Ensure PATH includes common tool locations on macOS/Linux. Keep this
-    // Unix-only so Windows keeps its native Path casing and ';' separators.
     let path = env.get("PATH").cloned().unwrap_or_default();
-    let mut parts = Vec::new();
-    for extra in ["/usr/local/bin", "/opt/homebrew/bin"] {
-        if !path.split(':').any(|p| p == extra) {
-            parts.push(extra.to_string());
+    let mut additions = Vec::new();
+    for directory in ["/usr/local/bin", "/opt/homebrew/bin"] {
+        if !path.split(':').any(|item| item == directory) {
+            additions.push(directory.to_string());
         }
     }
-    if parts.is_empty() {
-        return;
-    }
-    if path.is_empty() {
-        env.insert("PATH".into(), parts.join(":"));
-    } else {
-        parts.push(path);
-        env.insert("PATH".into(), parts.join(":"));
+    if !additions.is_empty() {
+        additions.push(path);
+        env.insert("PATH".into(), additions.join(":"));
     }
 }
 
 #[cfg(windows)]
 fn add_common_unix_paths(_env: &mut HashMap<String, String>) {}
 
-// ---------------------------------------------------------------------------
-// Command builder — construct the claude CLI command for a PTY
-// ---------------------------------------------------------------------------
-
-/// Build arguments for launching claude interactively in a PTY.
-pub fn claude_args(resume_session: Option<&str>) -> Vec<String> {
-    let mut args = Vec::new();
-    if let Some(session_id) = resume_session {
-        args.push("--resume".into());
-        args.push(session_id.into());
-    }
-    args
-}
-
-/// Build arguments for launching codex interactively in a PTY.
-pub fn codex_args() -> Vec<String> {
-    vec!["--no-alt-screen".into()]
-}
-
-/// Build arguments for launching GitHub Copilot CLI interactively in a PTY.
-pub fn copilot_args() -> Vec<String> {
-    Vec::new()
-}
-
-/// Find the Gemini CLI binary.
-///
-/// Looks for the interactive `gemini` binary shipped by `@google/gemini-cli`.
-/// Falls back to common npm global install locations.
-pub fn find_gemini_cli() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("FLUIDSTATE_GEMINI_PATH") {
-        let pb = PathBuf::from(&p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-
-    if let Ok(p) = which::which("gemini") {
-        return Some(p);
-    }
-
-    let home = dirs::home_dir().unwrap_or_default();
-    let candidates = [
-        home.join(".npm-global/bin/gemini"),
-        PathBuf::from("/usr/local/bin/gemini"),
-        PathBuf::from("/opt/homebrew/bin/gemini"),
-    ];
-    for c in &candidates {
-        if c.exists() {
-            return Some(c.clone());
-        }
-    }
-
-    None
-}
-
-/// Build arguments for launching Gemini CLI interactively in a PTY.
-pub fn gemini_args() -> Vec<String> {
-    Vec::new()
-}
-
-// ---------------------------------------------------------------------------
-// Plain shell — for the "Terminal" provider, which spawns an interactive
-// shell instead of an AI agent so the user can run dev servers, linters, etc.
-// ---------------------------------------------------------------------------
-
 /// Find the user's interactive shell, falling back to common system shells.
 #[cfg(unix)]
 pub fn find_shell() -> PathBuf {
-    if let Ok(s) = std::env::var("SHELL") {
-        let pb = PathBuf::from(&s);
-        if pb.exists() {
-            return pb;
+    if let Ok(shell) = std::env::var("SHELL") {
+        let path = PathBuf::from(shell);
+        if path.exists() {
+            return path;
         }
     }
-    for c in [
-        "/bin/zsh",
-        "/bin/bash",
-        "/usr/bin/zsh",
-        "/usr/bin/bash",
-        "/bin/sh",
-    ] {
-        let pb = PathBuf::from(c);
-        if pb.exists() {
-            return pb;
+    for shell in ["/bin/zsh", "/bin/bash", "/usr/bin/zsh", "/usr/bin/bash", "/bin/sh"] {
+        let path = PathBuf::from(shell);
+        if path.exists() {
+            return path;
         }
     }
     PathBuf::from("/bin/sh")
 }
 
-/// Find the user's interactive shell on Windows.
 #[cfg(windows)]
 pub fn find_shell() -> PathBuf {
-    if let Ok(s) = std::env::var("COMSPEC") {
-        let pb = PathBuf::from(&s);
-        if pb.exists() {
-            return pb;
+    if let Ok(shell) = std::env::var("COMSPEC") {
+        let path = PathBuf::from(shell);
+        if path.exists() {
+            return path;
         }
     }
-    if let Ok(root) = std::env::var("SystemRoot") {
-        let cmd = PathBuf::from(root).join("System32").join("cmd.exe");
-        if cmd.exists() {
-            return cmd;
-        }
-    }
-    let cmd = PathBuf::from(r"C:\Windows\System32\cmd.exe");
-    if cmd.exists() {
-        return cmd;
-    }
-    PathBuf::from("cmd.exe")
+    PathBuf::from(r"C:\Windows\System32\cmd.exe")
 }
 
-/// Build arguments for launching an interactive shell in a PTY.
+/// Build arguments for a login shell so a new tab matches a regular terminal.
 #[cfg(unix)]
 pub fn shell_args() -> Vec<String> {
-    // `-l` gives a login shell so the user's profile (PATH, aliases, nvm, etc.)
-    // is loaded — same expectations as a fresh terminal tab.
     vec!["-l".into()]
 }
 
-/// Build arguments for launching an interactive shell in a PTY.
 #[cfg(windows)]
 pub fn shell_args() -> Vec<String> {
     Vec::new()

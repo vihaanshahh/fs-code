@@ -45,13 +45,16 @@ impl TerminalManager {
 
     /// Close and remove a terminal.
     pub fn close(&mut self, id: &str) {
-        // Dropping the TerminalInstance closes the writer, which causes
-        // the PTY reader thread to get EOF and reap the child process.
-        self.terminals.remove(id);
+        if let Some(mut terminal) = self.terminals.remove(id) {
+            terminal.shutdown();
+        }
     }
 
     /// Close all terminals.
     pub fn close_all(&mut self) {
+        for terminal in self.terminals.values_mut() {
+            terminal.shutdown();
+        }
         self.terminals.clear();
     }
 }

@@ -2,6 +2,7 @@
 
 use std::io::Read;
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener};
 use alacritty_terminal::grid::Dimensions;
@@ -57,10 +58,18 @@ pub struct TerminalInstance {
     pub term: Arc<Mutex<Term<EventProxy>>>,
 
     /// PTY master writer — used to send keyboard input to the child process.
-    writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    writer: Option<Arc<Mutex<Box<dyn std::io::Write + Send>>>>,
 
     /// PTY master handle — used for resize.
-    master: Box<dyn MasterPty + Send>,
+    master: Option<Box<dyn MasterPty + Send>>,
+
+    /// Kept outside the reader thread so closing a tab can terminate its
+    /// child even while the reader is blocked waiting for output.
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+
+    /// Joined during shutdown. A detached reader used to keep the terminal
+    /// grid, PTY reader, and child alive after a tab had been closed.
+    reader_thread: Option<JoinHandle<()>>,
 
     /// Current dimensions.
     pub cols: u16,
@@ -104,7 +113,7 @@ impl TerminalInstance {
             cmd.env(k, v);
         }
 
-        let mut child = pair.slave.spawn_command(cmd)?;
+        let child = Arc::new(Mutex::new(pair.slave.spawn_command(cmd)?));
 
         let writer = pair.master.take_writer()?;
         let writer_arc = Arc::new(Mutex::new(writer));
@@ -126,8 +135,9 @@ impl TerminalInstance {
         let term_for_reader = Arc::clone(&term_arc);
         let exited_flag = Arc::clone(&exited);
         let revision_flag = Arc::clone(&revision);
+        let child_for_reader = Arc::clone(&child);
 
-        std::thread::Builder::new()
+        let reader_thread = std::thread::Builder::new()
             .name("pty-reader".into())
             .spawn(move || {
                 let mut buf = [0u8; 4096];
@@ -150,6 +160,10 @@ impl TerminalInstance {
                     }
                 }
                 // Reap child process
+                let Ok(mut child) = child_for_reader.lock() else {
+                    exited_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                };
                 match child.try_wait() {
                     Ok(Some(_)) => {}
                     _ => {
@@ -162,8 +176,10 @@ impl TerminalInstance {
 
         Ok(Self {
             term: term_arc,
-            writer: writer_arc,
-            master: pair.master,
+            writer: Some(writer_arc),
+            master: Some(pair.master),
+            child,
+            reader_thread: Some(reader_thread),
             cols,
             rows,
             exited,
@@ -173,7 +189,11 @@ impl TerminalInstance {
 
     /// Write input data (keyboard bytes) to the PTY.
     pub fn write(&self, data: &[u8]) -> anyhow::Result<()> {
-        let mut w = self.writer.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let writer = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("terminal is closed"))?;
+        let mut w = writer.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         use std::io::Write;
         w.write_all(data)?;
         w.flush()?;
@@ -184,7 +204,11 @@ impl TerminalInstance {
     pub fn resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
         self.cols = cols;
         self.rows = rows;
-        self.master.resize(PtySize {
+        let master = self
+            .master
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("terminal is closed"))?;
+        master.resize(PtySize {
             rows,
             cols,
             pixel_width: 0,
@@ -208,6 +232,46 @@ impl TerminalInstance {
     /// Revision of the terminal contents, incremented on PTY output.
     pub fn revision(&self) -> u64 {
         self.revision.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Terminate the child process and synchronously reclaim its reader
+    /// thread. This is deliberately idempotent so manager teardown and Drop
+    /// can both safely use it.
+    pub fn shutdown(&mut self) {
+        if self.reader_thread.is_none() {
+            return;
+        }
+
+        // A shell can leave child processes holding the slave PTY. Terminate
+        // the whole foreground process group first, otherwise the reader may
+        // never receive EOF and retain its terminal grid indefinitely.
+        #[cfg(unix)]
+        if let Some(process_group) = self
+            .master
+            .as_ref()
+            .and_then(|master| master.process_group_leader())
+        {
+            unsafe {
+                libc::kill(-process_group, libc::SIGKILL);
+            }
+        }
+
+        if let Ok(mut child) = self.child.lock() {
+            if child.try_wait().ok().flatten().is_none() {
+                child.kill().ok();
+            }
+        }
+
+        // Closing both sides of the master unblocks the reader on every
+        // portable-pty backend before we wait for it to finish reaping.
+        self.writer.take();
+        self.master.take();
+
+        if let Some(thread) = self.reader_thread.take() {
+            let _ = thread.join();
+        }
+        self.exited
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// True if the underlying terminal is currently using the alternate screen
@@ -275,5 +339,35 @@ impl TerminalInstance {
             lines.pop();
         }
         lines.join("\n")
+    }
+}
+
+impl Drop for TerminalInstance {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::TerminalInstance;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn shutdown_reaps_a_shell_and_its_foreground_process_group() {
+        let args = vec!["-c".to_string(), "sleep 60 & wait".to_string()];
+        let mut terminal = TerminalInstance::spawn("/bin/sh", &args, ".", HashMap::new(), 80, 24)
+            .expect("spawn PTY shell");
+
+        let started = Instant::now();
+        terminal.shutdown();
+
+        assert!(terminal.has_exited());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "shutdown should not wait for the shell's background child"
+        );
+        assert!(terminal.write(b"x").is_err());
     }
 }

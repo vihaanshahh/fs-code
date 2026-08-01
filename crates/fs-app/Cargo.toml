@@ -2,6 +2,9 @@
 name = "fluidstate"
 version.workspace = true
 edition.workspace = true
+description = "A lightweight terminal-tab TUI with explicit PTY cleanup"
+license.workspace = true
+repository = "https://github.com/vihaanshahh/fs-code"
 
 [[bin]]
 name = "fluidstate"
