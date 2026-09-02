@@ -8,7 +8,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config as TermConfig, TermMode};
 use alacritty_terminal::vte::ansi;
 use alacritty_terminal::Term;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 // ---------------------------------------------------------------------------
 // EventProxy — required by Term, forwards events (bell, title, etc.)
@@ -57,10 +57,15 @@ pub struct TerminalInstance {
     pub term: Arc<Mutex<Term<EventProxy>>>,
 
     /// PTY master writer — used to send keyboard input to the child process.
-    writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    writer: Option<Arc<Mutex<Box<dyn std::io::Write + Send>>>>,
 
     /// PTY master handle — used for resize.
-    master: Box<dyn MasterPty + Send>,
+    master: Option<Box<dyn MasterPty + Send>>,
+
+    /// The local child is a provider in transient mode or `tmux attach` in
+    /// persistent mode.  It is always reaped before the reader is joined.
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    reader_thread: Option<std::thread::JoinHandle<()>>,
 
     /// Current dimensions.
     pub cols: u16,
@@ -104,7 +109,7 @@ impl TerminalInstance {
             cmd.env(k, v);
         }
 
-        let mut child = pair.slave.spawn_command(cmd)?;
+        let child: Arc<Mutex<Box<dyn Child + Send + Sync>>> = Arc::new(Mutex::new(pair.slave.spawn_command(cmd)?));
 
         let writer = pair.master.take_writer()?;
         let writer_arc = Arc::new(Mutex::new(writer));
@@ -114,7 +119,12 @@ impl TerminalInstance {
             cols: cols as usize,
             rows: rows as usize,
         };
-        let config = TermConfig::default();
+        // Keep the renderer's own history bounded as well as tmux's history.
+        // Otherwise a noisy long-lived pane could grow the UI process forever.
+        let config = TermConfig {
+            scrolling_history: 100_000,
+            ..TermConfig::default()
+        };
         let term = Term::new(config, &size, EventProxy);
         let term_arc = Arc::new(Mutex::new(term));
 
@@ -127,7 +137,7 @@ impl TerminalInstance {
         let exited_flag = Arc::clone(&exited);
         let revision_flag = Arc::clone(&revision);
 
-        std::thread::Builder::new()
+        let reader_thread = std::thread::Builder::new()
             .name("pty-reader".into())
             .spawn(move || {
                 let mut buf = [0u8; 4096];
@@ -149,21 +159,15 @@ impl TerminalInstance {
                         Err(_) => break,
                     }
                 }
-                // Reap child process
-                match child.try_wait() {
-                    Ok(Some(_)) => {}
-                    _ => {
-                        child.kill().ok();
-                        child.wait().ok();
-                    }
-                }
                 exited_flag.store(true, std::sync::atomic::Ordering::Relaxed);
             })?;
 
         Ok(Self {
             term: term_arc,
-            writer: writer_arc,
-            master: pair.master,
+            writer: Some(writer_arc),
+            master: Some(pair.master),
+            child,
+            reader_thread: Some(reader_thread),
             cols,
             rows,
             exited,
@@ -173,7 +177,8 @@ impl TerminalInstance {
 
     /// Write input data (keyboard bytes) to the PTY.
     pub fn write(&self, data: &[u8]) -> anyhow::Result<()> {
-        let mut w = self.writer.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let writer = self.writer.as_ref().ok_or_else(|| anyhow::anyhow!("terminal is closed"))?;
+        let mut w = writer.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         use std::io::Write;
         w.write_all(data)?;
         w.flush()?;
@@ -184,7 +189,8 @@ impl TerminalInstance {
     pub fn resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
         self.cols = cols;
         self.rows = rows;
-        self.master.resize(PtySize {
+        let master = self.master.as_mut().ok_or_else(|| anyhow::anyhow!("terminal is closed"))?;
+        master.resize(PtySize {
             rows,
             cols,
             pixel_width: 0,
@@ -202,7 +208,16 @@ impl TerminalInstance {
 
     /// Check if the PTY process has exited.
     pub fn has_exited(&self) -> bool {
-        self.exited.load(std::sync::atomic::Ordering::Relaxed)
+        if self.exited.load(std::sync::atomic::Ordering::Acquire) {
+            return true;
+        }
+        let exited = self.child.lock().ok()
+            .and_then(|mut child| child.try_wait().ok())
+            .flatten().is_some();
+        if exited {
+            self.exited.store(true, std::sync::atomic::Ordering::Release);
+        }
+        exited
     }
 
     /// Revision of the terminal contents, incremented on PTY output.
@@ -271,9 +286,67 @@ impl TerminalInstance {
             lines.push(line.trim_end().to_string());
         }
         // Remove trailing empty lines
-        while lines.last().map_or(false, |l| l.is_empty()) {
+        while lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }
         lines.join("\n")
+    }
+
+    /// Deterministically stop the local PTY child and its reader.  For a tmux
+    /// terminal this kills only `tmux attach-session`, which detaches from the
+    /// server and leaves the managed session/process alive.
+    pub fn shutdown(&mut self) {
+        self.writer.take();
+        if let Ok(mut child) = self.child.lock() {
+            if child.try_wait().ok().flatten().is_none() {
+                child.kill().ok();
+                child.wait().ok();
+            }
+        }
+        self.master.take();
+        if let Some(reader) = self.reader_thread.take() {
+            let _ = reader.join();
+        }
+        self.exited.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Drop for TerminalInstance {
+    fn drop(&mut self) { self.shutdown(); }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_reaps_child_and_joins_reader() {
+        let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
+        env.insert("TERM".into(), "xterm-256color".into());
+        let cwd = std::env::current_dir().unwrap();
+        let mut terminal = TerminalInstance::spawn(
+            "/bin/sh", &["-c".into(), "printf ready; sleep 30".into()],
+            cwd.to_str().unwrap(), env, 80, 24,
+        ).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        terminal.shutdown();
+        assert!(terminal.has_exited());
+        assert!(terminal.reader_thread.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn repeated_shutdown_does_not_accumulate_workers() {
+        let baseline = std::fs::read_dir("/proc/self/task").unwrap().count();
+        let cwd = std::env::current_dir().unwrap();
+        for _ in 0..20 {
+            let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
+            env.insert("TERM".into(), "xterm-256color".into());
+            let mut terminal = TerminalInstance::spawn(
+                "/bin/sh", &["-c".into(), "sleep 30".into()], cwd.to_str().unwrap(), env, 80, 24,
+            ).unwrap();
+            terminal.shutdown();
+        }
+        assert!(std::fs::read_dir("/proc/self/task").unwrap().count() <= baseline + 1);
     }
 }

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install tmux and leak tools
+        run: sudo apt-get update && sudo apt-get install -y tmux valgrind lsof
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace -- --test-threads=1
+      # Memcheck is deliberately a gate: do not add suppressions for project
+      # allocations.  This catches the PTY client/reader lifecycle regressions.
+      - name: Memcheck PTY lifecycle
+        run: |
+          cargo test -p fs-pty --no-run
+          TEST_BIN="$(find target/debug/deps -maxdepth 1 -type f -name 'fs_pty-*' -perm -111 | head -n 1)"
+          test -n "$TEST_BIN"
+          valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all \
+            --errors-for-leak-kinds=definite,indirect,possible --error-exitcode=99 \
+            "$TEST_BIN" shutdown_reaps_child_and_joins_reader --test-threads=1
+
+  sanitizer:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Address/leak sanitizer lifecycle run
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+        run: cargo -Zbuild-std test -p fs-pty shutdown_reaps_child_and_joins_reader --target x86_64-unknown-linux-gnu

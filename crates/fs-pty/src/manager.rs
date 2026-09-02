@@ -10,6 +10,10 @@ pub struct TerminalManager {
     terminals: HashMap<TerminalId, TerminalInstance>,
 }
 
+impl Default for TerminalManager {
+    fn default() -> Self { Self::new() }
+}
+
 impl TerminalManager {
     pub fn new() -> Self {
         Self {
@@ -18,6 +22,7 @@ impl TerminalManager {
     }
 
     /// Create a new terminal running the given program.
+    #[allow(clippy::too_many_arguments)] // Mirrors TerminalInstance::spawn's PTY contract.
     pub fn create(
         &mut self,
         id: TerminalId,
@@ -29,7 +34,9 @@ impl TerminalManager {
         rows: u16,
     ) -> anyhow::Result<()> {
         let instance = TerminalInstance::spawn(program, args, cwd, env, cols, rows)?;
-        self.terminals.insert(id, instance);
+        if let Some(mut previous) = self.terminals.insert(id, instance) {
+            previous.shutdown();
+        }
         Ok(())
     }
 
@@ -45,13 +52,15 @@ impl TerminalManager {
 
     /// Close and remove a terminal.
     pub fn close(&mut self, id: &str) {
-        // Dropping the TerminalInstance closes the writer, which causes
-        // the PTY reader thread to get EOF and reap the child process.
-        self.terminals.remove(id);
+        if let Some(mut terminal) = self.terminals.remove(id) {
+            terminal.shutdown();
+        }
     }
 
     /// Close all terminals.
     pub fn close_all(&mut self) {
-        self.terminals.clear();
+        for (_, mut terminal) in self.terminals.drain() {
+            terminal.shutdown();
+        }
     }
 }

@@ -406,6 +406,7 @@ dependencies = [
  "portable-pty",
  "tokio",
  "tracing",
+ "which",
 ]
 
 [[package]]
@@ -415,10 +416,13 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "crossterm",
+ "dirs",
  "fs-agent",
  "fs-core",
  "fs-pty",
  "ratatui",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "unicode-width 0.2.0",

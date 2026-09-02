@@ -15,6 +15,7 @@ mod grid;
 mod highlight;
 mod palette;
 mod render;
+mod workspace;
 pub mod theme;
 
 pub use app::App;

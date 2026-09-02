@@ -10,6 +10,8 @@
 
 mod instance;
 mod manager;
+mod tmux;
 
 pub use instance::{EventProxy, TerminalInstance};
 pub use manager::TerminalManager;
+pub use tmux::TmuxWorkspace;

@@ -23,6 +23,12 @@ cd your-project
 fluidstate
 ```
 
+On macOS and Linux with `tmux` installed, FluidState keeps a private tmux
+workspace for each project. Closing FluidState detaches from active agents;
+launching it again in the same project reconnects to them. Existing personal
+tmux sessions are never touched. Systems without tmux keep the transient
+terminal behavior.
+
 For AI providers, install and sign in to the relevant CLI. The Terminal provider uses your existing shell and does not require a provider login:
 
 | Provider | CLI | Install |

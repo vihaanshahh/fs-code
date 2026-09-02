@@ -21,8 +21,9 @@ pub type TerminalId = String;
 // Provider
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Provider {
+    #[default]
     Claude,
     Codex,
     Copilot,
@@ -52,12 +53,6 @@ impl Provider {
     }
 }
 
-impl Default for Provider {
-    fn default() -> Self {
-        Self::Claude
-    }
-}
-
 impl std::fmt::Display for Provider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
@@ -74,6 +69,10 @@ pub struct AgentDescriptor {
     pub name: String,
     pub cwd: String,
     pub provider: Provider,
+    /// Private tmux session backing this agent. `None` keeps the legacy,
+    /// transient PTY behaviour on platforms without tmux.
+    #[serde(default)]
+    pub tmux_session: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

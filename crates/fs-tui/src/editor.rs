@@ -366,6 +366,17 @@ pub struct Editor {
     pub active_tab: usize,
 }
 
+/// Disk-backed editor state safe to retain between FluidState launches.
+/// Deliberately excludes buffer text: unsaved edits must never be silently
+/// written into FluidState's workspace store.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedEditorTab {
+    pub path: String,
+    pub cursor: (usize, usize),
+    pub scroll: usize,
+    pub scroll_x: usize,
+}
+
 /// Per-tab state snapshot for multi-tab support.
 /// Each tab remembers its file path, lines, cursor, scroll, and dirty flag.
 #[allow(dead_code)]
@@ -460,6 +471,37 @@ impl Editor {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub fn persisted_tabs(&mut self) -> (Vec<PersistedEditorTab>, usize) {
+        if self.open && !self.path.is_empty() {
+            self.save_current_tab();
+        }
+        let tabs = self.tabs.iter().filter(|tab| !tab.dirty).map(|tab| PersistedEditorTab {
+            path: tab.path.clone(), cursor: tab.cursor, scroll: tab.scroll, scroll_x: tab.scroll_x,
+        }).collect();
+        let active = self.active_tab;
+        if self.open && !self.tabs.is_empty() {
+            self.restore_active_tab();
+        }
+        (tabs, active)
+    }
+
+    pub fn restore_persisted_tabs(&mut self, tabs: &[PersistedEditorTab], active: usize) {
+        for tab in tabs {
+            if self.open_file(&tab.path).is_ok() {
+                self.cursor = tab.cursor;
+                self.scroll = tab.scroll;
+                self.scroll_x = tab.scroll_x;
+                self.ensure_invariants();
+                self.save_current_tab();
+            }
+        }
+        if !self.tabs.is_empty() {
+            self.active_tab = active.min(self.tabs.len() - 1);
+            self.restore_active_tab();
+            self.open = true;
+        }
     }
 
     pub fn is_prompt_open(&self) -> bool {

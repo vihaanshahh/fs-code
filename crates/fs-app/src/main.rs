@@ -50,7 +50,9 @@ fn main() -> anyhow::Result<()> {
         // an update is available.
         let update_handle = tokio::spawn(async { fs_update::check_background().await });
 
-        let mut app = fs_tui::App::new();
+        let project = args.first().filter(|arg| !arg.starts_with('-')).cloned()
+            .unwrap_or_else(|| ".".into());
+        let mut app = fs_tui::App::with_workspace(project);
         let result = app.run().await;
 
         // After the TUI exits, show update notice if one came back.

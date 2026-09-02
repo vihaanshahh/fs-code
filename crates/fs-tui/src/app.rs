@@ -17,6 +17,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use fs_agent;
 use fs_core::{uid, AgentDescriptor, AgentId, Config, KeyAction, Provider};
 use fs_pty::TerminalManager;
+use fs_pty::TmuxWorkspace;
 
 use crate::clipboard;
 use crate::deps::DepsViewer;
@@ -28,6 +29,7 @@ use crate::grid;
 use crate::palette::Palette;
 use crate::render;
 use crate::theme::{self, Theme, ThemeMode};
+use crate::workspace::{Workspace, WorkspaceState};
 
 // ---------------------------------------------------------------------------
 // Pane text selection — click-and-drag in agent terminal panes
@@ -445,6 +447,10 @@ fn parse_default_agent_number(name: &str) -> Option<u32> {
 pub struct App {
     agents: Vec<AgentDescriptor>,
     terminal_mgr: TerminalManager,
+    /// Durable UI state and the private tmux server for this project. Both are
+    /// absent in transient mode (tmux unavailable or unit tests).
+    workspace: Option<Workspace>,
+    tmux_workspace: Option<TmuxWorkspace>,
     /// Maps agent ID → terminal ID
     agent_terminals: HashMap<AgentId, String>,
     /// Maps agent ID → scroll offset (lines scrolled back from live view)
@@ -508,6 +514,8 @@ impl App {
         Self {
             agents: Vec::new(),
             terminal_mgr: TerminalManager::new(),
+            workspace: None,
+            tmux_workspace: None,
             agent_terminals: HashMap::new(),
             scroll_offsets: HashMap::new(),
             focused: 0,
@@ -543,6 +551,59 @@ impl App {
             ai_tx,
             last_terminal_revisions: HashMap::new(),
             last_layout_sig: None,
+        }
+    }
+
+    /// Open the workspace associated with a project directory.  This is kept
+    /// separate from `new` so focused UI tests remain entirely transient.
+    pub fn with_workspace(root: impl AsRef<std::path::Path>) -> Self {
+        let mut app = Self::new();
+        let workspace = Workspace::open(root);
+        app.tmux_workspace = TmuxWorkspace::available()
+            .then(|| TmuxWorkspace::new(workspace.key()).ok()).flatten();
+        if let Some(state) = workspace.load() {
+            app.agents = state.agents;
+            app.focused = state.focused.min(app.agents.len().saturating_sub(1));
+            app.sidebar_open = state.sidebar_open;
+            app.editor_split_pct = state.editor_split_pct.clamp(10, 90);
+            app.editor_focus_mode = state.editor_focus_mode;
+            app.editor.restore_persisted_tabs(&state.editor_tabs, state.active_editor_tab);
+            let env = fs_agent::build_clean_env();
+            if let Some(tmux) = app.tmux_workspace.clone() {
+                for agent in &app.agents {
+                    let Some(session) = agent.tmux_session.as_deref() else { continue };
+                    if !tmux.session_exists(session) { continue; }
+                    let terminal_id = uid();
+                    let (program, args) = tmux.attach_command(session);
+                    if app.terminal_mgr.create(terminal_id.clone(), &program, &args, &agent.cwd, env.clone(), 80, 22).is_ok() {
+                        app.agent_terminals.insert(agent.id.clone(), terminal_id);
+                    }
+                }
+            }
+        }
+        app.workspace = Some(workspace);
+        if app.tmux_workspace.is_none() {
+            app.set_status("tmux unavailable — terminals are transient on this system");
+        }
+        app
+    }
+
+    fn persist_workspace(&mut self) {
+        let Some(workspace) = self.workspace.clone() else { return };
+        let (editor_tabs, active_editor_tab) = self.editor.persisted_tabs();
+        let state = WorkspaceState {
+            schema_version: 1,
+            root: workspace.root().to_string(),
+            agents: self.agents.clone(),
+            focused: self.focused,
+            sidebar_open: self.sidebar_open,
+            editor_split_pct: self.editor_split_pct,
+            editor_focus_mode: self.editor_focus_mode,
+            editor_tabs,
+            active_editor_tab,
+        };
+        if let Err(error) = workspace.save(&state) {
+            self.set_status(format!("Could not save workspace: {error}"));
         }
     }
 
@@ -597,6 +658,7 @@ impl App {
         io::stdout().execute(DisableMouseCapture)?;
         terminal::disable_raw_mode()?;
         io::stdout().execute(LeaveAlternateScreen)?;
+        self.persist_workspace();
         self.terminal_mgr.close_all();
 
         result
@@ -666,6 +728,7 @@ impl App {
         if let Ok((c, r)) = crossterm::terminal::size() {
             let _ = self.handle_resize(c, r);
         }
+        self.persist_workspace();
     }
 
     /// Copy `text` to the system clipboard. Returns `true` on success;
@@ -885,7 +948,7 @@ impl App {
         }
         let mut reap_idxs: Vec<usize> = Vec::new();
         for (i, agent) in self.agents.iter().enumerate() {
-            if agent.provider != Provider::Terminal {
+            if agent.provider != Provider::Terminal || agent.tmux_session.is_some() {
                 continue;
             }
             let Some(tid) = self.agent_terminals.get(&agent.id) else { continue };
@@ -2158,6 +2221,7 @@ impl App {
                 } else if idx < self.agents.len() {
                     self.agents[idx].name = new_name.clone();
                     self.set_status(format!("Renamed to {}", new_name));
+                    self.persist_workspace();
                 }
             }
             KeyCode::Backspace => self.rename_agent.backspace(),
@@ -2983,6 +3047,7 @@ impl App {
         // Sidebar changes available width — resize all agent panes.
         let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
         self.handle_resize(term_cols, term_rows).ok();
+        self.persist_workspace();
     }
 
     fn handle_sidebar_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
@@ -3210,6 +3275,13 @@ impl App {
                 // Account for border (2) on each side
                 let pane_rows = area.height.saturating_sub(2);
                 let pane_cols = area.width.saturating_sub(2);
+                // A detached/zero-sized host PTY can transiently produce a
+                // zero-sized ratatui area. alacritty cannot resize a grid to
+                // zero lines or columns; retain the last valid dimensions
+                // until the terminal reports a usable size again.
+                if pane_rows == 0 || pane_cols == 0 {
+                    continue;
+                }
                 if let Some(tid) = self.agent_terminals.get(&agent.id) {
                     if let Some(inst) = self.terminal_mgr.get_mut(tid) {
                         inst.resize(pane_cols, pane_rows).ok();
@@ -3415,15 +3487,19 @@ impl App {
         let env = fs_agent::build_clean_env();
 
         // Start with a placeholder size; handle_resize will correct all panes after layout.
-        self.terminal_mgr.create(
-            terminal_id.clone(),
-            &program,
-            &args,
-            &cwd,
-            env,
-            80,
-            22,
-        )?;
+        let tmux_session = if let Some(tmux) = self.tmux_workspace.clone() {
+            let session = tmux.session_name(&id);
+            if let Err(error) = tmux.ensure_session(&session, &program, &args, &cwd, &env, &id, provider.short(), &name) {
+                self.set_status(format!("Could not create persistent tmux session: {error}"));
+                return Ok(());
+            }
+            let (attach_program, attach_args) = tmux.attach_command(&session);
+            self.terminal_mgr.create(terminal_id.clone(), &attach_program, &attach_args, &cwd, env, 80, 22)?;
+            Some(session)
+        } else {
+            self.terminal_mgr.create(terminal_id.clone(), &program, &args, &cwd, env, 80, 22)?;
+            None
+        };
 
         self.agent_terminals.insert(id.clone(), terminal_id);
 
@@ -3437,6 +3513,7 @@ impl App {
             name,
             cwd,
             provider,
+            tmux_session,
         });
 
         let old_cwd = self.current_cwd();
@@ -3448,6 +3525,7 @@ impl App {
         self.handle_resize(term_cols, term_rows)?;
 
         self.set_status(format!("{} agent created in {}", provider.label(), folder));
+        self.persist_workspace();
         Ok(())
     }
 
@@ -3476,6 +3554,9 @@ impl App {
             self.terminal_mgr.close(&tid);
             self.last_terminal_revisions.remove(&tid);
         }
+        if let (Some(tmux), Some(session)) = (&self.tmux_workspace, agent.tmux_session.as_deref()) {
+            tmux.close_session(session);
+        }
         self.scroll_offsets.remove(&agent.id);
 
         // Renumber default-named agents only — custom names (set via Ctrl+R)
@@ -3501,6 +3582,7 @@ impl App {
             // Falls back to process cwd — refresh sidebar if it's open
             self.refresh_sidebar_if_cwd_changed(&old_cwd);
         }
+        self.persist_workspace();
     }
 
     /// Spawn `claude --print` in a background thread to apply an AI edit.
@@ -3583,6 +3665,8 @@ impl App {
     fn current_cwd(&self) -> String {
         if let Some(agent) = self.agents.get(self.focused) {
             agent.cwd.clone()
+        } else if let Some(workspace) = &self.workspace {
+            workspace.root().to_string()
         } else {
             std::env::current_dir()
                 .unwrap_or_default()
