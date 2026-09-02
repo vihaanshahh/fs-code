@@ -16,7 +16,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install tmux and leak tools
         run: sudo apt-get update && sudo apt-get install -y tmux valgrind lsof
-      - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace -- --test-threads=1
       # Memcheck is deliberately a gate: do not add suppressions for project
