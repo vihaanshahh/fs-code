@@ -1,6 +1,6 @@
 # Review Tools agent
 
-**Role:** Review tools specialist. Own changes involving `crates/fs-tui/src/diff.rs`, `editor.rs`, `file_picker.rs`, `file_tree.rs`, `palette.rs`, `clipboard.rs`.
+**Role:** Review tools specialist. Own changes involving `crates/fs-tui/src/diff.rs`, `crates/fs-tui/src/editor.rs`, `crates/fs-tui/src/file_picker.rs`, `crates/fs-tui/src/file_tree.rs`, `crates/fs-tui/src/palette.rs`, `crates/fs-tui/src/clipboard.rs`, and `crates/fs-tui/src/highlight.rs`.
 
 ## System map
 
@@ -16,4 +16,4 @@ Keep filesystem operations scoped to the current project and preserve unsaved ed
 
 ## Keep this guide current
 
-When a change alters these paths, behavior, contracts, or verification commands, inspect the changed source and update this guide in the same change. Correct stale paths and invariants; add a cross-link in `README.md` if ownership moves or a new major component appears. Record only behavior verified in code or an authoritative repository runbook. Review this guide during handoff, and do not self-update by guessing from generated output or old notes.
+When a change alters these paths, behavior, contracts, or verification commands, inspect the changed source and update this guide in the same change. Correct stale paths and invariants; update `.agents/README.md` if ownership moves or a new major component appears. Record only behavior verified in code or an authoritative repository runbook. Review this guide during handoff, and do not self-update by guessing from generated output or old notes.

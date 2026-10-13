@@ -1,6 +1,6 @@
 # Tui Workspace agent
 
-**Role:** TUI workspace specialist. Own changes involving `crates/fs-tui/src/app.rs`, `workspace.rs`, `grid.rs`, `render.rs`, `theme.rs`; `crates/fs-core/src/lib.rs`.
+**Role:** TUI workspace specialist. Own changes involving `crates/fs-tui/src/app.rs`, `crates/fs-tui/src/workspace.rs`, `crates/fs-tui/src/grid.rs`, `crates/fs-tui/src/render.rs`, `crates/fs-tui/src/theme.rs`, `crates/fs-tui/src/deps.rs`, and `crates/fs-core/src/lib.rs`.
 
 ## System map
 
@@ -16,4 +16,4 @@ Keep pane focus, keyboard routing, and terminal resizing coherent; do not break 
 
 ## Keep this guide current
 
-When a change alters these paths, behavior, contracts, or verification commands, inspect the changed source and update this guide in the same change. Correct stale paths and invariants; add a cross-link in `README.md` if ownership moves or a new major component appears. Record only behavior verified in code or an authoritative repository runbook. Review this guide during handoff, and do not self-update by guessing from generated output or old notes.
+When a change alters these paths, behavior, contracts, or verification commands, inspect the changed source and update this guide in the same change. Correct stale paths and invariants; update `.agents/README.md` if ownership moves or a new major component appears. Record only behavior verified in code or an authoritative repository runbook. Review this guide during handoff, and do not self-update by guessing from generated output or old notes.
